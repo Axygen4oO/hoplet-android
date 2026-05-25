@@ -275,6 +275,54 @@ func refreshWrapKeysFromDBLocked() error {
 	return serverWrapKeys.SetPasswords(db.MainPassword, passwords)
 }
 
+func reloadDB(wgDev *device.Device) error {
+	dbMutex.Lock()
+	defer dbMutex.Unlock()
+
+	data, err := os.ReadFile(dbFile)
+	if err != nil {
+		return fmt.Errorf("read db file: %w", err)
+	}
+
+	oldDB := db
+
+	newDB := &Database{
+		Passwords: make(map[string]*PasswordEntry),
+		Devices:   make(map[string]*ClientDevice),
+	}
+	if err := json.Unmarshal(data, newDB); err != nil {
+		return fmt.Errorf("parse db json: %w", err)
+	}
+
+	newDB.MainPassword = oldDB.MainPassword
+	newDB.AdminID = oldDB.AdminID
+	newDB.BotToken = oldDB.BotToken
+
+	db = newDB
+
+	// Очищаем истёкшие
+	cleanupExpiredPasswordsLocked(wgDev)
+
+	// Находим удаленные устройства и удаляем их из WireGuard
+	for devID, oldDev := range oldDB.Devices {
+		if _, exists := db.Devices[devID]; !exists {
+			removePeerFromWG(wgDev, oldDev)
+		}
+	}
+
+	// Синхронизируем новые/оставшиеся устройства с WireGuard
+	for _, dev := range db.Devices {
+		upsertPeerInWG(wgDev, dev)
+	}
+
+	// Обновляем криптографические WRAP-ключи в памяти
+	if err := refreshWrapKeysFromDBLocked(); err != nil {
+		return fmt.Errorf("refresh wrap keys: %w", err)
+	}
+
+	return nil
+}
+
 func initDB(dir, mainPass, adminID, botToken string) {
 	dbFile = filepath.Join(dir, "passwords.json")
 	db = &Database{
@@ -1140,13 +1188,28 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
+	sig := make(chan os.Signal, 2)
+	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
+	var wgDev *device.Device
 	go func() {
-		<-sig
-		cancel()
-		time.Sleep(2 * time.Second)
-		os.Exit(0)
+		for s := range sig {
+			if s == syscall.SIGHUP {
+				log.Println("[SYS] Получен сигнал SIGHUP. Перезагрузка базы паролей...")
+				if wgDev == nil {
+					log.Println("[ERR] WireGuard еще не запущен, пропуск SIGHUP")
+					continue
+				}
+				if err := reloadDB(wgDev); err != nil {
+					log.Printf("[ERR] Ошибка перезагрузки базы паролей: %v", err)
+				} else {
+					log.Println("[SYS] База паролей успешно перезагружена! Активных ключей в памяти:", serverWrapKeys.Count())
+				}
+			} else {
+				cancel()
+				time.Sleep(2 * time.Second)
+				os.Exit(0)
+			}
+		}
 	}()
 
 	initDB(*configDir, *mainPass, *adminID, *botToken)
@@ -1158,7 +1221,7 @@ func main() {
 
 	enableBBR()
 
-	wgDev, err := startUserspaceWG(keys, *wgPort)
+	wgDev, err = startUserspaceWG(keys, *wgPort)
 	if err != nil {
 		log.Fatalf("[WG] Запуск: %v", err)
 	}
@@ -1676,7 +1739,7 @@ func (c *wrapPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
 			}
 			return 0, addr, uErr
 		}
-		c.key = key
+		c.key = append([]byte(nil), key...) // Клонируем ключ в независимую память!
 		c.obfsCfg = NewObfsConfig()
 		c.obfsWrite = NewObfsState()
 		atomic.StoreInt32(&c.selected, 1)
@@ -1688,6 +1751,16 @@ func (c *wrapPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
 
 	m, uErr := obfsUnwrapPacket(c.key, raw, p)
 	if uErr != nil {
+		// Если расшифровка старым ключом провалилась — возможно, пароль обновился!
+		// Пробуем пере-верифицировать пакет по всем активным ключам
+		key, m2, uErr2 := c.keys.Unwrap(raw, p)
+		if uErr2 == nil {
+			c.key = append([]byte(nil), key...) // На лету обновляем ключ сессии!
+			c.obfsCfg = NewObfsConfig()
+			c.obfsWrite = NewObfsState()
+			log.Printf("[WRAP] Обновлен ключ на лету для %s (пароль изменился/обновился)", addr.String())
+			return m2, addr, nil
+		}
 		return 0, addr, fmt.Errorf("obfs unwrap: %w", uErr)
 	}
 	return m, addr, nil
