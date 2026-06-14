@@ -512,7 +512,7 @@ fun ProfilesTab(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "Использовать общий хеш",
+                            text = "Использовать общие хеши",
                             modifier = Modifier.weight(1f),
                             style = MaterialTheme.typography.bodyMedium
                         )
