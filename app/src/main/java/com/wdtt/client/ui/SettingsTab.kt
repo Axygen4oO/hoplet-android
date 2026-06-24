@@ -268,13 +268,13 @@ fun SettingsTabContent(
         vkLoggedIn = VkAuthWebViewManager.hasVkSessionCookie()
     }
 
-    LaunchedEffect(currentProfileId, savedPeer, savedWorkers, savedListenPort) {
+    LaunchedEffect(currentProfileId, savedPeer, savedWorkers, savedListenPort, vkAccountAuth, combinedHashes) {
         if (currentProfileId.isBlank()) return@LaunchedEffect
         if (savedPeer.isNotBlank()) peerInput = savedPeer
         portInput = savedListenPort.toString()
         val hashesCount = combinedHashes.split(",").filter { it.isNotBlank() }.size.coerceAtLeast(1)
         val maxW = if (vkAccountAuth) SettingsStore.VK_ACCOUNT_MAX_WORKERS.toFloat() else (hashesCount * 27).toFloat()
-        workersInput = roundToGroup(savedWorkers.toFloat(), maxW)
+        workersInput = roundToGroup(savedWorkers.toFloat(), maxW, vkAccountAuth)
     }
 
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -537,27 +537,42 @@ fun SettingsTabContent(
     }
 
     if (showAppSettingsDialog) {
-        AlertDialog(
+        Dialog(
             onDismissRequest = { showAppSettingsDialog = false },
-            title = {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("Настройки", style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold))
-                    IconButton(onClick = { showAppSettingsDialog = false }) {
-                        Icon(Icons.Default.Close, contentDescription = "Закрыть")
+            properties = DialogProperties(
+                usePlatformDefaultWidth = false,
+                dismissOnBackPress = true,
+                dismissOnClickOutside = true
+            )
+        ) {
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp)
+                    .navigationBarsPadding(),
+                shape = RoundedCornerShape(28.dp),
+                color = MaterialTheme.colorScheme.surface,
+                tonalElevation = 6.dp
+            ) {
+                Column(modifier = Modifier.padding(20.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Настройки", style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold))
+                        IconButton(onClick = { showAppSettingsDialog = false }) {
+                            Icon(Icons.Default.Close, contentDescription = "Закрыть")
+                        }
                     }
-                }
-            },
-            text = {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(16.dp)
-                ) {
+                    Spacer(Modifier.height(12.dp))
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 480.dp)
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(16.dp)
+                    ) {
                     // ═══ Раздел: Оформление ═══
                     Text(
                         "Оформление",
@@ -1031,16 +1046,18 @@ fun SettingsTabContent(
 
                         Spacer(Modifier.height(12.dp))
                     }
+                    }
+                    Spacer(Modifier.height(16.dp))
+                    Button(
+                        onClick = { showAppSettingsDialog = false },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Text("Готово")
+                    }
                 }
-            },
-            confirmButton = {
-                TextButton(onClick = { showAppSettingsDialog = false }) {
-                    Text("Готово")
-                }
-            },
-            properties = DialogProperties(usePlatformDefaultWidth = false),
-            modifier = Modifier.padding(16.dp).fillMaxWidth()
-        )
+            }
+        }
     }
 
     Column(
@@ -1160,7 +1177,8 @@ fun SettingsTabContent(
                                         portInput = settingsStore.listenPort.first().toString()
                                         workersInput = roundToGroup(
                                             settingsStore.workersPerHash.first().toFloat(),
-                                            dynamicMaxWorkers
+                                            dynamicMaxWorkers,
+                                            vkAccountAuth
                                         )
 
                                         if (tunnelRunning) {
@@ -1815,8 +1833,11 @@ private fun InfoSection(title: String, body: String) {
     Spacer(Modifier.height(4.dp))
 }
 
-// Округление до ближайшего кратного WORKERS_PER_GROUP
-private fun roundToGroup(value: Float, maxW: Float = 96f): Float {
+// Округление до ближайшего кратного WORKERS_PER_GROUP (анонимный режим) или 1..max (аккаунт VK)
+private fun roundToGroup(value: Float, maxW: Float = 96f, accountMode: Boolean = false): Float {
+    if (accountMode || maxW < WORKERS_PER_GROUP) {
+        return value.coerceIn(1f, maxW.coerceAtLeast(1f))
+    }
     val rounded = (Math.round(value / WORKERS_PER_GROUP) * WORKERS_PER_GROUP).toFloat()
     return rounded.coerceIn(WORKERS_PER_GROUP.toFloat(), maxW)
 }
