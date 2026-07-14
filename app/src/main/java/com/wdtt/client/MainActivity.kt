@@ -6,7 +6,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
-import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
@@ -71,6 +70,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.platform.LocalContext
 import com.wdtt.client.ui.AppUpdateDialog
+import com.wdtt.client.ui.SupportNoticeDialog
 import com.wdtt.client.ui.ProfilesTab
 import com.wdtt.client.ui.FloatingToolbar
 import com.wdtt.client.ui.LogsTab
@@ -89,12 +89,8 @@ import kotlin.math.sin
 
 class MainActivity : ComponentActivity() {
 
-    private val vpnLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
-        // VPN permission dialog finished
-    }
-
     private val batteryLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
-        checkAndRequestVpn()
+        // Диалог оптимизации батареи закрыт — VPN-разрешение запрашиваем только при подключении.
     }
 
     private val notificationLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
@@ -112,6 +108,9 @@ class MainActivity : ComponentActivity() {
 
         // URI файла .qwdtt, ожидающего импорта
         val pendingFileUri = mutableStateOf<android.net.Uri?>(null)
+
+        // Открыть экран создания профиля из ярлыка лаунчера
+        val pendingAddProfile = mutableStateOf(false)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -121,10 +120,15 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleIncomingIntent(intent: Intent?) {
-        if (intent?.action == Intent.ACTION_VIEW) {
-            val uri = intent.data
-            if (uri != null) {
-                pendingFileUri.value = uri
+        when (intent?.action) {
+            AppShortcuts.ACTION_ADD_PROFILE -> {
+                pendingAddProfile.value = true
+            }
+            Intent.ACTION_VIEW -> {
+                val uri = intent.data
+                if (uri != null) {
+                    pendingFileUri.value = uri
+                }
             }
         }
     }
@@ -183,6 +187,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun checkAndRequestNotifications() {
+        NotificationHelper.ensureTunnelChannel(this)
         if (Build.VERSION.SDK_INT >= 33) {
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
                 notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
@@ -194,6 +199,18 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    fun requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
+    fun openNotificationSettings() {
+        NotificationHelper.openAppNotificationSettings(this)
+    }
+
     private fun checkAndRequestBattery() {
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
         if (!pm.isIgnoringBatteryOptimizations(packageName)) {
@@ -202,22 +219,9 @@ class MainActivity : ComponentActivity() {
                     data = Uri.parse("package:$packageName")
                 }
                 batteryLauncher.launch(intent)
-            } catch (e: Exception) {
-                checkAndRequestVpn()
+            } catch (_: Exception) {
+                // Не удалось показать диалог — пропускаем.
             }
-        } else {
-            checkAndRequestVpn()
-        }
-    }
-
-    private fun checkAndRequestVpn() {
-        try {
-            val vpnIntent = VpnService.prepare(this)
-            if (vpnIntent != null) {
-                vpnLauncher.launch(vpnIntent)
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
         }
     }
 }
@@ -225,17 +229,18 @@ class MainActivity : ComponentActivity() {
 // ═══ Навигация ═══
 
 private data class NavItem(
+    val id: Int,
     val label: String,
     val selectedIcon: ImageVector,
     val unselectedIcon: ImageVector,
 )
 
 private val navItems = listOf(
-    NavItem("Туннель", Icons.Filled.VpnKey, Icons.Outlined.VpnKey),
-    NavItem("Деплой", Icons.Filled.Cloud, Icons.Outlined.Cloud),
-    NavItem("Профили", Icons.Filled.FolderOpen, Icons.Outlined.Folder),
-    NavItem("Обход", Icons.Filled.FilterList, Icons.Outlined.FilterList),
-    NavItem("Логи", Icons.Filled.Terminal, Icons.Outlined.Terminal),
+    NavItem(0, "Туннель", Icons.Filled.VpnKey, Icons.Outlined.VpnKey),
+    NavItem(1, "Деплой", Icons.Filled.Cloud, Icons.Outlined.Cloud),
+    NavItem(2, "Профили", Icons.Filled.FolderOpen, Icons.Outlined.Folder),
+    NavItem(3, "Обход", Icons.Filled.FilterList, Icons.Outlined.FilterList),
+    NavItem(4, "Логи", Icons.Filled.Terminal, Icons.Outlined.Terminal),
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -252,6 +257,7 @@ fun MainScreen(
     val unreadErrors by TunnelManager.unreadErrorCount.collectAsStateWithLifecycle()
     val tunnelRunning by TunnelManager.running.collectAsStateWithLifecycle()
     val showBlockerWarning by TunnelManager.showBlockerWarning.collectAsStateWithLifecycle()
+    val openAppSettingsRequest by TunnelManager.openAppSettingsRequest.collectAsStateWithLifecycle()
     val hasSeenWelcomeDialog by settingsStore.hasSeenWelcomeDialog.collectAsStateWithLifecycle(initialValue = true)
     val view = LocalView.current
     val context = LocalContext.current
@@ -263,13 +269,41 @@ fun MainScreen(
     val updateCheckIntervalHours by settingsStore.updateCheckIntervalHours.collectAsStateWithLifecycle(
         initialValue = DEFAULT_UPDATE_CHECK_INTERVAL_HOURS
     )
+    val includeBetaUpdates by settingsStore.includeBetaUpdates.collectAsStateWithLifecycle(initialValue = false)
+    val interfaceRole by settingsStore.interfaceRole.collectAsStateWithLifecycle(initialValue = "admin")
+    val isAdminInterface = interfaceRole == "admin"
+    val autoSwitchToLogs by settingsStore.autoSwitchToLogs.collectAsStateWithLifecycle(initialValue = true)
+    var pendingSwitchToLogs by remember { mutableStateOf(false) }
+    val activeNavItems = remember(isAdminInterface) {
+        navItems.filter { isAdminInterface || it.id != 1 }
+    }
     var pendingRelease by remember { mutableStateOf<AppReleaseInfo?>(null) }
+    var showSupportNotice by remember { mutableStateOf(false) }
     val currentVersion = remember { "v${BuildConfig.VERSION_NAME.removePrefix("v")}" }
     val safeBottomInset = with(density) { WindowInsets.safeDrawing.getBottom(density).toDp() }
     val navOverlayReserve = safeBottomInset + 96.dp
 
     LaunchedEffect(selectedTab) {
         if (selectedTab == 4) TunnelManager.clearUnreadErrors()
+    }
+
+    LaunchedEffect(tunnelRunning, autoSwitchToLogs, pendingSwitchToLogs) {
+        if (tunnelRunning && autoSwitchToLogs && pendingSwitchToLogs) {
+            pendingSwitchToLogs = false
+            selectedTab = 4
+        }
+    }
+
+    LaunchedEffect(activeNavItems, selectedTab) {
+        if (activeNavItems.none { it.id == selectedTab }) {
+            selectedTab = activeNavItems.firstOrNull()?.id ?: 0
+        }
+    }
+
+    LaunchedEffect(openAppSettingsRequest) {
+        if (openAppSettingsRequest > 0L) {
+            selectedTab = 0
+        }
     }
 
     val pendingFileUri = MainActivity.pendingFileUri.value
@@ -279,7 +313,34 @@ fun MainScreen(
         }
     }
 
-    LaunchedEffect(updateCheckIntervalHours) {
+    val pendingAddProfile = MainActivity.pendingAddProfile.value
+    var requestCreateProfile by remember { mutableStateOf(false) }
+    LaunchedEffect(pendingAddProfile) {
+        if (pendingAddProfile) {
+            selectedTab = 2
+            requestCreateProfile = true
+            MainActivity.pendingAddProfile.value = false
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        val supportShownFor = settingsStore.supportNoticeShownVersionCode.first()
+        val currentCode = BuildConfig.VERSION_CODE
+        if (currentCode >= SettingsStore.SUPPORT_NOTICE_VERSION_CODE &&
+            supportShownFor < SettingsStore.SUPPORT_NOTICE_VERSION_CODE
+        ) {
+            showSupportNotice = true
+        }
+    }
+
+    fun dismissSupportNotice() {
+        showSupportNotice = false
+        scope.launch {
+            settingsStore.saveSupportNoticeShownVersionCode(BuildConfig.VERSION_CODE)
+        }
+    }
+
+    LaunchedEffect(updateCheckIntervalHours, includeBetaUpdates) {
         if (updateCheckIntervalHours == UPDATE_CHECK_NEVER) return@LaunchedEffect
 
         val intervalMillis = updateIntervalHoursToMillis(updateCheckIntervalHours)
@@ -288,7 +349,8 @@ fun MainScreen(
 
         suspend fun runUpdateCheck(reason: String) {
             val checkedAt = System.currentTimeMillis()
-            val release = fetchLatestReleaseInfo(currentVersion)
+            val includeBeta = settingsStore.includeBetaUpdates.first()
+            val release = fetchLatestReleaseInfo(currentVersion, includeBeta)
             settingsStore.saveUpdateState(
                 lastCheckAt = checkedAt,
                 latestVersion = release?.versionTag ?: "",
@@ -300,7 +362,7 @@ fun MainScreen(
                 return
             }
 
-            val hasUpdate = isNewerVersion(currentVersion, release.versionTag)
+            val hasUpdate = isNewerVersion(currentVersion, release.versionTag, includeBeta)
             val postponeVer = settingsStore.updatePostponeVersion.first()
             val postponeUntil = settingsStore.updatePostponeUntil.first()
             val isPostponed = postponeVer == release.versionTag && checkedAt < postponeUntil
@@ -341,7 +403,7 @@ fun MainScreen(
                     .fillMaxSize()
                     .padding(padding)
                     .consumeWindowInsets(padding)
-                    .pointerInput(selectedTab) {
+                    .pointerInput(selectedTab, activeNavItems) {
                         var totalDrag = 0f
                         detectHorizontalDragGestures(
                             onDragStart = {
@@ -354,8 +416,8 @@ fun MainScreen(
                                 dragProgress = 0f
                             },
                             onDragEnd = {
-                                if (dragTargetIndex in navItems.indices && dragProgress >= 0.5f) {
-                                    selectedTab = dragTargetIndex
+                                if (dragTargetIndex in activeNavItems.indices && dragProgress >= 0.5f) {
+                                    selectedTab = activeNavItems[dragTargetIndex].id
                                     if (selectedTab == 4) TunnelManager.clearUnreadErrors()
                                 }
                                 dragTargetIndex = -1
@@ -370,8 +432,9 @@ fun MainScreen(
                                 return@detectHorizontalDragGestures
                             }
 
-                            val candidate = if (totalDrag < 0f) selectedTab + 1 else selectedTab - 1
-                            if (candidate !in navItems.indices) {
+                            val currentActiveIndex = activeNavItems.indexOfFirst { it.id == selectedTab }
+                            val candidate = if (totalDrag < 0f) currentActiveIndex + 1 else currentActiveIndex - 1
+                            if (candidate !in activeNavItems.indices) {
                                 dragTargetIndex = -1
                                 dragProgress = 0f
                                 return@detectHorizontalDragGestures
@@ -397,13 +460,15 @@ fun MainScreen(
                             onDynamicColorChange = onDynamicColorChange,
                             currentPalette = currentPalette,
                             onPaletteChange = onPaletteChange,
-                            onNavigateToLogs = { selectedTab = 4 }
+                            onConnectRequested = { pendingSwitchToLogs = true }
                         )
                         1 -> DeployTab()
                         2 -> ProfilesTab(
                             onProfileApplied = { selectedTab = 0 },
                             importFileUri = MainActivity.pendingFileUri.value,
-                            onImportHandled = { MainActivity.pendingFileUri.value = null }
+                            onImportHandled = { MainActivity.pendingFileUri.value = null },
+                            requestCreateProfile = requestCreateProfile,
+                            onCreateProfileHandled = { requestCreateProfile = false }
                         )
                         3 -> ExceptionsTab()
                         4 -> LogsTab()
@@ -411,17 +476,18 @@ fun MainScreen(
                 }
 
                 ProxyNavigationBar(
-                    navItems = navItems,
+                    navItems = activeNavItems,
                     selectedTab = selectedTab,
                     dragTargetIndex = dragTargetIndex,
                     dragProgress = dragProgress,
                     unreadErrors = unreadErrors,
                     tunnelRunning = tunnelRunning,
-                    onTabSelected = { index ->
-                        if (selectedTab != index) {
+                    onTabSelected = { visualIndex ->
+                        val tabId = activeNavItems.getOrNull(visualIndex)?.id ?: return@ProxyNavigationBar
+                        if (selectedTab != tabId) {
                             view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
-                            selectedTab = index
-                            if (index == 4) TunnelManager.clearUnreadErrors()
+                            selectedTab = tabId
+                            if (tabId == 4) TunnelManager.clearUnreadErrors()
                         }
                         dragTargetIndex = -1
                         dragProgress = 0f
@@ -449,16 +515,16 @@ fun MainScreen(
                         "Вы можете получить готовые конфиги напрямую в этих Telegram-ботах:",
                         style = MaterialTheme.typography.bodyMedium
                     )
-                    Row(
+                    Column(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Button(
                             onClick = {
                                 val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://t.me/darkbit_vpnbot"))
                                 context.startActivity(intent)
                             },
-                            modifier = Modifier.weight(1f),
+                            modifier = Modifier.fillMaxWidth(),
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = MaterialTheme.colorScheme.secondaryContainer,
                                 contentColor = MaterialTheme.colorScheme.onSecondaryContainer
@@ -466,15 +532,20 @@ fun MainScreen(
                             shape = RoundedCornerShape(12.dp),
                             contentPadding = PaddingValues(vertical = 10.dp)
                         ) {
-                            Text("🤖 @darkbit_vpnbot", maxLines = 1, style = MaterialTheme.typography.labelMedium)
+                            Text(
+                                "🤖 @darkbit_vpnbot",
+                                maxLines = 1,
+                                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.labelMedium
+                            )
                         }
-                        
+
                         Button(
                             onClick = {
                                 val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://t.me/sidylinkbot"))
                                 context.startActivity(intent)
                             },
-                            modifier = Modifier.weight(1f),
+                            modifier = Modifier.fillMaxWidth(),
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = MaterialTheme.colorScheme.secondaryContainer,
                                 contentColor = MaterialTheme.colorScheme.onSecondaryContainer
@@ -482,7 +553,12 @@ fun MainScreen(
                             shape = RoundedCornerShape(12.dp),
                             contentPadding = PaddingValues(vertical = 10.dp)
                         ) {
-                            Text("🤖 @sidylinkbot", maxLines = 1, style = MaterialTheme.typography.labelMedium)
+                            Text(
+                                "🤖 @sidylinkbot",
+                                maxLines = 1,
+                                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.labelMedium
+                            )
                         }
                     }
                     Spacer(Modifier.height(4.dp))
@@ -497,7 +573,7 @@ fun MainScreen(
                     )
                     Button(
                         onClick = {
-                            val intent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://t.me/darkbitVPN"))
+                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(AppLinks.TELEGRAM_CHANNEL))
                             context.startActivity(intent)
                         },
                         modifier = Modifier.fillMaxWidth(),
@@ -557,6 +633,13 @@ fun MainScreen(
                     openReleaseUrl(context, release.releaseUrl)
                 }
             }
+        )
+    }
+
+    if (showSupportNotice) {
+        SupportNoticeDialog(
+            versionName = BuildConfig.VERSION_NAME,
+            onDismiss = { dismissSupportNotice() },
         )
     }
 
@@ -640,13 +723,14 @@ private fun ProxyNavigationBar(
     } else {
         lerp(colors.primaryContainer, colors.surface, 0.18f).copy(alpha = 0.97f)
     }
-    val indicatorIndex = remember { Animatable(selectedTab.toFloat()) }
+    val indicatorIndex = remember { Animatable(0f) }
+    val selectedVisualIndex = navItems.indexOfFirst { it.id == selectedTab }.coerceAtLeast(0)
     val dragVisualIndex = indicatorIndex.value
 
-    LaunchedEffect(selectedTab) {
+    LaunchedEffect(selectedVisualIndex, navItems) {
         if (dragTargetIndex !in navItems.indices) {
             indicatorIndex.animateTo(
-                targetValue = selectedTab.toFloat(),
+                targetValue = selectedVisualIndex.toFloat(),
                 animationSpec = tween(
                     durationMillis = 720,
                     easing = CubicBezierEasing(0.2f, 0.9f, 0.24f, 1f)
@@ -655,9 +739,9 @@ private fun ProxyNavigationBar(
         }
     }
 
-    LaunchedEffect(selectedTab, dragTargetIndex, dragProgress) {
+    LaunchedEffect(selectedVisualIndex, dragTargetIndex, dragProgress, navItems) {
         if (dragTargetIndex in navItems.indices) {
-            val target = selectedTab.toFloat() + (dragTargetIndex - selectedTab) * dragProgress
+            val target = selectedVisualIndex.toFloat() + (dragTargetIndex - selectedVisualIndex) * dragProgress
             indicatorIndex.snapTo(target)
         }
     }
@@ -720,7 +804,7 @@ private fun ProxyNavigationBar(
                                     modifier = Modifier.size(22.dp),
                                     tint = iconColor
                                 )
-                                if (index == 4 && unreadErrors > 0) {
+                                if (item.id == 4 && unreadErrors > 0) {
                                     Badge(
                                         containerColor = if (tunnelRunning) colors.primary else WDTTColors.warning,
                                         contentColor = colors.onPrimary,

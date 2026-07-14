@@ -81,6 +81,7 @@ data class VkTurnCreds(
 enum class VkAuthScreenMode {
     LOGIN,
     JOIN_CALL,
+    TOKEN,
 }
 
 object VkAuthWebViewManager {
@@ -95,6 +96,7 @@ object VkAuthWebViewManager {
     val authMutex = Mutex()
     private val pendingLoginResult = AtomicReference<CompletableDeferred<Result<Unit>>?>(null)
     private val pendingTurnResult = AtomicReference<CompletableDeferred<Result<VkTurnCreds>>?>(null)
+    private val pendingTokenResult = AtomicReference<CompletableDeferred<Result<String>>?>(null)
     var activeActivity: VkAuthActivity? = null
     var pendingIntentToStart: Intent? = null
 
@@ -235,6 +237,21 @@ object VkAuthWebViewManager {
     fun notifyCancelled() {
         pendingLoginResult.getAndSet(null)?.complete(Result.failure(CancellationException("Cancelled")))
         pendingTurnResult.getAndSet(null)?.complete(Result.failure(CancellationException("Cancelled")))
+        pendingTokenResult.getAndSet(null)?.complete(Result.failure(CancellationException("Cancelled")))
+    }
+
+    internal fun notifyTokenSuccess(token: String) {
+        val deferred = pendingTokenResult.getAndSet(null) ?: return
+        if (!deferred.isCompleted) {
+            deferred.complete(Result.success(token))
+        }
+    }
+
+    internal fun notifyTokenFailure(error: Throwable) {
+        val deferred = pendingTokenResult.getAndSet(null) ?: return
+        if (!deferred.isCompleted) {
+            deferred.complete(Result.failure(error))
+        }
     }
 
     fun checkAndShowPendingAuth(context: Context) {
@@ -245,6 +262,65 @@ object VkAuthWebViewManager {
     }
 
     fun hasVkSessionCookie(): Boolean = vkRemixSid().isNotBlank()
+
+    /** Получить access_token для VK API (автогенерация хешей звонков). */
+    suspend fun obtainAccessToken(context: Context): Result<String> {
+        if (!hasVkSessionCookie()) {
+            return Result.failure(IllegalStateException("Сначала войдите в аккаунт VK"))
+        }
+        return authMutex.withLock {
+            val deferred = CompletableDeferred<Result<String>>()
+            pendingTokenResult.getAndSet(deferred)?.cancel()
+
+            val intent = Intent(context, VkAuthActivity::class.java).apply {
+                putExtra(EXTRA_MODE, VkAuthScreenMode.TOKEN.name)
+                addFlags(
+                    Intent.FLAG_ACTIVITY_NEW_TASK or
+                        Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                        Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                        Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS
+                )
+            }
+            pendingIntentToStart = intent
+            showAuthNotification(context, VkAuthScreenMode.TOKEN, null)
+
+            if (MainActivity.isForeground) {
+                context.startActivity(intent)
+            }
+
+            try {
+                withTimeout(AUTH_TIMEOUT_MS) {
+                    deferred.await()
+                }
+            } finally {
+                pendingTokenResult.set(null)
+                pendingIntentToStart = null
+                clearAuthNotification(context)
+                try {
+                    activeActivity?.finish()
+                } catch (_: Exception) {
+                }
+                activeActivity = null
+            }
+        }
+    }
+
+    internal fun buildVkCookieHeader(): String {
+        val cm = CookieManager.getInstance()
+        val domains = listOf(
+            "https://vk.com",
+            "https://vk.ru",
+            "https://m.vk.com",
+            "https://m.vk.ru",
+            "https://login.vk.com",
+            "https://oauth.vk.com",
+            "https://id.vk.com",
+            "https://id.vk.ru",
+        )
+        return domains.flatMap { domain ->
+            cm.getCookie(domain)?.split(";")?.map { it.trim() }?.filter { it.isNotEmpty() } ?: emptyList()
+        }.distinct().joinToString("; ")
+    }
 
     internal fun vkRemixSid(): String {
         val cm = CookieManager.getInstance()
@@ -279,6 +355,18 @@ object VkAuthWebViewManager {
         0 -> "https://m.vk.ru/login"
         1 -> "https://m.vk.ru/"
         else -> "https://vk.ru/login"
+    }
+
+    fun oauthTokenStartUrl(): String {
+        val redirect = java.net.URLEncoder.encode("https://oauth.vk.com/blank.html", Charsets.UTF_8.name())
+        return "https://oauth.vk.com/authorize" +
+            "?client_id=6287487" +
+            "&display=mobile" +
+            "&redirect_uri=$redirect" +
+            "&response_type=token" +
+            "&scope=messages" +
+            "&state=wdtt" +
+            "&v=5.199"
     }
 
     fun authUserAgent(context: Context, attempt: Int): String {
@@ -338,15 +426,14 @@ object VkAuthWebViewManager {
 
     private fun showAuthNotification(context: Context, mode: VkAuthScreenMode, hash: String?) {
         if (MainActivity.isForeground) return
+        if (!NotificationHelper.areNotificationsEnabled(context)) return
+        NotificationHelper.ensureAuxChannel(
+            context,
+            CHANNEL_ID,
+            "Авторизация VK",
+            "Вход в аккаунт VK и подтверждение звонка",
+        )
         val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                CHANNEL_ID,
-                "Авторизация VK",
-                NotificationManager.IMPORTANCE_HIGH
-            )
-            notificationManager.createNotificationChannel(channel)
-        }
         val openIntent = Intent(context, VkAuthActivity::class.java).apply {
             putExtra(EXTRA_MODE, mode.name)
             if (hash != null) putExtra(EXTRA_JOIN_HASH, hash)
@@ -362,6 +449,7 @@ object VkAuthWebViewManager {
         val body = when (mode) {
             VkAuthScreenMode.LOGIN -> "Войдите в аккаунт VK"
             VkAuthScreenMode.JOIN_CALL -> "Подтверждаем вход в звонок…"
+            VkAuthScreenMode.TOKEN -> "Получаем доступ VK API…"
         }
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
@@ -716,6 +804,7 @@ class VkAuthActivity : ComponentActivity() {
 
         screenMode = when (intent.getStringExtra(VkAuthWebViewManager.EXTRA_MODE)) {
             VkAuthScreenMode.LOGIN.name -> VkAuthScreenMode.LOGIN
+            VkAuthScreenMode.TOKEN.name -> VkAuthScreenMode.TOKEN
             else -> VkAuthScreenMode.JOIN_CALL
         }
         val joinHashExtra = intent.getStringExtra(VkAuthWebViewManager.EXTRA_JOIN_HASH).orEmpty()
@@ -731,6 +820,7 @@ class VkAuthActivity : ComponentActivity() {
 
         val startUrl = when (screenMode) {
             VkAuthScreenMode.LOGIN -> VkAuthWebViewManager.loginStartUrl(0)
+            VkAuthScreenMode.TOKEN -> VkAuthWebViewManager.oauthTokenStartUrl()
             VkAuthScreenMode.JOIN_CALL -> if (awaitingLoginBeforeJoin) {
                 VkAuthWebViewManager.loginStartUrl(0)
             } else {
@@ -739,6 +829,7 @@ class VkAuthActivity : ComponentActivity() {
         }
         val statusText = when (screenMode) {
             VkAuthScreenMode.LOGIN -> "Войдите в аккаунт VK"
+            VkAuthScreenMode.TOKEN -> "Получаем доступ VK API…"
             VkAuthScreenMode.JOIN_CALL -> when {
                 awaitingLoginBeforeJoin -> "Сначала войдите в аккаунт VK"
                 else -> "Подтверждаем вход в звонок…"
@@ -832,6 +923,8 @@ class VkAuthActivity : ComponentActivity() {
                                                         VkAuthWebViewManager.notifyTurnResult(
                                                             Result.failure(Exception(message))
                                                         )
+                                                    VkAuthScreenMode.TOKEN ->
+                                                        VkAuthWebViewManager.notifyTokenFailure(Exception(message))
                                                 }
                                                 finish()
                                             }
@@ -849,6 +942,10 @@ class VkAuthActivity : ComponentActivity() {
 
                                             override fun onPageFinished(view: WebView?, url: String?) {
                                                 super.onPageFinished(view, url)
+                                                if (screenMode == VkAuthScreenMode.TOKEN) {
+                                                    checkTokenAndClose(url)
+                                                    return
+                                                }
                                                 if (screenMode == VkAuthScreenMode.JOIN_CALL) {
                                                     view?.evaluateJavascript(interceptorJSCode, null)
                                                     checkJoinPageOrRetry(view, url)
@@ -868,6 +965,13 @@ class VkAuthActivity : ComponentActivity() {
                                                 val url = request?.url?.toString().orEmpty()
                                                 if (url.startsWith("intent://") || url.startsWith("vk://")) {
                                                     return true
+                                                }
+                                                if (screenMode == VkAuthScreenMode.TOKEN) {
+                                                    VkCallHashGenerator.extractAccessToken(url)?.let { token ->
+                                                        VkAuthWebViewManager.notifyTokenSuccess(token)
+                                                        finish()
+                                                        return true
+                                                    }
                                                 }
                                                 return false
                                             }
@@ -933,6 +1037,19 @@ class VkAuthActivity : ComponentActivity() {
         }
     }
 
+    private fun checkTokenAndClose(pageUrl: String?) {
+        if (screenMode != VkAuthScreenMode.TOKEN || tokenHandled) return
+        val token = VkCallHashGenerator.extractAccessToken(pageUrl.orEmpty())
+        if (token != null) {
+            tokenHandled = true
+            VkAuthWebViewManager.logAuth("VK API token получен")
+            VkAuthWebViewManager.notifyTokenSuccess(token)
+            finish()
+        }
+    }
+
+    private var tokenHandled = false
+
     private fun isOnVkLoginFlow(pageUrl: String?): Boolean {
         val url = pageUrl.orEmpty().lowercase()
         return (url.contains("id.vk.com") || url.contains("id.vk.ru")) &&
@@ -958,6 +1075,8 @@ class VkAuthActivity : ComponentActivity() {
                     VkAuthWebViewManager.notifyLoginFailure(Exception(reason))
                 VkAuthScreenMode.JOIN_CALL ->
                     VkAuthWebViewManager.notifyTurnResult(Result.failure(Exception(reason)))
+                VkAuthScreenMode.TOKEN ->
+                    VkAuthWebViewManager.notifyTokenFailure(Exception(reason))
             }
             finish()
             return

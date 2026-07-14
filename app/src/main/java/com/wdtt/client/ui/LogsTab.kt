@@ -10,7 +10,6 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
@@ -140,41 +139,64 @@ fun LogLine(entry: LogEntry) {
         finishedListener = { trigger = 0 }
     )
 
-    Row(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically
+    val showDnsSettingsAction = entry.key == "go_dns_tip" ||
+        entry.key == "err_vk_dns" ||
+        entry.key == "go_dns_precheck_fail"
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp)
     ) {
-        Surface(
-            color = WDTTColors.terminalCounter.copy(alpha = 0.2f),
-            shape = RoundedCornerShape(12.dp),
-            modifier = Modifier
-                .defaultMinSize(minWidth = 24.dp, minHeight = 24.dp)
-                .graphicsLayer(scaleX = animatedScale, scaleY = animatedScale)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Box(
-                contentAlignment = Alignment.Center,
-                modifier = Modifier.padding(horizontal = 6.dp)
+            Surface(
+                color = WDTTColors.terminalCounter.copy(alpha = 0.2f),
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier
+                    .defaultMinSize(minWidth = 24.dp, minHeight = 24.dp)
+                    .graphicsLayer(scaleX = animatedScale, scaleY = animatedScale)
+            ) {
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier.padding(horizontal = 6.dp)
+                ) {
+                    Text(
+                        text = "${entry.count}",
+                        color = WDTTColors.terminalBlue,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.width(12.dp))
+
+            Text(
+                text = entry.message,
+                color = color,
+                fontSize = 13.sp,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = if (entry.isError) FontWeight.Bold else FontWeight.Normal,
+                lineHeight = 18.sp,
+                modifier = Modifier.weight(1f)
+            )
+        }
+
+        if (showDnsSettingsAction) {
+            TextButton(
+                onClick = { TunnelManager.requestOpenAppSettings() },
+                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)
             ) {
                 Text(
-                    text = "${entry.count}",
-                    color = WDTTColors.terminalBlue,
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 1
+                    "Открыть ⚙️ → Сеть",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold
                 )
             }
         }
-
-        Spacer(modifier = Modifier.width(12.dp))
-
-        Text(
-            text = entry.message,
-            color = color,
-            fontSize = 13.sp,
-            fontFamily = FontFamily.Monospace,
-            fontWeight = if (entry.isError) FontWeight.Bold else FontWeight.Normal,
-            lineHeight = 18.sp,
-            modifier = Modifier.weight(1f)
-        )
     }
 }

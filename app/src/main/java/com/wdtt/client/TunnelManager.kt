@@ -15,6 +15,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.File
 import java.net.DatagramSocket
 import java.net.InetSocketAddress
@@ -54,6 +56,13 @@ object TunnelManager {
     private var wrapAuthTimeoutCount = 0
     private var processStartedAtMs = 0L
     private var lastActiveAtMs = 0L
+    private var lastStatsReceivedAtMs = 0L
+    private var lastReconnectAtMs = 0L
+    private val reconnectMutex = Mutex()
+
+    private const val STALE_STATS_MS = 90_000L
+    private const val HEALTH_CHECK_GRACE_MS = 120_000L
+    private const val MIN_RECONNECT_INTERVAL_MS = 10_000L
     private var activeHashIndex = 0 // 0: primary, 1: secondary
     private var currentParams: TunnelParams? = null
     private var lastContext: java.lang.ref.WeakReference<Context>? = null
@@ -73,10 +82,17 @@ object TunnelManager {
     val config = MutableStateFlow<String?>(null)
     val stats = MutableStateFlow("Ожидание данных...")
     val activeWorkers = MutableStateFlow(0)
+    val isReconnecting = MutableStateFlow(false)
     
     val cooldownSeconds = MutableStateFlow(0)
     private var cooldownJob: Job? = null
     val showBlockerWarning = MutableStateFlow(false)
+    /** Инкремент → MainActivity / SettingsTab открывают диалог ⚙️ настроек. */
+    val openAppSettingsRequest = MutableStateFlow(0L)
+
+    fun requestOpenAppSettings() {
+        openAppSettingsRequest.value = System.currentTimeMillis()
+    }
 
     fun startForced() {
         android.util.Log.d("WDTT", "startForced() called")
@@ -164,6 +180,7 @@ object TunnelManager {
             wrapAuthTimeoutCount = 0
             processStartedAtMs = 0L
             lastActiveAtMs = 0L
+            lastStatsReceivedAtMs = 0L
             activeHashIndex = 0
             currentParams = params
             lastContext = java.lang.ref.WeakReference(appContext)
@@ -210,7 +227,7 @@ object TunnelManager {
                     .split(Regex("[,\\s\\n]+"))
                     .map { it.trim() }
                     .filter { it.isNotEmpty() }
-                    .take(3)
+                    .take(SettingsStore.MAX_VK_HASHES)
 
                 if (hashList.isEmpty()) {
                     updateLog("hash_error", "Ошибка: Хеш не указан", 99, true)
@@ -223,9 +240,13 @@ object TunnelManager {
                     return@launch
                 }
 
-                val hashCount = hashList.size.coerceIn(1, 3)
+                val hashCount = hashList.size.coerceIn(1, SettingsStore.MAX_VK_HASHES)
                 val accountMode = !params.vkAuthMode.equals("anonymous", ignoreCase = true)
-                val maxWorkers = if (accountMode) SettingsStore.VK_ACCOUNT_MAX_WORKERS else hashCount * 27
+                val maxWorkers = if (accountMode) {
+                    SettingsStore.VK_ACCOUNT_MAX_WORKERS
+                } else {
+                    SettingsStore.maxAnonymousWorkers(hashCount)
+                }
                 val totalWorkers = params.workersPerHash.coerceIn(1, maxWorkers)
                 
                 val hashMode = if (activeHashIndex == 0) "Основной" else "Запасной"
@@ -272,6 +293,40 @@ object TunnelManager {
                 if (params.vkAuthMode.equals("anonymous", ignoreCase = true)) {
                     cmd.add("-vk-anon-path")
                     cmd.add(params.vkAnonPath)
+                    updateLog("vk_anon_path", "[КЛИЕНТ] Режим VK: ${params.vkAnonPath}", 1, false)
+                }
+
+                cmd.add("-go-dns")
+                cmd.add(params.goDnsArg)
+                val goDnsDisplay = SettingsStore.goDnsDisplayFromArg(params.goDnsArg)
+                updateLog("go_dns", SettingsStore.formatGoDnsLogLine(goDnsDisplay), 1, false)
+
+                cmd.add("-obfs")
+                cmd.add(SettingsStore.normalizeObfsMode(params.obfsMode))
+                updateLog(
+                    "obfs_mode",
+                    "[СЕТЬ] Маскировка: ${SettingsStore.obfsModeDisplay(params.obfsMode)}",
+                    1,
+                    false
+                )
+
+                updateLog("go_dns_precheck_start", "[СЕТЬ] Проверка DNS перед запуском…", 1, false)
+                val dnsProbe = GoDnsProbe.check(params.goDnsArg)
+                if (!dnsProbe.reachable) {
+                    updateLog(
+                        "go_dns_precheck_fail",
+                        "[СЕТЬ] DNS недоступен: ${dnsProbe.statusText}",
+                        50,
+                        true
+                    )
+                    updateLog(
+                        "go_dns_tip",
+                        "[СЕТЬ] Смените DNS в ⚙️ → Сеть (Яндекс / Cloudflare / Google / DoH / Свой)",
+                        50,
+                        true
+                    )
+                } else {
+                    updateLog("go_dns_precheck_ok", "[СЕТЬ] DNS доступен: ${dnsProbe.statusText}", 1, false)
                 }
 
                 if (!params.vkAuthMode.equals("anonymous", ignoreCase = true)) {
@@ -302,6 +357,7 @@ object TunnelManager {
                 processStartedAtMs = System.currentTimeMillis()
                 wrapAuthTimeoutCount = 0
                 lastActiveAtMs = 0L
+                lastStatsReceivedAtMs = System.currentTimeMillis()
                 running.value = true
                 startLogReader()
                 startWatchdog(appContext, params)
@@ -477,6 +533,7 @@ object TunnelManager {
                     if (lineTrim.contains("[СТАТИСТИКА]")) {
                         val msg = lineTrim.substringAfter("[СТАТИСТИКА]").trim()
                         stats.value = msg
+                        lastStatsReceivedAtMs = now
 
                         val match = Regex("Активных:\\s*(\\d+)").find(msg)
                         if (match != null) {
@@ -581,6 +638,16 @@ object TunnelManager {
                             updateLog("captcha_done", "[КАПЧА] Капча решена ✓", 5, false)
                         lineTrim.contains("капча не решена") || lineTrim.contains("ошибка решения капчи") ->
                             updateLog("captcha_failed", "[КАПЧА] Ошибка решения капчи", 5, true)
+                        lineTrim.contains("DNS для VK:") || lineTrim.contains("Go DNS:") -> {
+                            val text = if (lineTrim.contains("[КЛИЕНТ]")) {
+                                lineTrim
+                            } else if (lineTrim.contains("DNS для VK:")) {
+                                "[КЛИЕНТ] $lineTrim"
+                            } else {
+                                "[КЛИЕНТ] DNS для VK: ${lineTrim.substringAfter("Go DNS:").trim()}"
+                            }
+                            updateLog("go_dns", text, 1, false)
+                        }
                         lineTrim.contains("[WRAP]") -> {
                             val text = lineTrim.substringAfter("[WRAP]").trim()
                             updateLog("wrap_status", "[WRAP] $text", 1, false)
@@ -611,11 +678,19 @@ object TunnelManager {
                                 else -> "general_error_" + lineTrim.take(15).hashCode()
                             }
                             val errorMessage = if (errorKey == "err_vk_dns") {
-                                "[СЕТЬ] DNS до VK недоступен: login.vk.ru"
+                                "[СЕТЬ] DNS до VK недоступен: login.vk.ru — смените DNS в ⚙️ → Сеть"
                             } else {
                                 lineTrim
                             }
                             updateLog(errorKey, errorMessage, 99, true)
+                            if (errorKey == "err_vk_dns") {
+                                updateLog(
+                                    "go_dns_tip",
+                                    "[СЕТЬ] Откройте ⚙️ → Сеть и выберите другой DNS (Яндекс / Cloudflare / Google / Свой)",
+                                    99,
+                                    true
+                                )
+                            }
                         }
                     }
 
@@ -735,11 +810,10 @@ object TunnelManager {
                     updateLog("watchdog", "⚠ Процесс упал. Перезапуск... (попытка ${restartAttempts + 1}, задержка ${backoffMs / 1000}s)", 50, true)
                     activeWorkers.value = 0
                     forceRegenerateUA = true
-                    killProcess()
                     delay(backoffMs)
                     if (running.value) {
                         restartAttempts = (restartAttempts + 1).coerceAtMost(6)
-                        start(context, params, isSwitching = true)
+                        reconnectAll("процесс упал")
                     }
                     return@launch // startWatchdog будет перезапущен из start()
                 }
@@ -761,17 +835,31 @@ object TunnelManager {
                     } else if (System.currentTimeMillis() - zeroWorkersSince > 90_000 && !ManlCaptchaWebViewManager.isCaptchaPending) {
                         updateLog("watchdog", "⚠ Зомби-процесс (0 воркеров 90с). Перезапуск...", 50, true)
                         forceRegenerateUA = true
-                        killProcess()
-                        delay(2000)
-                        if (running.value) {
-                            start(context, params, isSwitching = true)
-                        }
+                        reconnectAll("зомби-процесс")
                         return@launch
                     }
                 } else {
                     zeroWorkersSince = 0L
                     // Успешная активность — сбрасываем счётчик попыток рестарта
                     restartAttempts = 0
+
+                    val now = System.currentTimeMillis()
+                    if (
+                        processStartedAtMs > 0L &&
+                        now - processStartedAtMs > HEALTH_CHECK_GRACE_MS &&
+                        lastStatsReceivedAtMs > 0L &&
+                        now - lastStatsReceivedAtMs > STALE_STATS_MS &&
+                        !ManlCaptchaWebViewManager.isCaptchaPending
+                    ) {
+                        updateLog(
+                            "health_stale",
+                            "⚠ Нет статистики от воркеров ${STALE_STATS_MS / 1000}с — переподключение...",
+                            50,
+                            true
+                        )
+                        reconnectAll("зависшее соединение")
+                        return@launch
+                    }
                 }
 
                 delay(5_000)
@@ -780,15 +868,37 @@ object TunnelManager {
     }
 
     fun restartTransport() {
+        reconnectAll("смена сети")
+    }
+
+    fun reconnectAll(reason: String) {
         val params = currentParams ?: return
         val context = lastContext?.get() ?: return
-        updateLog("network_restart", "[СЕТЬ] Перезапуск транспорта из-за смены сети...", 50, false)
+        if (!running.value) return
+
         scope.launch {
-            withContext(Dispatchers.IO) {
-                ensureTransportStopped(params.port)
-            }
-            if (running.value) {
-                start(context, params, isSwitching = true)
+            reconnectMutex.withLock {
+                val now = System.currentTimeMillis()
+                if (now - lastReconnectAtMs < MIN_RECONNECT_INTERVAL_MS) return@launch
+                lastReconnectAtMs = now
+
+                isReconnecting.value = true
+                updateLog("reconnect", "🔄 Переподключение ($reason)...", 50, false)
+                try {
+                    withContext(Dispatchers.IO) {
+                        ensureTransportStopped(params.port)
+                    }
+                    withContext(Dispatchers.Main) {
+                        if (config.value != null) {
+                            wgHelper?.reloadTunnel()
+                        }
+                    }
+                    if (running.value) {
+                        start(context, params, isSwitching = true)
+                    }
+                } finally {
+                    isReconnecting.value = false
+                }
             }
         }
     }
@@ -803,7 +913,17 @@ object TunnelManager {
         val resumeCtx = lastContext?.get()
         if (currentParams != null && resumeCtx != null) {
             scope.launch {
-                start(resumeCtx, currentParams!!, isSwitching = true)
+                isReconnecting.value = true
+                try {
+                    withContext(Dispatchers.Main) {
+                        if (config.value != null) {
+                            wgHelper?.reloadTunnel()
+                        }
+                    }
+                    start(resumeCtx, currentParams!!, isSwitching = true)
+                } finally {
+                    isReconnecting.value = false
+                }
             }
         }
     }
@@ -963,6 +1083,9 @@ object TunnelManager {
         val mode = requestMode.lowercase()
 
         try {
+            if (mode == "manual") {
+                VkWebViewCookies.clearCaptchaCookies()
+            }
             val token = when (mode) {
                 "auto" -> solveSingleAutoWebViewCaptcha(redirectUri, sessionToken)
                 "manual" -> {
@@ -1134,5 +1257,7 @@ data class TunnelParams(
     val captchaSolveMethod: String = "auto", // "manual" или "auto"
     val vkAuthMode: String = "anonymous", // "account" или "anonymous"
     val vkAnonPath: String = "vkcalls", // "vkcalls" или "legacy" (только anonymous)
+    val goDnsArg: String = "yandex", // yandex/cloudflare/google, doh-*, custom:IP, doh:URL
+    val obfsMode: String = "audio", // "audio" or "video"
     val detailedLogs: Boolean = false
 )
