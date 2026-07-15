@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <!-- Branding -->
+    <string name="app_name">Hoplet</string>
+    <string name="tunnel_name">Hoplet Tunnel</string>
+
+    <!-- App Shortcuts -->
+    <string name="shortcut_add_short">Добавить конфиг</string>
+    <string name="shortcut_add_long">Добавить конфиг</string>
+
+</resources>
