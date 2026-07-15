@@ -45,12 +45,12 @@ jobs:
       - name: Build Release APK
         run: ./gradlew assembleRelease
 
-      - name: Rename APK
+      - name: Show APK files
         run: |
-          mkdir output
-          cp app/build/outputs/apk/universal/release/*.apk output/Hoplet-${{ github.event.release.tag_name }}.apk
+          echo "=== APK files ==="
+          find app/build/outputs -name "*.apk"
 
-      - name: Upload APK to Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: output/Hoplet-${{ github.event.release.tag_name }}.apk
+      # - name: Upload APK to Release
+       # uses: softprops/action-gh-release@v2
+       # with:
+        #  files: output/Hoplet-${{ github.event.release.tag_name }}.apk
