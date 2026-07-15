@@ -40,17 +40,35 @@ jobs:
           echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/29.0.13846066" >> $GITHUB_ENV
 
       - name: Grant execute permission
-        run: chmod +x gradlew scripts/build-native-libs.sh scripts/build-go-lib.sh
+        run: |
+          chmod +x gradlew
+          chmod +x scripts/build-native-libs.sh
+          chmod +x scripts/build-go-lib.sh
 
       - name: Build Release APK
         run: ./gradlew assembleRelease
 
-      - name: Show APK files
+      - name: Find APK
+        id: find_apk
+        shell: bash
         run: |
-          echo "=== APK files ==="
-          find app/build/outputs -name "*.apk"
+          APK=$(find app/build/outputs -type f -name "*.apk" | grep -v "unsigned" | head -n 1)
 
-      # - name: Upload APK to Release
-       # uses: softprops/action-gh-release@v2
-       # with:
-        #  files: output/Hoplet-${{ github.event.release.tag_name }}.apk
+          if [ -z "$APK" ]; then
+            echo "APK not found!"
+            exit 1
+          fi
+
+          echo "APK найден:"
+          echo "$APK"
+
+          mkdir output
+
+          cp "$APK" output/Hoplet-${{ github.event.release.tag_name }}.apk
+
+          echo "apk_path=output/Hoplet-${{ github.event.release.tag_name }}.apk" >> $GITHUB_OUTPUT
+
+      - name: Upload APK to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.find_apk.outputs.apk_path }}
