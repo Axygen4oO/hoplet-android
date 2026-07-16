@@ -48,21 +48,19 @@ jobs:
       - name: Build Release APK
         run: ./gradlew assembleRelease
 
-      - name: Inspect build outputs
+      - name: Collect APK files
         shell: bash
         run: |
-          echo "=== app/build ==="
-          ls -R app/build || true
+          mkdir -p release-assets
 
-          echo
-          echo "=== Search APK ==="
-          find app -type f -name "*.apk" || true
+          echo "Поиск APK..."
 
-          echo
-          echo "=== Search AAB ==="
-          find app -type f -name "*.aab" || true
+          find app -type f -name "*.apk" -exec cp {} release-assets/ \;
 
-      # - name: Upload APK to Release
-        #uses: softprops/action-gh-release@v2
-        #with:
-         # files: ${{ steps.find_apk.outputs.apk_path }}
+          echo "Найдены файлы:"
+          ls -lh release-assets
+
+      - name: Upload APKs to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
