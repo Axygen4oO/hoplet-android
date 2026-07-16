@@ -62,19 +62,17 @@ jobs:
       - name: Build Release APK
         run: ./gradlew assembleRelease
 
-      - name: Collect APK files
+      - name: Debug APK output
         shell: bash
         run: |
-          mkdir -p release-assets
+          echo "=== APK files ==="
+          find app -type f -name "*.apk"
 
-          echo "Поиск APK..."
+          echo
+          echo "=== app/build ==="
+          find app/build -maxdepth 5 -type f | sort
 
-          find app -type f -name "*release.apk" -exec cp {} release-assets/ \;
-
-          echo "Найдены файлы:"
-          ls -lh release-assets
-
-      - name: Upload APKs to Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: release-assets/*
+     # - name: Upload APKs to Release
+        #uses: softprops/action-gh-release@v2
+        #with:
+          #files: release-assets/*
