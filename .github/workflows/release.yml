@@ -35,7 +35,9 @@ jobs:
 
       - name: Restore keystore
         run: |
-          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > release.keystore
+          mkdir -p app
+
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > app/release.keystore
 
           cat > local.properties <<EOF
           KEYSTORE_FILE=release.keystore
@@ -43,6 +45,9 @@ jobs:
           KEY_ALIAS=${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD=${{ secrets.KEY_PASSWORD }}
           EOF
+
+          echo "Keystore:"
+          ls -lh app/release.keystore
 
       - run: |
           chmod +x gradlew

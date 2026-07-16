@@ -7,9 +7,9 @@ plugins {
 }
 
 android {
-    namespace = "com.wdtt.client"
+    namespace = "com.wdtt.client"   
     compileSdk = 35
-
+    
     defaultConfig {
         applicationId = "net.qwdtt.client"
         minSdk = 28
@@ -45,19 +45,21 @@ android {
     signingConfigs {
         create("release") {
             val keyFile = localProperties.getProperty("KEYSTORE_FILE")
-
-            if (!keyFile.isNullOrBlank()) {
-                val resolvedFile = java.io.File(keyFile).let {
-                    if (it.isAbsolute) it else rootProject.file(keyFile)
+            if (keyFile != null) {
+                // Резолвим путь: если начинается с "..", берём от корня проекта
+                val resolvedFile = if (keyFile.startsWith("..")) {
+                    // ../release.keystore -> корень проекта / release.keystore
+                    file(rootDir.resolve(keyFile.substring(3)))
+                } else {
+                    file(keyFile)
                 }
-
                 if (resolvedFile.exists()) {
                     storeFile = resolvedFile
                     storePassword = localProperties.getProperty("KEYSTORE_PASSWORD")
                     keyAlias = localProperties.getProperty("KEY_ALIAS")
                     keyPassword = localProperties.getProperty("KEY_PASSWORD")
                 } else {
-                    println("WARNING: Keystore not found: ${resolvedFile.absolutePath}")
+                    println("WARNING: Keystore file not found: $keyFile (resolved: ${resolvedFile.absolutePath})")
                 }
             }
             enableV1Signing = true
@@ -80,7 +82,7 @@ android {
             } else if (keyFile != null) {
                 file(keyFile)
             } else null
-
+            
             if (resolvedFile != null && resolvedFile.exists()) {
                 signingConfig = signingConfigs.getByName("release")
                 println("✅ Signing config applied: ${resolvedFile.absolutePath}")
