@@ -48,27 +48,21 @@ jobs:
       - name: Build Release APK
         run: ./gradlew assembleRelease
 
-      - name: Find APK
-        id: find_apk
+      - name: Inspect build outputs
         shell: bash
         run: |
-          APK=$(find app/build/outputs -type f -name "*.apk" | grep -v "unsigned" | head -n 1)
+          echo "=== app/build ==="
+          ls -R app/build || true
 
-          if [ -z "$APK" ]; then
-            echo "APK not found!"
-            exit 1
-          fi
+          echo
+          echo "=== Search APK ==="
+          find app -type f -name "*.apk" || true
 
-          echo "APK найден:"
-          echo "$APK"
+          echo
+          echo "=== Search AAB ==="
+          find app -type f -name "*.aab" || true
 
-          mkdir output
-
-          cp "$APK" output/Hoplet-${{ github.event.release.tag_name }}.apk
-
-          echo "apk_path=output/Hoplet-${{ github.event.release.tag_name }}.apk" >> $GITHUB_OUTPUT
-
-      - name: Upload APK to Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: ${{ steps.find_apk.outputs.apk_path }}
+      # - name: Upload APK to Release
+        #uses: softprops/action-gh-release@v2
+        #with:
+         # files: ${{ steps.find_apk.outputs.apk_path }}
