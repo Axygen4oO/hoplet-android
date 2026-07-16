@@ -1174,7 +1174,7 @@ fun SettingsTabContent(
 
                                 OutlinedButton(
                                     onClick = {
-                                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/SpaceNeuroX/proxy-turn-vk-android"))
+                                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/Axygen4oO/hoplet-android"))
                                         context.startActivity(intent)
                                     },
                                     shape = RoundedCornerShape(8.dp),
@@ -1186,7 +1186,7 @@ fun SettingsTabContent(
                         }
 
                         Text(
-                            text = "Форк оригинального проекта amurcanov/proxy-turn-vk-android от разработчика SpaceNeuroX.",
+                            text = "Проект Hoplet основан на оригинальном proxy-turn-vk-android, но развивается как самостоятельный форк.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )

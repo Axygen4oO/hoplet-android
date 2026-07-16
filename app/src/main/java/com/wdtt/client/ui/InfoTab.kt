@@ -95,10 +95,10 @@ import kotlin.math.cos
 import kotlin.math.min
 import kotlin.math.sin
 
-private const val ReleasesUrl = "https://github.com/SpaceNeuroX/proxy-turn-vk-android/releases"
-private const val IssuesUrl = "https://github.com/SpaceNeuroX/proxy-turn-vk-android/issues/new"
-private const val DeveloperProfileUrl = "https://github.com/SpaceNeuroX"
-private const val RepositoryUrl = "https://github.com/SpaceNeuroX/proxy-turn-vk-android"
+private const val ReleasesUrl = "https://github.com/Axygen4oO/hoplet-android/releases"
+private const val IssuesUrl = "https://github.com/Axygen4oO/hoplet-android/issues/new"
+private const val DeveloperProfileUrl = "https://github.com/Axygen4oO"
+private const val RepositoryUrl = "https://github.com/Axygen4oO/hoplet-android"
 private const val TelegramChannelUrl = AppLinks.TELEGRAM_CHANNEL
 private const val DonateUrl = AppLinks.DONATE_URL
 
@@ -370,7 +370,7 @@ fun InfoTab() {
         ) {
             ProjectLinkRow(
                 title = "Автор форка",
-                subtitle = "GitHub профиль SpaceNeuroX",
+                subtitle = "GitHub профиль Axygen4oO",
                 onClick = { openUrlInBrowser(context, DeveloperProfileUrl) },
                 icon = {
                     Icon(

@@ -23,12 +23,12 @@ const val UPDATE_DIALOG_ACTION_POSTPONED = "postponed"
 const val UPDATE_DIALOG_ACTION_UPDATE = "update"
 
 private const val UPDATE_LOG_TAG = "qWDTT"
-private const val GITHUB_RELEASES_URL = "https://api.github.com/repos/SpaceNeuroX/proxy-turn-vk-android/releases?per_page=30"
-private const val GITHUB_LATEST_RELEASE_URL = "https://api.github.com/repos/SpaceNeuroX/proxy-turn-vk-android/releases/latest"
-private const val GITHUB_LATEST_RELEASE_WEB_URL = "https://github.com/SpaceNeuroX/proxy-turn-vk-android/releases/latest"
-private const val GITHUB_RELEASE_TAG_URL_PREFIX = "https://github.com/SpaceNeuroX/proxy-turn-vk-android/releases/tag/"
-private const val GITHUB_TAGS_URL = "https://api.github.com/repos/SpaceNeuroX/proxy-turn-vk-android/tags?per_page=100"
-private const val GITHUB_TAG_TREE_URL_PREFIX = "https://github.com/SpaceNeuroX/proxy-turn-vk-android/tree/"
+private const val GITHUB_RELEASES_URL = "https://api.github.com/repos/Axygen4oO/hoplet-android/releases?per_page=30"
+private const val GITHUB_LATEST_RELEASE_URL = "https://api.github.com/repos/Axygen4oO/hoplet-android/releases/latest"
+private const val GITHUB_LATEST_RELEASE_WEB_URL = "https://github.com/Axygen4oO/hoplet-android/releases/latest"
+private const val GITHUB_RELEASE_TAG_URL_PREFIX = "https://github.com/Axygen4oO/hoplet-android/releases/tag/"
+private const val GITHUB_TAGS_URL = "https://api.github.com/repos/Axygen4oO/hoplet-android/tags?per_page=100"
+private const val GITHUB_TAG_TREE_URL_PREFIX = "https://github.com/Axygen4oO/hoplet-android/tree/"
 private const val GITHUB_API_RATE_LIMIT_FALLBACK_MS = 30L * 60L * 1000L
 private val VERSION_NUMBER_REGEX = Regex("\\d+(?:\\.\\d+)*")
 
@@ -379,9 +379,29 @@ private fun JSONObject.toAppReleaseInfo(): AppReleaseInfo? {
     if (assets != null) {
         for (i in 0 until assets.length()) {
             val asset = assets.optJSONObject(i) ?: continue
-            if (asset.optString("name").endsWith(".apk", ignoreCase = true)) {
-                downloadUrl = asset.optString("browser_download_url")
-                break
+            var downloadUrl: String? = null
+            val assets = optJSONArray("assets")
+
+            if (assets != null) {
+                // Сначала ищем universal APK
+                for (i in 0 until assets.length()) {
+                    val asset = assets.optJSONObject(i) ?: continue
+                    if (asset.optString("name").equals("app-universal-release.apk", ignoreCase = true)) {
+                        downloadUrl = asset.optString("browser_download_url")
+                        break
+                    }
+                }
+
+                // Если universal не найден — берем первый APK как запасной вариант
+                if (downloadUrl == null) {
+                    for (i in 0 until assets.length()) {
+                        val asset = assets.optJSONObject(i) ?: continue
+                        if (asset.optString("name").endsWith(".apk", ignoreCase = true)) {
+                            downloadUrl = asset.optString("browser_download_url")
+                            break
+                        }
+                    }
+                }
             }
         }
     }
