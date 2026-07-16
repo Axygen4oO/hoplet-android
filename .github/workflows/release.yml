@@ -53,6 +53,15 @@ jobs:
 
           echo "local.properties created"
 
+      - name: Verify signing
+        run: |
+          echo "===== local.properties ====="
+          cat local.properties
+
+          echo
+          echo "===== release.keystore ====="
+          ls -lh release.keystore
+
       - name: Grant execute permission
         run: |
           chmod +x gradlew
@@ -60,7 +69,7 @@ jobs:
           chmod +x scripts/build-go-lib.sh
 
       - name: Build Release APK
-        run: ./gradlew assembleRelease
+        run: ./gradlew assembleRelease --info
 
       - name: Debug APK output
         shell: bash
