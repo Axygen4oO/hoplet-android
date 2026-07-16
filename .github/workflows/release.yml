@@ -39,6 +39,20 @@ jobs:
           echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/29.0.13846066" >> $GITHUB_ENV
           echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/29.0.13846066" >> $GITHUB_ENV
 
+      - name: Restore signing keystore
+        shell: bash
+        run: |
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > release.keystore
+
+          cat > local.properties <<EOF
+          KEYSTORE_FILE=release.keystore
+          KEYSTORE_PASSWORD=${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS=${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD=${{ secrets.KEY_PASSWORD }}
+          EOF
+
+          echo "local.properties created"
+
       - name: Grant execute permission
         run: |
           chmod +x gradlew
@@ -55,7 +69,7 @@ jobs:
 
           echo "Поиск APK..."
 
-          find app -type f -name "*.apk" -exec cp {} release-assets/ \;
+          find app -type f -name "*release.apk" -exec cp {} release-assets/ \;
 
           echo "Найдены файлы:"
           ls -lh release-assets
