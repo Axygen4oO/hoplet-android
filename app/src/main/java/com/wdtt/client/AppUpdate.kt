@@ -373,35 +373,43 @@ private fun JSONObject.toAppReleaseInfo(): AppReleaseInfo? {
     val versionTag = normalizeVersionTag(optString("tag_name"))
     val releaseUrl = optString("html_url").trim()
     if (versionTag.isBlank() || releaseUrl.isBlank()) return null
-    
+
     var downloadUrl: String? = null
     val assets = optJSONArray("assets")
+
     if (assets != null) {
+
+        // Сначала ищем universal APK
         for (i in 0 until assets.length()) {
             val asset = assets.optJSONObject(i) ?: continue
-            var downloadUrl: String? = null
-            val assets = optJSONArray("assets")
 
-            if (assets != null) {
-                // Сначала ищем universal APK
-                for (i in 0 until assets.length()) {
-                    val asset = assets.optJSONObject(i) ?: continue
-                    if (asset.optString("name").equals("app-universal-release.apk", ignoreCase = true)) {
-                        downloadUrl = asset.optString("browser_download_url")
-                        break
-                    }
-                }
+            if (asset.optString("name")
+                    .equals("app-universal-release.apk", ignoreCase = true)
+            ) {
+                downloadUrl = asset.optString("browser_download_url")
+                break
+            }
+        }
 
-                // Если universal не найден — берем первый APK как запасной вариант
-                if (downloadUrl == null) {
-                    for (i in 0 until assets.length()) {
-                        val asset = assets.optJSONObject(i) ?: continue
-                        if (asset.optString("name").endsWith(".apk", ignoreCase = true)) {
-                            downloadUrl = asset.optString("browser_download_url")
-                            break
-                        }
-                    }
+        // Если universal не найден — берем первый APK
+        if (downloadUrl == null) {
+            for (i in 0 until assets.length()) {
+                val asset = assets.optJSONObject(i) ?: continue
+                Log.d(
+                    UPDATE_LOG_TAG,
+                    "Asset: ${asset.optString("name")} -> ${asset.optString("browser_download_url")}"
+                )
+
+                if (asset.optString("name")
+                        .endsWith(".apk", ignoreCase = true)
+                ) {
+                    downloadUrl = asset.optString("browser_download_url")
+                    break
                 }
+                Log.d(
+                    UPDATE_LOG_TAG,
+                    "Selected downloadUrl = $downloadUrl"
+                )
             }
         }
     }
