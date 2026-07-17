@@ -233,3 +233,7 @@ scripts/       Сборка Go под Android ABI
 ## Происхождение
 
 Форк [proxy-turn-vk-android](https://github.com/amurcanov/proxy-turn-vk-android) (автор **amurcanov**). Протокол и сервер общие; клиентская часть переработана под профили, импорт и удобство повседневного использования. Разработка форка — [SpaceNeuroX/proxy-turn-vk-android](https://github.com/SpaceNeuroX/proxy-turn-vk-android).
+
+
+
+Hoplet Update Assistant test
