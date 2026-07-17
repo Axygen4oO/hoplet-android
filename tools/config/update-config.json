@@ -1,0 +1,28 @@
+{
+  "ignore": [
+    ".github/**",
+    "README.md",
+    "LICENSE"
+  ],
+  "safe": [
+    "app/**",
+    "gradle/**",
+    "gradlew",
+    "gradlew.bat",
+    "build.gradle*",
+    "settings.gradle*",
+    "gradle.properties"
+  ],
+  "manual": [
+    "server.go",
+    "api_*.go",
+    "bot_*.go",
+    "telegram*.go",
+    "config*.go",
+    "go.mod",
+    "go.sum",
+    "Dockerfile",
+    "docker-compose*.yml",
+    "*.sql"
+  ]
+}
