@@ -38,6 +38,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.saveable.rememberSaveable
+
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -81,7 +82,7 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.SnackbarDuration
-
+import com.wdtt.client.ui.components.HopletSubscriptionCard
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.net.InetSocketAddress
@@ -152,6 +153,16 @@ fun ProfilesTab(
     val snackbarHostState = remember { SnackbarHostState() }
     var groupToExport by remember { mutableStateOf<ProfileGroup?>(null) }
     val globalHashes by settingsStore.globalVkHashes.collectAsStateWithLifecycle(initialValue = "")
+    var currentTime by remember {
+        mutableStateOf(System.currentTimeMillis() / 1000L)
+    }
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            currentTime = System.currentTimeMillis() / 1000L
+            kotlinx.coroutines.delay(60_000)
+        }
+    }
 
     LaunchedEffect(requestCreateProfile) {
         if (requestCreateProfile) {
@@ -990,7 +1001,7 @@ fun ProfilesTab(
                     verticalArrangement = Arrangement.spacedBy(16.dp)
                 ) {
                     Text(
-                        "qWDTT автоматически считывает и импортирует настройки из ссылок, файлов и QR-кодов.",
+                        "Hoplet автоматически считывает и импортирует настройки из ссылок, файлов и QR-кодов.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -1102,302 +1113,271 @@ fun ProfilesTab(
                 .padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 88.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
             Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                modifier = Modifier.weight(1f)
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = "Профили",
-                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                    color = MaterialTheme.colorScheme.onSurface
-                )
-                androidx.compose.material3.IconButton(
-                    onClick = { showFormatsInfoDialog = true },
-                    modifier = Modifier.size(24.dp)
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    modifier = Modifier.weight(1f)
                 ) {
-                    androidx.compose.material3.Icon(
-                        imageVector = Icons.Filled.Info,
-                        contentDescription = "Справка",
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(16.dp)
+                    Text(
+                        text = "Профили",
+                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                        color = MaterialTheme.colorScheme.onSurface
                     )
-                }
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(0.dp)) {
-
-                androidx.compose.material3.IconButton(
-                    onClick = { pingAllProfiles(profiles) }
-                ) {
-                    androidx.compose.material3.Icon(
-                        imageVector = Icons.Filled.SignalCellularAlt,
-                        contentDescription = "Проверить пинг",
-                        tint = MaterialTheme.colorScheme.primary
-                    )
-                }
-
-                androidx.compose.material3.IconButton(
-                    onClick = {
-                        scope.launch { settingsStore.saveSortProfilesByPing(!sortByPing) }
-                    },
-                    modifier = Modifier.background(
-                        color = if (sortByPing) MaterialTheme.colorScheme.primaryContainer else androidx.compose.ui.graphics.Color.Transparent,
-                        shape = androidx.compose.foundation.shape.CircleShape
-                    )
-                ) {
-                    androidx.compose.material3.Icon(
-                        imageVector = Icons.Filled.Sort,
-                        contentDescription = "Сортировать по пингу",
-                        tint = if (sortByPing) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-
-                androidx.compose.foundation.layout.Box {
                     androidx.compose.material3.IconButton(
-                        onClick = { showMoreMenu = true }
+                        onClick = { showFormatsInfoDialog = true },
+                        modifier = Modifier.size(24.dp)
                     ) {
                         androidx.compose.material3.Icon(
-                            imageVector = Icons.Filled.MoreVert,
-                            contentDescription = "Дополнительно",
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            imageVector = Icons.Filled.Info,
+                            contentDescription = "Справка",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(16.dp)
                         )
                     }
-                    DropdownMenu(
-                        expanded = showMoreMenu,
-                        onDismissRequest = { showMoreMenu = false }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(0.dp)) {
+
+                    androidx.compose.material3.IconButton(
+                        onClick = { pingAllProfiles(profiles) }
                     ) {
-                        DropdownMenuItem(
-                            text = { Text("Управление папками") },
-                            leadingIcon = {
-                                androidx.compose.material3.Icon(
-                                    Icons.Filled.Folder,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.primary
-                                )
-                            },
-                            onClick = {
-                                showGroupManagement = true
-                                showMoreMenu = false
-                            }
-                        )
-                        
-
-
-                        DropdownMenuItem(
-                            text = { Text("Экспорт всех профилей (ZIP)") },
-                            onClick = {
-                                showMoreMenu = false
-                                exportZipLauncher.launch("wdtt_profiles_export.zip")
-                            }
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Импорт профилей (ZIP)") },
-                            onClick = {
-                                showMoreMenu = false
-                                importZipLauncher.launch("application/zip")
-                            }
+                        androidx.compose.material3.Icon(
+                            imageVector = Icons.Filled.SignalCellularAlt,
+                            contentDescription = "Проверить пинг",
+                            tint = MaterialTheme.colorScheme.primary
                         )
                     }
-                }
-            }
-        }
 
-        if (groups.isNotEmpty()) {
-            androidx.compose.foundation.lazy.LazyRow(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp)
-            ) {
-                item {
-                    FilterChip(
-                        selected = selectedFilterGroup == null,
-                        onClick = { selectedFilterGroup = null },
-                        label = { Text("Все") }
-                    )
-                }
-                item {
-                    FilterChip(
-                        selected = selectedFilterGroup == "",
-                        onClick = { selectedFilterGroup = "" },
-                        label = { Text("Без папки") }
-                    )
-                }
-                items(groups) { group ->
-                    val isSub = subscriptionGroupIds.contains(group.id)
-                    FilterChip(
-                        selected = selectedFilterGroup == group.id,
-                        onClick = { selectedFilterGroup = group.id },
-                        label = {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(4.dp)
-                            ) {
-                                if (isSub) {
-                                    Icon(
-                                        Icons.Filled.RssFeed,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(14.dp)
-                                    )
-                                }
-                                Text(group.name)
-                            }
-                        }
-                    )
-                }
-            }
-        }
-
-        visibleSubscriptions.forEach { sub ->
-            SubscriptionInfoCard(
-                sub = sub,
-                isRefreshing = refreshingSubId == sub.id,
-                onRefresh = {
-                    refreshingSubId = sub.id
-                    scope.launch {
-                        val result = profilesStore.refreshSubscription(sub.id)
-                        refreshingSubId = null
-                        result.fold(
-                            onSuccess = { count ->
-                                Toast.makeText(context, "Обновлено профилей: $count", Toast.LENGTH_SHORT).show()
-                            },
-                            onFailure = { e ->
-                                Toast.makeText(context, "Ошибка: ${e.message}", Toast.LENGTH_LONG).show()
-                            }
+                    androidx.compose.material3.IconButton(
+                        onClick = {
+                            scope.launch { settingsStore.saveSortProfilesByPing(!sortByPing) }
+                        },
+                        modifier = Modifier.background(
+                            color = if (sortByPing) MaterialTheme.colorScheme.primaryContainer else androidx.compose.ui.graphics.Color.Transparent,
+                            shape = androidx.compose.foundation.shape.CircleShape
                         )
-                    }
-                },
-                onDelete = { deleteSubTarget = sub },
-                onOpenGroup = if (selectedFilterGroup == null && sub.groupId.isNotBlank()) {
-                    { selectedFilterGroup = sub.groupId }
-                } else {
-                    null
-                }
-            )
-        }
-
-        if (profiles.isEmpty()) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 48.dp, horizontal = 16.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(16.dp)
-                ) {
-                    androidx.compose.material3.Icon(
-                        imageVector = Icons.Filled.Folder,
-                        contentDescription = null,
-                        modifier = Modifier.size(64.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
-                    )
-                    Text(
-                        text = "Пока нет сохранённых профилей",
-
-                        style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
-                    )
-                    Text(
-                        text = "Нажмите + внизу экрана, чтобы добавить профиль",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
-                    )
-                    
-                    Spacer(modifier = Modifier.height(24.dp))
-                    
-                    Surface(
-                        shape = RoundedCornerShape(16.dp),
-                        color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.4f),
-                        modifier = Modifier.fillMaxWidth(0.95f)
                     ) {
-                        Column(
-                            modifier = Modifier.padding(16.dp),
-                            verticalArrangement = Arrangement.spacedBy(12.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally
+                        androidx.compose.material3.Icon(
+                            imageVector = Icons.Filled.Sort,
+                            contentDescription = "Сортировать по пингу",
+                            tint = if (sortByPing) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+
+                    androidx.compose.foundation.layout.Box {
+                        androidx.compose.material3.IconButton(
+                            onClick = { showMoreMenu = true }
                         ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                androidx.compose.material3.Icon(
-                                    imageVector = androidx.compose.material.icons.Icons.Default.Info,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.size(20.dp)
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text(
-                                    "Где взять конфиги?",
-                                    style = MaterialTheme.typography.titleMedium,
-                                    fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.onSecondaryContainer
-                                )
-                            }
-                            
-                            Text(
-                                "Вы можете получить готовые профили напрямую в этих Telegram-ботах:",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                            androidx.compose.material3.Icon(
+                                imageVector = Icons.Filled.MoreVert,
+                                contentDescription = "Дополнительно",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        DropdownMenu(
+                            expanded = showMoreMenu,
+                            onDismissRequest = { showMoreMenu = false }
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("Управление папками") },
+                                leadingIcon = {
+                                    androidx.compose.material3.Icon(
+                                        Icons.Filled.Folder,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary
+                                    )
+                                },
+                                onClick = {
+                                    showGroupManagement = true
+                                    showMoreMenu = false
+                                }
                             )
 
-                            Column(
-                                modifier = Modifier.fillMaxWidth(),
-                                verticalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Button(
-                                    onClick = {
-                                        val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse("https://t.me/darkbit_vpnbot"))
-                                        context.startActivity(intent)
-                                    },
-                                    modifier = Modifier.fillMaxWidth(),
-                                    colors = androidx.compose.material3.ButtonDefaults.buttonColors(
-                                        containerColor = MaterialTheme.colorScheme.surface,
-                                        contentColor = MaterialTheme.colorScheme.primary
-                                    ),
-                                    elevation = androidx.compose.material3.ButtonDefaults.buttonElevation(defaultElevation = 2.dp),
-                                    shape = RoundedCornerShape(12.dp),
-                                    contentPadding = PaddingValues(vertical = 10.dp)
-                                ) {
-                                    Text(
-                                        "🤖 @darkbit_vpnbot",
-                                        maxLines = 1,
-                                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                                        style = MaterialTheme.typography.labelSmall
-                                    )
-                                }
 
-                                Button(
-                                    onClick = {
-                                        val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse("https://t.me/sidylinkbot"))
-                                        context.startActivity(intent)
-                                    },
-                                    modifier = Modifier.fillMaxWidth(),
-                                    colors = androidx.compose.material3.ButtonDefaults.buttonColors(
-                                        containerColor = MaterialTheme.colorScheme.surface,
-                                        contentColor = MaterialTheme.colorScheme.primary
-                                    ),
-                                    elevation = androidx.compose.material3.ButtonDefaults.buttonElevation(defaultElevation = 2.dp),
-                                    shape = RoundedCornerShape(12.dp),
-                                    contentPadding = PaddingValues(vertical = 10.dp)
-                                ) {
-                                    Text(
-                                        "🤖 @sidylinkbot",
-                                        maxLines = 1,
-                                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                                        style = MaterialTheme.typography.labelSmall
-                                    )
+
+                            DropdownMenuItem(
+                                text = { Text("Экспорт всех профилей (ZIP)") },
+                                onClick = {
+                                    showMoreMenu = false
+                                    exportZipLauncher.launch("wdtt_profiles_export.zip")
                                 }
-                            }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Импорт профилей (ZIP)") },
+                                onClick = {
+                                    showMoreMenu = false
+                                    importZipLauncher.launch("application/zip")
+                                }
+                            )
                         }
                     }
                 }
             }
-        } else if (visibleProfiles.isEmpty()) {
+
+            if (groups.isNotEmpty()) {
+                androidx.compose.foundation.lazy.LazyRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp)
+                ) {
+                    item {
+                        FilterChip(
+                            selected = selectedFilterGroup == null,
+                            onClick = { selectedFilterGroup = null },
+                            label = { Text("Все") }
+                        )
+                    }
+                    item {
+                        FilterChip(
+                            selected = selectedFilterGroup == "",
+                            onClick = { selectedFilterGroup = "" },
+                            label = { Text("Без папки") }
+                        )
+                    }
+                    items(groups) { group ->
+                        val isSub = subscriptionGroupIds.contains(group.id)
+                        FilterChip(
+                            selected = selectedFilterGroup == group.id,
+                            onClick = { selectedFilterGroup = group.id },
+                            label = {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    if (isSub) {
+                                        Icon(
+                                            Icons.Filled.RssFeed,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                    }
+                                    Text(group.name)
+                                }
+                            }
+                        )
+                    }
+                }
+            }
+
+            visibleSubscriptions.forEach { sub ->
+                SubscriptionInfoCard(
+                    sub = sub,
+                    isRefreshing = refreshingSubId == sub.id,
+                    onRefresh = {
+                        refreshingSubId = sub.id
+                        scope.launch {
+                            val result = profilesStore.refreshSubscription(sub.id)
+                            refreshingSubId = null
+                            result.fold(
+                                onSuccess = { count ->
+                                    Toast.makeText(
+                                        context,
+                                        "Обновлено профилей: $count",
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+                                },
+                                onFailure = { e ->
+                                    Toast.makeText(
+                                        context,
+                                        "Ошибка: ${e.message}",
+                                        Toast.LENGTH_LONG
+                                    ).show()
+                                }
+                            )
+                        }
+                    },
+                    onDelete = { deleteSubTarget = sub },
+                    onOpenGroup = if (selectedFilterGroup == null && sub.groupId.isNotBlank()) {
+                        { selectedFilterGroup = sub.groupId }
+                    } else {
+                        null
+                    }
+                )
+            }
+
+            if (profiles.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 48.dp, horizontal = 16.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(16.dp)
+                    ) {
+                        androidx.compose.material3.Icon(
+                            imageVector = Icons.Filled.Folder,
+                            contentDescription = null,
+                            modifier = Modifier.size(64.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                        )
+                        Text(
+                            text = "Пока нет сохранённых профилей",
+
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                        )
+                        Text(
+                            text = "Нажмите + внизу экрана, чтобы добавить профиль",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                        )
+
+                        Spacer(modifier = Modifier.height(24.dp))
+
+                    }
+                }
+            }
+
+            val subscriptionStatus: String
+            val subscriptionSubtitle: String
+            val subscriptionColor: Color
+
+            val activeStatus = profiles
+                .mapNotNull { deviceStatuses[it.id] }
+                .firstOrNull { !it.isError && it.expiresAt > 0L }
+
+            if (activeStatus == null) {
+                subscriptionStatus = "Подписка отсутствует"
+                subscriptionSubtitle = "Нет активной подписки"
+                subscriptionColor = MaterialTheme.colorScheme.onSurfaceVariant
+            } else {
+                val now = currentTime
+
+                if (now >= activeStatus.expiresAt) {
+                    subscriptionStatus = "Подписка истекла"
+                    subscriptionSubtitle = "Требуется продление"
+                    subscriptionColor = MaterialTheme.colorScheme.error
+                } else {
+                    val daysLeft = kotlin.math.ceil(
+                        (activeStatus.expiresAt - now) / 86400.0
+                    ).toInt()
+
+                    subscriptionStatus = "Подписка активна"
+                    subscriptionSubtitle = "Осталось $daysLeft дн."
+                    subscriptionColor = when {
+                        daysLeft < 5 -> MaterialTheme.colorScheme.error
+                        daysLeft < 10 -> Color(0xFFFF9800)
+                        else -> Color(0xFF4CAF50)
+                    }
+                }
+            }
+
+
+            HopletSubscriptionCard(
+                context = context,
+                status = subscriptionStatus,
+                subtitle = subscriptionSubtitle,
+                subtitleColor = subscriptionColor
+            )
+         if (visibleProfiles.isEmpty()) {
+
             Box(
                 modifier = Modifier
                     .fillMaxWidth()

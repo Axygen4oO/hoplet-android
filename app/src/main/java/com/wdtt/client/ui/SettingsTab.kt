@@ -1142,7 +1142,7 @@ fun SettingsTabContent(
                         ) {
                             Column {
                                 Text(
-                                    text = "qWDTT",
+                                    text = "Hoplet",
                                     style = MaterialTheme.typography.bodyLarge,
                                     fontWeight = FontWeight.Bold
                                 )
@@ -1159,7 +1159,7 @@ fun SettingsTabContent(
                             ) {
                                 Button(
                                     onClick = {
-                                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://t.me/darkbitVPN"))
+                                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://t.me/+uUh28784ZctiNTNi"))
                                         context.startActivity(intent)
                                     },
                                     shape = RoundedCornerShape(8.dp),
@@ -1174,13 +1174,13 @@ fun SettingsTabContent(
 
                                 OutlinedButton(
                                     onClick = {
-                                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/Axygen4oO/hoplet-android"))
+                                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://hoplet.ru"))
                                         context.startActivity(intent)
                                     },
                                     shape = RoundedCornerShape(8.dp),
                                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
                                 ) {
-                                    Text("GitHub", style = MaterialTheme.typography.labelMedium)
+                                    Text("Личный кабинет", style = MaterialTheme.typography.labelMedium)
                                 }
                             }
                         }
@@ -1191,36 +1191,22 @@ fun SettingsTabContent(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
 
-                        OutlinedButton(
-                            onClick = {
-                                val intent = Intent(
-                                    Intent.ACTION_VIEW,
-                                    Uri.parse("https://pay.cloudtips.ru/p/64a6c43c")
-                                )
-                                context.startActivity(intent)
-                            },
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(12.dp),
-                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
-                        ) {
-                            Icon(
-                                imageVector = Icons.Filled.Favorite,
-                                contentDescription = null,
-                                modifier = Modifier.size(18.dp),
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                "Поблагодарить разработчика",
-                                style = MaterialTheme.typography.labelLarge,
-                            )
-                        }
+                        Spacer(modifier = Modifier.height(16.dp))
+
                         Text(
-                            text = "Если приложение помогает — можно оставить чаевые через CloudTips.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            text = "Подписка",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
                         )
-                        
-                        Spacer(modifier = Modifier.height(8.dp))
+
+                        Text(
+                            text = "Осталось 42 дня",
+                            style = MaterialTheme.typography.headlineSmall,
+                            color = Color(0xFF4CAF50),
+                            fontWeight = FontWeight.Bold
+                        )
+
+
                         
                         Surface(
                             shape = RoundedCornerShape(16.dp),
@@ -1388,7 +1374,7 @@ fun SettingsTabContent(
                         OutlinedButton(
                             onClick = {
                                 val reportText = """
-                                    Приложение: qWDTT
+                                    Приложение: Hoplet
                                     Версия: $currentVersion
                                     Android API: ${Build.VERSION.SDK_INT}
                                     Архитектура (ABI): ${Build.SUPPORTED_ABIS.firstOrNull() ?: "unknown"}
