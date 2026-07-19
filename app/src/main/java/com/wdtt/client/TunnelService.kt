@@ -177,6 +177,8 @@ class TunnelService : Service() {
                         stopTunnel()
                     }
                 }
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
             } catch (e: Exception) {
                 launch(Dispatchers.Main) {
                     stopTunnel()
@@ -194,8 +196,14 @@ class TunnelService : Service() {
         // Подготавливаем CaptchaWebViewManager (не создаёт WebView — просто сохраняет контекст)
         // Вызываем всегда — дёшево, а WebView создаётся на лету при каждом запросе капчи
         CaptchaWebViewManager.onTunnelStart(applicationContext)
+        TunnelManager.start(this, params, isSwitching = false, forceStart = forceStart)
 
-        TunnelManager.start(this, params, forceStart)
+        TunnelManager.start(
+    this,
+    params,
+    isSwitching = false,
+    forceStart = forceStart
+)
         startStatsUpdater()
     }
 
@@ -286,8 +294,11 @@ class TunnelService : Service() {
     private fun isUnderlyingWifiActive(): Boolean {
         val cm = connectivityManager ?: return false
         return activeNetworks.any { network ->
-            cm.getNetworkCapabilities(network)?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
-        }
+    val caps = cm.getNetworkCapabilities(network) ?: return@any false
+    caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) &&
+        caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+        caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+}
     }
 
     private fun networkCapabilityFingerprint(caps: NetworkCapabilities): String {

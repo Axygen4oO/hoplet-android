@@ -51,19 +51,22 @@ object VkCallHashGenerator {
         return VkAuthWebViewManager.obtainAccessToken(context).getOrNull()
     }
 
+    private data class HttpHop(val token: String? = null, val nextUrl: String? = null)
+
     private fun obtainAccessTokenViaHttp(context: Context): String? {
+        val cookieHeader = VkAuthWebViewManager.buildVkCookieHeader()
+        if (cookieHeader.isBlank()) return null
+
         val client = OkHttpClient.Builder()
             .followRedirects(false)
             .connectTimeout(20, TimeUnit.SECONDS)
             .readTimeout(20, TimeUnit.SECONDS)
             .build()
-        val cookieHeader = VkAuthWebViewManager.buildVkCookieHeader()
-        if (cookieHeader.isBlank()) return null
-
         val ua = WebSettings.getDefaultUserAgent(context)
         var url = buildAuthorizeUrl()
 
-        repeat(12) {
+        // Без non-local return из use/let/repeat — иначе ART VerifyError на части устройств.
+        for (step in 0 until 12) {
             val request = Request.Builder()
                 .url(url)
                 .header("Cookie", cookieHeader)
@@ -72,28 +75,38 @@ object VkCallHashGenerator {
                 .get()
                 .build()
 
-            client.newCall(request).execute().use { response ->
-                val location = response.header("Location").orEmpty()
-                extractAccessToken(location)?.let { return it }
-
-                when {
-                    location.isNotBlank() -> url = location
-                    response.isSuccessful -> {
-                        val body = response.body?.string().orEmpty()
-                        Regex("""location\.href\s*=\s*["']([^"']+)["']""")
-                            .find(body)?.groupValues?.getOrNull(1)
-                            ?.let { href -> extractAccessToken(href)?.let { return it } }
-                        Regex("""(https://login\.vk\.com/\?act=grant_access[^"'\\s<]+)""")
-                            .find(body)?.groupValues?.getOrNull(1)
-                            ?.replace("&amp;", "&")
-                            ?.let { grantUrl -> url = grantUrl }
-                            ?: return null
-                    }
-                    else -> return null
-                }
+            val hop = client.newCall(request).execute().use { response ->
+                parseAuthorizeResponse(response)
             }
+
+            val token = hop.token
+            if (token != null) return token
+            val next = hop.nextUrl
+            if (next.isNullOrBlank()) return null
+            url = next
         }
         return null
+    }
+
+    private fun parseAuthorizeResponse(response: okhttp3.Response): HttpHop {
+        val location = response.header("Location").orEmpty()
+        val fromLocation = extractAccessToken(location)
+        if (fromLocation != null) return HttpHop(token = fromLocation)
+
+        if (location.isNotBlank()) return HttpHop(nextUrl = location)
+        if (!response.isSuccessful) return HttpHop()
+
+        val body = response.body?.string().orEmpty()
+        val href = Regex("""location\.href\s*=\s*["']([^"']+)["']""")
+            .find(body)?.groupValues?.getOrNull(1)
+            .orEmpty()
+        val fromHref = extractAccessToken(href)
+        if (fromHref != null) return HttpHop(token = fromHref)
+
+        val grantUrl = Regex("""(https://login\.vk\.com/\?act=grant_access[^"'\\s<]+)""")
+            .find(body)?.groupValues?.getOrNull(1)
+            ?.replace("&amp;", "&")
+        return HttpHop(nextUrl = grantUrl)
     }
 
     private fun buildAuthorizeUrl(): String {
@@ -135,15 +148,15 @@ object VkCallHashGenerator {
             .readTimeout(20, TimeUnit.SECONDS)
             .build()
 
-        client.newCall(Request.Builder().url(url).get().build()).execute().use { response ->
-            val body = response.body?.string().orEmpty()
-            if (body.isBlank()) return null
-            val json = JSONObject(body)
-            if (json.has("error")) {
-                val err = json.getJSONObject("error")
-                throw IllegalStateException(err.optString("error_msg", "VK API error"))
-            }
-            return json.optJSONObject("response")?.optString("join_link")?.takeIf { it.isNotBlank() }
+        val body = client.newCall(Request.Builder().url(url).get().build()).execute().use { response ->
+            response.body?.string().orEmpty()
         }
+        if (body.isBlank()) return null
+        val json = JSONObject(body)
+        if (json.has("error")) {
+            val err = json.getJSONObject("error")
+            throw IllegalStateException(err.optString("error_msg", "VK API error"))
+        }
+        return json.optJSONObject("response")?.optString("join_link")?.takeIf { it.isNotBlank() }
     }
 }

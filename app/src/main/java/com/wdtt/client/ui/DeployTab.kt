@@ -145,13 +145,32 @@ fun DeployTab() {
                 Toast.makeText(context, "Не удалось прочитать файл ключа", Toast.LENGTH_SHORT).show()
                 return@launch
             }
-            if (!content.contains("PRIVATE KEY")) {
-                Toast.makeText(context, "Файл не похож на приватный SSH-ключ", Toast.LENGTH_LONG).show()
+            val normalized = content.trim()
+            val looksLikePrivateKey =
+                normalized.contains("BEGIN OPENSSH PRIVATE KEY") ||
+                        normalized.contains("BEGIN RSA PRIVATE KEY") ||
+                        normalized.contains("BEGIN EC PRIVATE KEY") ||
+                        normalized.contains("BEGIN PRIVATE KEY") ||
+                        (normalized.contains("PRIVATE KEY") && normalized.contains("BEGIN"))
+            if (!looksLikePrivateKey) {
+                Toast.makeText(context, "Нужен приватный ключ (не .pub). OpenSSH или PEM.", Toast.LENGTH_LONG).show()
                 return@launch
             }
-            val keyName = uri.lastPathSegment?.substringAfterLast('/') ?: "ssh-key"
-            settingsStore.saveDeploySshPrivateKey(content.trim(), keyName)
-            Toast.makeText(context, "SSH-ключ загружен", Toast.LENGTH_SHORT).show()
+            val rawName = uri.lastPathSegment?.substringAfterLast('/') ?: "ssh-key"
+            val keyName = rawName
+                .substringAfterLast(':')
+                .substringAfterLast('%')
+                .replace("%2F", "/", ignoreCase = true)
+                .substringAfterLast('/')
+                .ifBlank { "ssh-key" }
+            runCatching {
+                settingsStore.saveDeploySshPrivateKey(normalized, keyName)
+            }.onFailure {
+                Toast.makeText(context, "Не удалось сохранить ключ: ${it.message}", Toast.LENGTH_LONG).show()
+                return@launch
+            }
+            sshUseKey = true
+            Toast.makeText(context, "SSH-ключ сохранён: $keyName", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -223,7 +242,7 @@ fun DeployTab() {
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Icon(Icons.Default.CheckCircle, contentDescription = null, tint = WDTTColors.connected)
-                    Spacer(Modifier.width(8.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
                     Text(
                         text = "Деплой успешно завершен ($successCountdown)",
                         color = WDTTColors.connected,
@@ -249,9 +268,14 @@ fun DeployTab() {
             )
         ) {
             Icon(Icons.Default.Key, null, Modifier.size(18.dp))
-            Spacer(Modifier.width(8.dp))
+            Spacer(modifier = Modifier.width(8.dp))
             Text(
-                if (savedManualPorts) "Секреты (BOT, Пароли, Порты)" else "Секреты (BOT, Пароли)",
+                when {
+                    deploySecretsMissing && savedManualPorts -> "Секреты — укажите пароль WDTT, порты"
+                    deploySecretsMissing -> "Секреты — нужен пароль WDTT"
+                    savedManualPorts -> "Секреты (BOT, Пароли, Порты)"
+                    else -> "Секреты (BOT, Пароли)"
+                },
                 fontWeight = FontWeight.SemiBold
             )
         }
@@ -314,7 +338,7 @@ fun DeployTab() {
                 } else {
                     Icon(Icons.Default.CloudUpload, null, Modifier.size(18.dp))
                 }
-                Spacer(Modifier.width(8.dp))
+                Spacer(modifier = Modifier.width(8.dp))
                 Text(if (isDeploying) "Установка..." else "Установить", fontWeight = FontWeight.Bold)
             }
 
@@ -332,7 +356,7 @@ fun DeployTab() {
                 enabled = !isDeploying && ip.isNotBlank() && hasSshCredentials
             ) {
                 Icon(Icons.Default.Delete, null, Modifier.size(18.dp))
-                Spacer(Modifier.width(8.dp))
+                Spacer(modifier = Modifier.width(8.dp))
                 Text("Удалить", fontWeight = FontWeight.Bold)
             }
         }
@@ -343,246 +367,283 @@ fun DeployTab() {
                 .verticalScroll(scrollState),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-        // ═══ Поля ввода в Card ═══
-        AppSectionCard(
-            contentPadding = PaddingValues(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            OutlinedTextField(
-                value = ip,
-                onValueChange = {
-                    ip = it.filter { c -> !c.isWhitespace() }
-                    persistDeployFields()
-                },
-                label = { Text("IP сервера или домен (без порта)") },
-                placeholder = { Text("1.2.3.4 (без порта)") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(16.dp),
-                enabled = !isDeploying,
-            )
-
-            OutlinedTextField(
-                value = login,
-                onValueChange = {
-                    login = it.filter { c -> !c.isWhitespace() }
-                    persistDeployFields()
-                },
-                label = { Text("Логин") },
-                placeholder = { Text("root") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(16.dp),
-                enabled = !isDeploying,
-            )
-
-            Text(
-                "Вход на сервер",
-                style = MaterialTheme.typography.labelLarge,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.primary,
-            )
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            // ═══ Поля ввода в Card ═══
+            AppSectionCard(
+                contentPadding = PaddingValues(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                OutlinedButton(
-                    onClick = {
-                        if (sshUseKey && !isDeploying) {
-                            sshUseKey = false
-                            persistDeployFields()
-                        }
-                    },
-                    modifier = Modifier.weight(1f).height(44.dp),
-                    shape = RoundedCornerShape(14.dp),
-                    enabled = !isDeploying,
-                    colors = ButtonDefaults.outlinedButtonColors(
-                        containerColor = if (!sshUseKey) {
-                            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f)
-                        } else {
-                            MaterialTheme.colorScheme.surface
-                        },
-                        contentColor = if (!sshUseKey) {
-                            MaterialTheme.colorScheme.onPrimaryContainer
-                        } else {
-                            MaterialTheme.colorScheme.onSurface
-                        }
-                    ),
-                    border = BorderStroke(
-                        1.dp,
-                        if (!sshUseKey) MaterialTheme.colorScheme.primary
-                        else MaterialTheme.colorScheme.outline.copy(alpha = 0.45f)
-                    )
-                ) {
-                    Text("Пароль", fontWeight = if (!sshUseKey) FontWeight.Bold else FontWeight.Medium)
-                }
-                OutlinedButton(
-                    onClick = {
-                        if (!sshUseKey && !isDeploying) {
-                            sshUseKey = true
-                            persistDeployFields()
-                        }
-                    },
-                    modifier = Modifier.weight(1f).height(44.dp),
-                    shape = RoundedCornerShape(14.dp),
-                    enabled = !isDeploying,
-                    colors = ButtonDefaults.outlinedButtonColors(
-                        containerColor = if (sshUseKey) {
-                            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f)
-                        } else {
-                            MaterialTheme.colorScheme.surface
-                        },
-                        contentColor = if (sshUseKey) {
-                            MaterialTheme.colorScheme.onPrimaryContainer
-                        } else {
-                            MaterialTheme.colorScheme.onSurface
-                        }
-                    ),
-                    border = BorderStroke(
-                        1.dp,
-                        if (sshUseKey) MaterialTheme.colorScheme.primary
-                        else MaterialTheme.colorScheme.outline.copy(alpha = 0.45f)
-                    )
-                ) {
-                    Text("SSH-ключ", fontWeight = if (sshUseKey) FontWeight.Bold else FontWeight.Medium)
-                }
-            }
-
-            if (sshUseKey) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    OutlinedButton(
-                        onClick = { sshKeyPickerLauncher.launch("*/*") },
-                        modifier = Modifier.weight(1f).height(48.dp),
+                    OutlinedTextField(
+                        value = ip,
+                        onValueChange = {
+                            ip = it.filter { c -> !c.isWhitespace() }
+                            persistDeployFields()
+                        },
+                        label = { Text("IP / домен") },
+                        placeholder = { Text("1.2.3.4") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f),
                         shape = RoundedCornerShape(16.dp),
                         enabled = !isDeploying,
-                    ) {
-                        Icon(Icons.Default.Key, null, Modifier.size(18.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text(
-                            if (savedSshPrivateKey.isNotBlank()) "Сменить ключ" else "Выбрать ключ",
-                            fontWeight = FontWeight.SemiBold
-                        )
-                    }
-                    if (savedSshPrivateKey.isNotBlank()) {
-                        IconButton(
-                            onClick = {
-                                scope.launch {
-                                    settingsStore.clearDeploySshPrivateKey()
-                                    Toast.makeText(context, "SSH-ключ удалён", Toast.LENGTH_SHORT).show()
-                                }
+                    )
+                    OutlinedTextField(
+                        value = login,
+                        onValueChange = {
+                            login = it.filter { c -> !c.isWhitespace() }
+                            persistDeployFields()
+                        },
+                        label = { Text("Логин") },
+                        placeholder = { Text("root") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(16.dp),
+                        enabled = !isDeploying,
+                    )
+                }
+
+                Text(
+                    "Вход на сервер",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = {
+                            if (sshUseKey && !isDeploying) {
+                                sshUseKey = false
+                                persistDeployFields()
+                            }
+                        },
+                        modifier = Modifier.weight(1f).height(44.dp),
+                        shape = RoundedCornerShape(14.dp),
+                        enabled = !isDeploying,
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            containerColor = if (!sshUseKey) {
+                                MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f)
+                            } else {
+                                MaterialTheme.colorScheme.surface
                             },
+                            contentColor = if (!sshUseKey) {
+                                MaterialTheme.colorScheme.onPrimaryContainer
+                            } else {
+                                MaterialTheme.colorScheme.onSurface
+                            }
+                        ),
+                        border = BorderStroke(
+                            1.dp,
+                            if (!sshUseKey) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.outline.copy(alpha = 0.45f)
+                        )
+                    ) {
+                        Text("Пароль", fontWeight = if (!sshUseKey) FontWeight.Bold else FontWeight.Medium)
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            if (!sshUseKey && !isDeploying) {
+                                sshUseKey = true
+                                persistDeployFields()
+                            }
+                        },
+                        modifier = Modifier.weight(1f).height(44.dp),
+                        shape = RoundedCornerShape(14.dp),
+                        enabled = !isDeploying,
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            containerColor = if (sshUseKey) {
+                                MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f)
+                            } else {
+                                MaterialTheme.colorScheme.surface
+                            },
+                            contentColor = if (sshUseKey) {
+                                MaterialTheme.colorScheme.onPrimaryContainer
+                            } else {
+                                MaterialTheme.colorScheme.onSurface
+                            }
+                        ),
+                        border = BorderStroke(
+                            1.dp,
+                            if (sshUseKey) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.outline.copy(alpha = 0.45f)
+                        )
+                    ) {
+                        Text("SSH-ключ", fontWeight = if (sshUseKey) FontWeight.Bold else FontWeight.Medium)
+                    }
+                }
+
+                if (sshUseKey) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedButton(
+                            onClick = { sshKeyPickerLauncher.launch("*/*") },
+                            modifier = Modifier.weight(1f).height(48.dp),
+                            shape = RoundedCornerShape(16.dp),
                             enabled = !isDeploying,
                         ) {
-                            Icon(Icons.Default.Delete, contentDescription = "Удалить ключ")
+                            Icon(Icons.Default.Key, null, Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                if (savedSshPrivateKey.isNotBlank()) "Сменить ключ" else "Выбрать ключ",
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                        if (savedSshPrivateKey.isNotBlank()) {
+                            IconButton(
+                                onClick = {
+                                    scope.launch {
+                                        settingsStore.clearDeploySshPrivateKey()
+                                        Toast.makeText(context, "SSH-ключ удалён", Toast.LENGTH_SHORT).show()
+                                    }
+                                },
+                                enabled = !isDeploying,
+                            ) {
+                                Icon(Icons.Default.Delete, contentDescription = "Удалить ключ")
+                            }
                         }
                     }
-                }
-                if (savedSshPrivateKey.isNotBlank()) {
-                    Text(
-                        text = "Ключ: ${savedSshKeyName.ifBlank { "загружен" }}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.primary,
-                        fontWeight = FontWeight.Medium,
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = if (savedSshPrivateKey.isNotBlank() || savedSshKeyName.isNotBlank()) {
+                            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f)
+                        } else {
+                            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(
+                                imageVector = if (savedSshPrivateKey.isNotBlank()) {
+                                    Icons.Default.CheckCircle
+                                } else {
+                                    Icons.Default.Key
+                                },
+                                contentDescription = null,
+                                tint = if (savedSshPrivateKey.isNotBlank()) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                },
+                                modifier = Modifier.size(18.dp),
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = when {
+                                    savedSshPrivateKey.isNotBlank() ->
+                                        "Ключ загружен: ${savedSshKeyName.ifBlank { "private key" }}"
+                                    savedSshKeyName.isNotBlank() ->
+                                        "Ключ «$savedSshKeyName» сохранён с ошибкой — выберите файл снова"
+                                    else ->
+                                        "Ключ ещё не выбран (нужен приватный файл, не .pub)"
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.Medium,
+                                color = if (savedSshPrivateKey.isNotBlank()) {
+                                    MaterialTheme.colorScheme.onPrimaryContainer
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                },
+                            )
+                        }
+                    }
+                    OutlinedTextField(
+                        value = sshKeyPassphrase,
+                        onValueChange = {
+                            sshKeyPassphrase = it
+                            persistDeployFields()
+                        },
+                        label = { Text("Пароль от ключа") },
+                        placeholder = { Text("если ключ защищён паролем") },
+                        supportingText = {
+                            Text("Нужен только если при создании SSH-ключа вы задавали пароль")
+                        },
+                        singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(16.dp),
+                        enabled = !isDeploying,
                     )
                 } else {
-                    Text(
-                        text = "Выберите файл приватного ключа (OpenSSH или PEM)",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    OutlinedTextField(
+                        value = password,
+                        onValueChange = {
+                            password = it.filter { c -> !c.isWhitespace() }
+                            persistDeployFields()
+                        },
+                        label = { Text("Пароль SSH") },
+                        placeholder = { Text("password") },
+                        singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(16.dp),
+                        enabled = !isDeploying,
                     )
                 }
-                OutlinedTextField(
-                    value = sshKeyPassphrase,
-                    onValueChange = {
-                        sshKeyPassphrase = it
-                        persistDeployFields()
-                    },
-                    label = { Text("Пароль от ключа") },
-                    placeholder = { Text("если ключ защищён паролем") },
-                    supportingText = {
-                        Text("Нужен только если при создании SSH-ключа вы задавали пароль")
-                    },
-                    singleLine = true,
-                    visualTransformation = PasswordVisualTransformation(),
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(16.dp),
-                    enabled = !isDeploying,
-                )
-            } else {
-                OutlinedTextField(
-                    value = password,
-                    onValueChange = {
-                        password = it.filter { c -> !c.isWhitespace() }
-                        persistDeployFields()
-                    },
-                    label = { Text("Пароль SSH") },
-                    placeholder = { Text("password") },
-                    singleLine = true,
-                    visualTransformation = PasswordVisualTransformation(),
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(16.dp),
-                    enabled = !isDeploying,
-                )
-            }
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                OutlinedTextField(
-                    value = dns1,
-                    onValueChange = {
-                        dns1 = it.filter { c -> !c.isWhitespace() }
-                        persistDeployFields()
-                    },
-                    label = { Text("DNS 1") },
-                    placeholder = { Text("1.1.1.1") },
-                    singleLine = true,
-                    modifier = Modifier.weight(1f),
-                    shape = RoundedCornerShape(16.dp),
-                    enabled = !isDeploying,
-                )
-                OutlinedTextField(
-                    value = dns2,
-                    onValueChange = {
-                        dns2 = it.filter { c -> !c.isWhitespace() }
-                        persistDeployFields()
-                    },
-                    label = { Text("DNS 2") },
-                    placeholder = { Text("1.0.0.1") },
-                    singleLine = true,
-                    modifier = Modifier.weight(1f),
-                    shape = RoundedCornerShape(16.dp),
-                    enabled = !isDeploying,
-                )
-            }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    OutlinedTextField(
+                        value = dns1,
+                        onValueChange = {
+                            dns1 = it.filter { c -> !c.isWhitespace() }
+                            persistDeployFields()
+                        },
+                        label = { Text("DNS 1") },
+                        placeholder = { Text("1.1.1.1") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(16.dp),
+                        enabled = !isDeploying,
+                    )
+                    OutlinedTextField(
+                        value = dns2,
+                        onValueChange = {
+                            dns2 = it.filter { c -> !c.isWhitespace() }
+                            persistDeployFields()
+                        },
+                        label = { Text("DNS 2") },
+                        placeholder = { Text("1.0.0.1") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(16.dp),
+                        enabled = !isDeploying,
+                    )
+                }
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    "Ручное управление портами",
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.Medium,
-                    modifier = Modifier.weight(1f),
-                    color = MaterialTheme.colorScheme.onSurface
-                )
-                Switch(
-                    checked = savedManualPorts,
-                    enabled = !isDeploying,
-                    onCheckedChange = { enabled ->
-                        scope.launch { settingsStore.saveManualPortsEnabled(enabled) }
-                    }
-                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "Ручное управление портами",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier.weight(1f),
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Switch(
+                        checked = savedManualPorts,
+                        enabled = !isDeploying,
+                        onCheckedChange = { enabled ->
+                            scope.launch { settingsStore.saveManualPortsEnabled(enabled) }
+                        }
+                    )
+                }
             }
-        }
         }
 
         if (showSecretsDialog) {
@@ -760,28 +821,37 @@ private class SSHClient(private val session: Session, private val pass: String) 
 }
 
 private fun createSSHSession(host: String, user: String, port: Int, auth: SshAuth): Session {
-    val jsch = JSch()
-    if (auth.usesKey) {
-        val keyBytes = auth.privateKey.toByteArray(Charsets.UTF_8)
-        val passphraseBytes = auth.keyPassphrase.takeIf { it.isNotBlank() }?.toByteArray(Charsets.UTF_8)
-        jsch.addIdentity("deploy-key", keyBytes, null, passphraseBytes)
+    val authMode = if (auth.usesKey) "SSH-ключ" else "пароль"
+    TunnelManager.addDeployLog("SSH $user@$host:$port ($authMode)…")
+    try {
+        val jsch = JSch()
+        if (auth.usesKey) {
+            val keyBytes = auth.privateKey.toByteArray(Charsets.UTF_8)
+            val passphraseBytes = auth.keyPassphrase.takeIf { it.isNotBlank() }?.toByteArray(Charsets.UTF_8)
+            jsch.addIdentity("deploy-key", keyBytes, null, passphraseBytes)
+        }
+        val session = jsch.getSession(user, host, port)
+        if (!auth.usesKey) {
+            session.setPassword(auth.password)
+        }
+        session.setConfig(Properties().apply {
+            put("StrictHostKeyChecking", "no")
+            put("ServerAliveInterval", "10")
+            put("ServerAliveCountMax", "6")
+            put("ConnectTimeout", "15000")
+            put(
+                "PreferredAuthentications",
+                if (auth.usesKey) "publickey" else "password,keyboard-interactive,publickey"
+            )
+        })
+        session.connect(20000)
+        TunnelManager.addDeployLog("SSH подключено")
+        return session
+    } catch (e: Exception) {
+        val msg = e.message?.take(160) ?: e.javaClass.simpleName
+        DeployManager.writeError("SSH не удалось: $msg")
+        throw e
     }
-    val session = jsch.getSession(user, host, port)
-    if (!auth.usesKey) {
-        session.setPassword(auth.password)
-    }
-    session.setConfig(Properties().apply {
-        put("StrictHostKeyChecking", "no")
-        put("ServerAliveInterval", "10")
-        put("ServerAliveCountMax", "6")
-        put("ConnectTimeout", "15000")
-        put(
-            "PreferredAuthentications",
-            if (auth.usesKey) "publickey" else "password,keyboard-interactive,publickey"
-        )
-    })
-    session.connect(20000)
-    return session
 }
 
 private fun shellQuote(value: String): String {
@@ -791,8 +861,8 @@ private fun shellQuote(value: String): String {
 private fun rootCommand(command: String): String {
     val quoted = shellQuote(command)
     return "if command -v sudo >/dev/null 2>&1; then sudo bash -c $quoted; " +
-        "elif [ \"\$(id -u)\" = \"0\" ]; then bash -c $quoted; " +
-        "else echo 'error: root privileges required and sudo not found'; exit 1; fi"
+            "elif [ \"\$(id -u)\" = \"0\" ]; then bash -c $quoted; " +
+            "else echo 'error: root privileges required and sudo not found'; exit 1; fi"
 }
 
 private fun File.containsBinaryToken(token: String): Boolean {
@@ -814,7 +884,7 @@ private fun File.containsBinaryToken(token: String): Boolean {
 
 private fun isUnsafeLegacyServerAsset(serverFile: File): Boolean {
     return serverFile.containsBinaryToken("/etc/wireguard") ||
-        (serverFile.containsBinaryToken("wg0") && !serverFile.containsBinaryToken("wdtt0"))
+            (serverFile.containsBinaryToken("wg0") && !serverFile.containsBinaryToken("wdtt0"))
 }
 
 // ==================== Deploy ====================
@@ -915,10 +985,10 @@ private suspend fun performUninstall(
         ssh.exec(
             rootCommand(
                 "systemctl unmask wdtt 2>/dev/null || true; " +
-                    "systemctl stop wdtt 2>/dev/null || true; " +
-                    "systemctl disable wdtt 2>/dev/null || true; " +
-                    "rm -f /etc/systemd/system/wdtt.service; " +
-                    "systemctl daemon-reload 2>/dev/null || true"
+                        "systemctl stop wdtt 2>/dev/null || true; " +
+                        "systemctl disable wdtt 2>/dev/null || true; " +
+                        "rm -f /etc/systemd/system/wdtt.service; " +
+                        "systemctl daemon-reload 2>/dev/null || true"
             ),
             timeout = 15000L
         )
@@ -933,24 +1003,24 @@ private suspend fun performUninstall(
         ssh.exec(
             rootCommand(
                 "if command -v iptables >/dev/null 2>&1; then " +
-                    "for i in 1 2 3 4 5; do " +
-                    "for iface in $(ls /sys/class/net 2>/dev/null || true); do " +
-                    "iptables -t nat -D POSTROUTING -s 10.66.0.0/16 -o \"${'$'}iface\" -m comment --comment WDTT_MANAGED -j MASQUERADE 2>/dev/null || true; " +
-                    "done; " +
-                    "iptables -D INPUT -p udp --dport $dtlsPort -m comment --comment WDTT_MANAGED -j ACCEPT 2>/dev/null || true; " +
-                    "iptables -D INPUT -p udp --dport $wgPort -m comment --comment WDTT_MANAGED -j ACCEPT 2>/dev/null || true; " +
-                    "iptables -D INPUT -p udp --dport 56000 -m comment --comment WDTT_MANAGED -j ACCEPT 2>/dev/null || true; " +
-                    "iptables -D INPUT -p udp --dport 56001 -m comment --comment WDTT_MANAGED -j ACCEPT 2>/dev/null || true; " +
-                    "iptables -D INPUT -p tcp --dport $port -m comment --comment WDTT_MANAGED -j ACCEPT 2>/dev/null || true; " +
-                    "iptables -D INPUT -p tcp --dport 22 -m comment --comment WDTT_MANAGED -j ACCEPT 2>/dev/null || true; " +
-                    "iptables -D FORWARD -i wdtt0 -m comment --comment WDTT_MANAGED -j ACCEPT 2>/dev/null || true; " +
-                    "iptables -D FORWARD -o wdtt0 -m comment --comment WDTT_MANAGED -j ACCEPT 2>/dev/null || true; " +
-                    "done; fi; " +
-                    "if command -v nft >/dev/null 2>&1; then " +
-                    "nft delete table ip wdtt 2>/dev/null || true; " +
-                    "nft delete table inet wdtt 2>/dev/null || true; " +
-                    "nft delete table inet wdtt_mangle 2>/dev/null || true; " +
-                    "fi"
+                        "for i in 1 2 3 4 5; do " +
+                        "for iface in $(ls /sys/class/net 2>/dev/null || true); do " +
+                        "iptables -t nat -D POSTROUTING -s 10.66.0.0/16 -o \"${'$'}iface\" -m comment --comment WDTT_MANAGED -j MASQUERADE 2>/dev/null || true; " +
+                        "done; " +
+                        "iptables -D INPUT -p udp --dport $dtlsPort -m comment --comment WDTT_MANAGED -j ACCEPT 2>/dev/null || true; " +
+                        "iptables -D INPUT -p udp --dport $wgPort -m comment --comment WDTT_MANAGED -j ACCEPT 2>/dev/null || true; " +
+                        "iptables -D INPUT -p udp --dport 56000 -m comment --comment WDTT_MANAGED -j ACCEPT 2>/dev/null || true; " +
+                        "iptables -D INPUT -p udp --dport 56001 -m comment --comment WDTT_MANAGED -j ACCEPT 2>/dev/null || true; " +
+                        "iptables -D INPUT -p tcp --dport $port -m comment --comment WDTT_MANAGED -j ACCEPT 2>/dev/null || true; " +
+                        "iptables -D INPUT -p tcp --dport 22 -m comment --comment WDTT_MANAGED -j ACCEPT 2>/dev/null || true; " +
+                        "iptables -D FORWARD -i wdtt0 -m comment --comment WDTT_MANAGED -j ACCEPT 2>/dev/null || true; " +
+                        "iptables -D FORWARD -o wdtt0 -m comment --comment WDTT_MANAGED -j ACCEPT 2>/dev/null || true; " +
+                        "done; fi; " +
+                        "if command -v nft >/dev/null 2>&1; then " +
+                        "nft delete table ip wdtt 2>/dev/null || true; " +
+                        "nft delete table inet wdtt 2>/dev/null || true; " +
+                        "nft delete table inet wdtt_mangle 2>/dev/null || true; " +
+                        "fi"
             ),
             timeout = 15000L
         )
@@ -959,8 +1029,8 @@ private suspend fun performUninstall(
         ssh.exec(
             rootCommand(
                 "ip link show wdtt0 >/dev/null 2>&1 && ip link del wdtt0 2>/dev/null || true; " +
-                    "[ -d /etc/wdtt ] && find /etc/wdtt -mindepth 1 -maxdepth 1 ! -name passwords.json -exec rm -rf {} + 2>/dev/null || true; " +
-                    "[ -f /etc/wdtt/passwords.json ] && chmod 600 /etc/wdtt/passwords.json 2>/dev/null || true"
+                        "[ -d /etc/wdtt ] && find /etc/wdtt -mindepth 1 -maxdepth 1 ! -name passwords.json -exec rm -rf {} + 2>/dev/null || true; " +
+                        "[ -f /etc/wdtt/passwords.json ] && chmod 600 /etc/wdtt/passwords.json 2>/dev/null || true"
             ),
             timeout = 10000L
         )
@@ -1201,7 +1271,7 @@ fun UninstallConfirmDialog(onDismiss: () -> Unit, onConfirm: () -> Unit) {
                         )
                     ) {
                         Icon(Icons.Default.Delete, null, Modifier.size(18.dp))
-                        Spacer(Modifier.width(6.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
                         Text("Удалить", fontWeight = FontWeight.Bold)
                     }
                 }

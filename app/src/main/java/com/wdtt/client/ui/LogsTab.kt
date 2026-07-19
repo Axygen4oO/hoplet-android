@@ -15,6 +15,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Notes
+import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -30,13 +31,45 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.wdtt.client.LogEntry
 import com.wdtt.client.TunnelManager
 import com.wdtt.client.WDTTColors
+import kotlinx.coroutines.delay
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun LogsTab() {
     val context = LocalContext.current
     val currentLogs by TunnelManager.logs.collectAsStateWithLifecycle()
+    val statsText by TunnelManager.stats.collectAsStateWithLifecycle()
+    val isRunning by TunnelManager.running.collectAsStateWithLifecycle()
+    val isConnecting by TunnelManager.isConnecting.collectAsStateWithLifecycle()
+    val connectedSinceMs by TunnelManager.connectedSinceMs.collectAsStateWithLifecycle()
     val listState = rememberLazyListState()
+
+    var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(isRunning, connectedSinceMs) {
+        if (!isRunning || connectedSinceMs <= 0L) return@LaunchedEffect
+        while (true) {
+            nowMs = System.currentTimeMillis()
+            delay(1000)
+        }
+    }
+    val uptimeText = if (isRunning && connectedSinceMs > 0L) {
+        TunnelManager.formatUptime(nowMs - connectedSinceMs)
+    } else {
+        null
+    }
+
+    // Синяя статистика закреплена сверху — не тонет среди DNS/VK/капчи.
+    val scrollableLogs = remember(currentLogs) {
+        currentLogs.filter { it.key != "stats" }
+    }
+    val pinnedStatsMessage = remember(statsText, isRunning, isConnecting, currentLogs) {
+        val fromLog = currentLogs.firstOrNull { it.key == "stats" }?.message
+        when {
+            !fromLog.isNullOrBlank() -> fromLog
+            (isRunning || isConnecting) && statsText.isNotBlank() -> "[СТАТИСТИКА] $statsText"
+            else -> null
+        }
+    }
 
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
         // Toolbar
@@ -55,10 +88,14 @@ fun LogsTab() {
                     Icon(Icons.Default.Delete, contentDescription = "Clear", tint = MaterialTheme.colorScheme.primary)
                 }
                 IconButton(onClick = {
-                    val text = currentLogs.joinToString("\n") { "${it.message} (x${it.count})" }
+                    val text = buildString {
+                        if (pinnedStatsMessage != null) {
+                            appendLine(pinnedStatsMessage)
+                        }
+                        scrollableLogs.forEach { appendLine("${it.message} (x${it.count})") }
+                    }.trim()
                     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                    val clip = ClipData.newPlainText("WDTT Logs", text)
-                    clipboard.setPrimaryClip(clip)
+                    clipboard.setPrimaryClip(ClipData.newPlainText("WDTT Logs", text))
                     Toast.makeText(context, "Скопировано", Toast.LENGTH_SHORT).show()
                 }) {
                     Icon(Icons.Default.ContentCopy, contentDescription = "Copy", tint = MaterialTheme.colorScheme.primary)
@@ -76,7 +113,69 @@ fun LogsTab() {
             shape = RoundedCornerShape(20.dp),
             elevation = CardDefaults.cardElevation(defaultElevation = 6.dp)
         ) {
-            if (currentLogs.isEmpty()) {
+            Column(modifier = Modifier.fillMaxSize()) {
+                if (pinnedStatsMessage != null || uptimeText != null) {
+                    Surface(
+                        color = WDTTColors.terminalBlue.copy(alpha = if (isDark) 0.18f else 0.12f),
+                        shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            if (pinnedStatsMessage != null) {
+                                Text(
+                                    text = pinnedStatsMessage
+                                        .removePrefix("[СТАТИСТИКА] ")
+                                        .removePrefix("[СТАТИСТИКА]"),
+                                    color = WDTTColors.terminalBlue,
+                                    fontSize = 12.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontWeight = FontWeight.SemiBold,
+                                    lineHeight = 14.sp,
+                                    maxLines = 1,
+                                    softWrap = false,
+                                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                                    textAlign = TextAlign.Start,
+                                    modifier = Modifier.weight(1f)
+                                )
+                            } else {
+                                Spacer(modifier = Modifier.weight(1f))
+                            }
+                            if (uptimeText != null) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Default.Timer,
+                                        contentDescription = null,
+                                        tint = WDTTColors.terminalBlue,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                    Text(
+                                        text = uptimeText,
+                                        color = WDTTColors.terminalBlue,
+                                        fontSize = 12.sp,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    HorizontalDivider(
+                        color = WDTTColors.terminalBlue.copy(alpha = 0.35f),
+                        thickness = 1.dp
+                    )
+                }
+
+                if (scrollableLogs.isEmpty() && pinnedStatsMessage == null && uptimeText == null) {
                 Box(
                     modifier = Modifier.fillMaxSize().padding(32.dp),
                     contentAlignment = Alignment.Center
@@ -108,11 +207,14 @@ fun LogsTab() {
             } else {
                 LazyColumn(
                     state = listState,
-                    modifier = Modifier.fillMaxSize().padding(12.dp),
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(12.dp),
                     contentPadding = PaddingValues(bottom = 12.dp)
                 ) {
-                    items(currentLogs, key = { it.key }) { entry ->
+                    items(scrollableLogs, key = { it.key }) { entry ->
                         LogLine(entry)
+                    }
                     }
                 }
             }

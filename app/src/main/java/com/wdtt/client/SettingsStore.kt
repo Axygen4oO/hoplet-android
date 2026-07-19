@@ -59,7 +59,13 @@ class SettingsStore(context: Context) {
         private val DEPLOY_PASSWORD_ENCRYPTED = stringPreferencesKey("deploy_password_encrypted")
         private val DEPLOY_SSH_USE_KEY = booleanPreferencesKey("deploy_ssh_use_key")
         private val DEPLOY_SSH_PRIVATE_KEY_ENCRYPTED = stringPreferencesKey("deploy_ssh_private_key_encrypted")
+
+        private val DEPLOY_SSH_PRIVATE_KEY = stringPreferencesKey("deploy_ssh_private_key") // legacy plaintext
+
         private val DEPLOY_SSH_KEY_PASSPHRASE_ENCRYPTED = stringPreferencesKey("deploy_ssh_key_passphrase_encrypted")
+
+        private val DEPLOY_SSH_KEY_PASSPHRASE = stringPreferencesKey("deploy_ssh_key_passphrase") // legacy
+
         private val DEPLOY_SSH_KEY_NAME = stringPreferencesKey("deploy_ssh_key_name")
         private val DEPLOY_SSH_PORT = stringPreferencesKey("deploy_ssh_port")
         private val DEPLOY_DNS1 = stringPreferencesKey("deploy_dns1")
@@ -131,7 +137,16 @@ class SettingsStore(context: Context) {
         private val STOP_ON_WIFI = booleanPreferencesKey("stop_on_wifi")
         private val SORT_PROFILES_BY_PING = booleanPreferencesKey("sort_profiles_by_ping")
 
+
+        /** -1 = выкл, 0 = при каждом открытии, иначе интервал в часах (6/12/24). */
+        private val SUB_AUTO_REFRESH_HOURS = intPreferencesKey("sub_auto_refresh_hours")
+
+        const val SUB_AUTO_REFRESH_NEVER = -1
+        const val SUB_AUTO_REFRESH_EVERY_OPEN = 0
+        const val DEFAULT_SUB_AUTO_REFRESH_HOURS = 12
+
         private val HIDE_BLOCKER_WARNING = booleanPreferencesKey("hide_blocker_warning")
+        
         private val SHOW_SPEED_GRAPH = booleanPreferencesKey("show_speed_graph")
         
         private val HAS_SEEN_WELCOME_DIALOG = booleanPreferencesKey("has_seen_welcome_dialog")
@@ -315,10 +330,10 @@ class SettingsStore(context: Context) {
     }
     val deploySshUseKey: Flow<Boolean> = dataStore.data.map { it[DEPLOY_SSH_USE_KEY] ?: false }
     val deploySshPrivateKey: Flow<String> = dataStore.data.map {
-        readSecret(it, DEPLOY_SSH_PRIVATE_KEY_ENCRYPTED, DEPLOY_SSH_PRIVATE_KEY_ENCRYPTED)
+        readSecret(it, DEPLOY_SSH_PRIVATE_KEY_ENCRYPTED, DEPLOY_SSH_PRIVATE_KEY)
     }
     val deploySshKeyPassphrase: Flow<String> = dataStore.data.map {
-        readSecret(it, DEPLOY_SSH_KEY_PASSPHRASE_ENCRYPTED, DEPLOY_SSH_KEY_PASSPHRASE_ENCRYPTED)
+        readSecret(it, DEPLOY_SSH_KEY_PASSPHRASE_ENCRYPTED, DEPLOY_SSH_KEY_PASSPHRASE)
     }
     val deploySshKeyName: Flow<String> = dataStore.data.map { it[DEPLOY_SSH_KEY_NAME] ?: "" }
     val deploySshPort: Flow<String> = dataStore.data.map { it[DEPLOY_SSH_PORT] ?: "" }
@@ -405,6 +420,11 @@ class SettingsStore(context: Context) {
     val stopOnWifi: Flow<Boolean> = dataStore.data.map { it[STOP_ON_WIFI] ?: false }
     val sortProfilesByPing: Flow<Boolean> = dataStore.data.map { it[SORT_PROFILES_BY_PING] ?: false }
 
+
+    val subscriptionAutoRefreshHours: Flow<Int> = dataStore.data.map {
+        it[SUB_AUTO_REFRESH_HOURS] ?: DEFAULT_SUB_AUTO_REFRESH_HOURS
+    }
+
     val hideBlockerWarning: Flow<Boolean> = dataStore.data.map { it[HIDE_BLOCKER_WARNING] ?: false }
     val showSpeedGraph: Flow<Boolean> = dataStore.data.map { it[SHOW_SPEED_GRAPH] ?: true }
 
@@ -414,6 +434,16 @@ class SettingsStore(context: Context) {
 
     suspend fun saveStopOnWifi(enabled: Boolean) {
         dataStore.edit { prefs -> prefs[STOP_ON_WIFI] = enabled }
+
+
+        suspend fun saveSubscriptionAutoRefreshHours(hours: Int) {
+            val normalized = when (hours) {
+                SUB_AUTO_REFRESH_NEVER, SUB_AUTO_REFRESH_EVERY_OPEN -> hours
+                6, 12, 24 -> hours
+                else -> DEFAULT_SUB_AUTO_REFRESH_HOURS
+            }
+            dataStore.edit { prefs -> prefs[SUB_AUTO_REFRESH_HOURS] = normalized }
+        }
     }
 
     suspend fun saveSortProfilesByPing(enabled: Boolean) {
@@ -584,21 +614,23 @@ class SettingsStore(context: Context) {
             prefs[DEPLOY_DNS2] = dns2
             useSshKey?.let { prefs[DEPLOY_SSH_USE_KEY] = it }
             keyPassphrase?.let {
-                prefs.putSecret(DEPLOY_SSH_KEY_PASSPHRASE_ENCRYPTED, DEPLOY_SSH_KEY_PASSPHRASE_ENCRYPTED, it)
+                prefs.putSecret(DEPLOY_SSH_KEY_PASSPHRASE_ENCRYPTED, DEPLOY_SSH_KEY_PASSPHRASE, it)
             }
         }
     }
 
     suspend fun saveDeploySshPrivateKey(keyContent: String, keyName: String) {
         dataStore.edit { prefs ->
-            prefs.putSecret(DEPLOY_SSH_PRIVATE_KEY_ENCRYPTED, DEPLOY_SSH_PRIVATE_KEY_ENCRYPTED, keyContent)
+            prefs.putSecret(DEPLOY_SSH_PRIVATE_KEY_ENCRYPTED, DEPLOY_SSH_PRIVATE_KEY, keyContent)
             prefs[DEPLOY_SSH_KEY_NAME] = keyName
+            prefs[DEPLOY_SSH_USE_KEY] = true
         }
     }
 
     suspend fun clearDeploySshPrivateKey() {
         dataStore.edit { prefs ->
             prefs.remove(DEPLOY_SSH_PRIVATE_KEY_ENCRYPTED)
+            prefs.remove(DEPLOY_SSH_PRIVATE_KEY)
             prefs.remove(DEPLOY_SSH_KEY_NAME)
         }
     }
@@ -805,7 +837,19 @@ class SettingsStore(context: Context) {
         encryptedKey: Preferences.Key<String>,
         legacyKey: Preferences.Key<String>
     ): String {
-        return secureStore.decrypt(prefs[encryptedKey]) ?: prefs[legacyKey] ?: ""
+        val encrypted = prefs[encryptedKey]
+        val fromSecure = secureStore.decrypt(encrypted)
+        if (!fromSecure.isNullOrEmpty()) return fromSecure
+
+        if (!encrypted.isNullOrBlank() && !encrypted.startsWith("v1:")) {
+            return encrypted
+        }
+
+        if (legacyKey != encryptedKey) {
+            return prefs[legacyKey] ?: ""
+        }
+
+        return ""
     }
 
     private fun MutablePreferences.putSecret(
@@ -815,10 +859,13 @@ class SettingsStore(context: Context) {
     ) {
         if (value.isBlank()) {
             remove(encryptedKey)
-            remove(legacyKey)
+            if (legacyKey != encryptedKey) remove(legacyKey)
         } else {
             this[encryptedKey] = secureStore.encrypt(value)
-            remove(legacyKey)
+            // Важно: для SSH-ключа encryptedKey == legacyKey — нельзя remove после записи.
+if (legacyKey != encryptedKey) {
+    remove(legacyKey)
+}
         }
     }
 
