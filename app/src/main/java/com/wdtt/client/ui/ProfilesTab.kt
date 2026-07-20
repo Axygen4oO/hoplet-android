@@ -127,6 +127,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalDensity
+import com.wdtt.client.DeviceInfo
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterialApi::class)
 @Composable
@@ -457,21 +458,48 @@ fun ProfilesTab(
     }
 
     LaunchedEffect(profiles) {
-        val androidId = android.provider.Settings.Secure.getString(context.contentResolver, android.provider.Settings.Secure.ANDROID_ID) ?: "unknown"
+        val androidId = android.provider.Settings.Secure.getString(
+            context.contentResolver,
+            android.provider.Settings.Secure.ANDROID_ID
+        ) ?: "unknown"
+
         val dtlsPort = if (savedManualPortsEnabled) savedServerDtlsPort else 56000
+
+        val sentNames = mutableSetOf<String>()
+
         while (true) {
             profiles.forEach { profile ->
                 if (profile.password.isNotBlank() && profile.peer.isNotBlank()) {
                     launch {
-                        val status = fetchProfileStatus(profile.peer, dtlsPort, profile.password, androidId)
+                        val status = fetchProfileStatus(
+                            profile.peer,
+                            dtlsPort,
+                            profile.password,
+                            androidId
+                        )
+
+                        if (sentNames.add(profile.id)) {
+                            android.util.Log.d("WDTT", "About to send device name for ${profile.name}")
+                            sendDeviceName(
+                                peer = profile.peer,
+                                dtlsPort = dtlsPort,
+                                password = profile.password,
+                                deviceId = androidId,
+                                deviceName = DeviceInfo.getDeviceName()
+                            )
+                        }
+
                         if (status != null) {
                             deviceStatuses = deviceStatuses + (profile.id to status)
                         } else {
-                            deviceStatuses = deviceStatuses + (profile.id to ProfileDeviceStatus(isError = true))
+                            deviceStatuses = deviceStatuses + (
+                                    profile.id to ProfileDeviceStatus(isError = true)
+                                    )
                         }
                     }
                 }
             }
+
             kotlinx.coroutines.delay(8000)
         }
     }
@@ -2173,6 +2201,62 @@ private suspend fun fetchProfileStatus(
     } catch (e: Exception) {
         e.printStackTrace()
         null
+    } finally {
+        conn?.disconnect()
+    }
+}
+
+
+private suspend fun sendDeviceName(
+    peer: String,
+    dtlsPort: Int,
+    password: String,
+    deviceId: String,
+    deviceName: String
+) = withContext(Dispatchers.IO) {
+    var conn: HttpURLConnection? = null
+
+    try {
+        val endpoint = PeerAddress.httpEndpoint(peer, dtlsPort)
+        val url = URL("http://$endpoint/api/device/name")
+
+        android.util.Log.d("WDTT", "sendDeviceName()")
+        android.util.Log.d("WDTT", "endpoint = $endpoint")
+        android.util.Log.d("WDTT", "url = $url")
+        android.util.Log.d("WDTT", "deviceId = $deviceId")
+        android.util.Log.d("WDTT", "deviceName = $deviceName")
+
+        conn = url.openConnection() as HttpURLConnection
+        conn.requestMethod = "POST"
+        conn.connectTimeout = 4000
+        conn.readTimeout = 4000
+        conn.doOutput = true
+        conn.setRequestProperty("Content-Type", "application/json")
+
+        val json = JSONObject().apply {
+            put("password", password)
+            put("device_id", deviceId)
+            put("device_name", deviceName)
+        }
+
+        conn.outputStream.use {
+            it.write(json.toString().toByteArray(Charsets.UTF_8))
+        }
+
+        val code = conn.responseCode
+
+        android.util.Log.d("WDTT", "responseCode = $code")
+
+        val body = try {
+            conn.inputStream.bufferedReader().readText()
+        } catch (_: Exception) {
+            conn.errorStream?.bufferedReader()?.readText()
+        }
+
+        android.util.Log.d("WDTT", "responseBody = $body")
+
+    } catch (e: Exception) {
+        android.util.Log.e("WDTT", "sendDeviceName failed", e)
     } finally {
         conn?.disconnect()
     }

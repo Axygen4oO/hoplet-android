@@ -99,6 +99,20 @@ import com.wdtt.client.stripVkUrlStatic
 
 import androidx.compose.ui.res.stringResource
 
+import java.net.HttpURLConnection
+import java.net.URL
+import org.json.JSONArray
+
+import com.wdtt.client.ServerVkHashes
+import com.wdtt.client.AdminSession
+import org.json.JSONObject
+import java.io.OutputStreamWriter
+
+
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+
 
 private const val WORKERS_PER_GROUP = 9
 
@@ -164,7 +178,6 @@ fun SettingsTabContent(
     val updateCheckIntervalHours by settingsStore.updateCheckIntervalHours.collectAsStateWithLifecycle(
         initialValue = com.wdtt.client.DEFAULT_UPDATE_CHECK_INTERVAL_HOURS
     )
-    val includeBetaUpdates by settingsStore.includeBetaUpdates.collectAsStateWithLifecycle(initialValue = false)
 
     val currentProfileId by settingsStore.currentProfileId.collectAsStateWithLifecycle(initialValue = "")
     val currentProfileName by settingsStore.currentProfileName.collectAsStateWithLifecycle(initialValue = "")
@@ -173,6 +186,8 @@ fun SettingsTabContent(
 
     val profilesStore = remember { com.wdtt.client.ProfilesStore(context) }
     val profiles by profilesStore.profiles.collectAsStateWithLifecycle(initialValue = emptyList())
+
+    val tunnelBusy by TunnelManager.running.collectAsStateWithLifecycle()
 
     val cooldownSeconds by TunnelManager.cooldownSeconds.collectAsStateWithLifecycle()
     var wasRunning by remember { mutableStateOf(false) }
@@ -202,6 +217,9 @@ fun SettingsTabContent(
     var serverDtlsPortInput by rememberSaveable { mutableStateOf("56000") }
     var serverWgPortInput by rememberSaveable { mutableStateOf("56001") }
     var showAppSettingsDialog by rememberSaveable { mutableStateOf(false) }
+    var isAdminMode by rememberSaveable { mutableStateOf(false) }
+    var showPinDialog by rememberSaveable { mutableStateOf(false) }
+    var versionClickCount by rememberSaveable { mutableIntStateOf(0) }
     val openAppSettingsRequest by TunnelManager.openAppSettingsRequest.collectAsStateWithLifecycle()
     var lastHandledOpenSettings by rememberSaveable { mutableLongStateOf(0L) }
     LaunchedEffect(openAppSettingsRequest) {
@@ -212,7 +230,7 @@ fun SettingsTabContent(
     }
 
     val currentHashesRaw by settingsStore.vkHashes.collectAsStateWithLifecycle(initialValue = "")
-    val uniqueHashes = remember(currentHashesRaw) { 
+    val uniqueHashes = remember(currentHashesRaw) {
         currentHashesRaw.split(Regex("[,\\s\\n]+"))
             .filter { it.isNotBlank() && it.length >= 16 }
             .distinct()
@@ -223,7 +241,7 @@ fun SettingsTabContent(
         if (vkAccountAuth) SettingsStore.VK_ACCOUNT_MAX_WORKERS.toFloat()
         else SettingsStore.maxAnonymousWorkers(filledHashCount.coerceAtLeast(1)).toFloat()
     }
-    
+
     val globalHashesRaw by settingsStore.globalVkHashes.collectAsStateWithLifecycle(initialValue = "")
     val vkAnonPath by settingsStore.vkAnonPath.collectAsStateWithLifecycle(initialValue = "vkcalls")
     val goDnsPreset by settingsStore.goDnsPreset.collectAsStateWithLifecycle(initialValue = "yandex")
@@ -281,7 +299,7 @@ fun SettingsTabContent(
         val captchaMethod = settingsStore.captchaSolveMethod.first()
         val wbvCaptchaMethod = settingsStore.captchaWbvSolveMethod.first()
         val vkAuthMode = settingsStore.vkAuthMode.first()
-        
+
         val embeddedPort = PeerAddress.port(peer)
         peerInput = PeerAddress.host(peer)
         val initialHashesList = hashes.split(Regex("[,\\s\\n]+"))
@@ -318,7 +336,7 @@ fun SettingsTabContent(
             val legacy = settingsStore.goDnsCustom.first()
             if (legacy.startsWith("https://", ignoreCase = true)) legacy else ""
         }
-        
+
         initialized = true
         vkLoggedIn = VkAuthWebViewManager.hasVkSessionCookie()
     }
@@ -449,13 +467,13 @@ fun SettingsTabContent(
             lastTraffic = -1.0
             lastTime = System.currentTimeMillis()
             currentSpeedKbps = 0f
-            
+
             while (true) {
                 delay(1000)
                 val now = System.currentTimeMillis()
                 val statsText = TunnelManager.stats.value
                 val currentTraffic = parseTrafficMb(statsText)
-                
+
                 if (currentTraffic != null) {
                     if (lastTraffic >= 0.0) {
                         val deltaTrafficMb = currentTraffic - lastTraffic
@@ -477,7 +495,7 @@ fun SettingsTabContent(
                         lastTime = now
                     }
                 }
-                
+
                 var speedPoint = currentSpeedKbps
                 if (speedPoint > 2f) {
                     val oscillation = (Math.random() * 0.12 - 0.06).toFloat()
@@ -511,18 +529,52 @@ fun SettingsTabContent(
         saveJob?.cancel()
         scope.launch {
             val effectiveVkAnonPath = SettingsStore.resolveVkAnonPath(context)
-            settingsStore.save(
-                host, combinedHashes, "",
-                finalWorkers, "udp", effectiveLocalPort, sniInput, false
+
+            val server = PeerAddress.host(peerInput.trim()) + ":56000"
+            android.util.Log.d("VKHASH", "Server URL = http://$server/api/vkhashes")
+
+            val serverHashes = ServerVkHashes.load(
+                server = server,
+                token = AdminSession.getToken(context) ?: ""
             )
+
+            val finalHashes =
+                if (serverHashes.isNotEmpty())
+                    serverHashes.joinToString(",")
+                else
+                    combinedHashes
+            android.util.Log.d("VKHASH", "Loaded hashes: ${serverHashes.size}")
+
+            settingsStore.save(
+                host,
+                finalHashes,
+                "",
+                finalWorkers,
+                "udp",
+                effectiveLocalPort,
+                sniInput,
+                false
+            )
+            android.util.Log.d("VKHASH", "settingsStore.save OK")
+
             settingsStore.saveCaptchaMode(effectiveCaptchaMode)
             settingsStore.saveCaptchaSolveMethod(effectiveCaptchaSolveMethod)
             settingsStore.saveVkAnonPath(effectiveVkAnonPath)
-            val effectiveGoDns = settingsStore.resolveGoDnsArg()
+
+            val effectiveGoDns = try {
+                settingsStore.resolveGoDnsArg()
+            } catch (e: Exception) {
+                android.util.Log.e("VKHASH", "resolveGoDnsArg failed", e)
+                ""
+            }
+
+            android.util.Log.d("VKHASH", "resolveGoDnsArg OK")
+
+
             val intent = Intent(context, TunnelService::class.java).apply {
                 action = "START"
-                putExtra("peer",    peerForTunnel)
-                putExtra("vk_hashes", combinedHashes)
+                putExtra("peer", peerForTunnel)
+                putExtra("vk_hashes", finalHashes)
                 putExtra("secondary_vk_hash", "")
                 putExtra("workers_per_hash", finalWorkers)
                 putExtra("port", effectiveLocalPort)
@@ -535,8 +587,19 @@ fun SettingsTabContent(
                 putExtra("go_dns_arg", effectiveGoDns)
                 putExtra("obfs_mode", obfsMode)
             }
-            if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent)
-            else context.startService(intent)
+            android.util.Log.d("VKHASH", "Intent created")
+
+            try {
+                if (Build.VERSION.SDK_INT >= 26)
+                    context.startForegroundService(intent)
+                else
+                    context.startService(intent)
+
+                android.util.Log.d("VKHASH", "TunnelService started")
+
+            } catch (e: Exception) {
+                android.util.Log.e("VKHASH", e.stackTraceToString())
+            }
         }
     }
 
@@ -565,6 +628,100 @@ fun SettingsTabContent(
     }
 
     // ═══ Dialogs ═══
+
+    if (showPinDialog) {
+        var pin by rememberSaveable { mutableStateOf("") }
+
+        AlertDialog(
+            onDismissRequest = {
+                showPinDialog = false
+                pin = ""
+            },
+            title = {
+                Text("Вход администратора")
+            },
+            text = {
+                OutlinedTextField(
+                    value = pin,
+                    onValueChange = {
+                        if (it.length <= 12) pin = it
+                    },
+                    singleLine = true,
+                    label = {
+                        Text("PIN")
+                    }
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        scope.launch(Dispatchers.IO) {
+                            try {
+                                val url = URL("http://${PeerAddress.httpEndpoint(peerInput, effectiveServerDtlsPort)}/api/admin/login")
+
+                                val conn = url.openConnection() as HttpURLConnection
+                                conn.requestMethod = "POST"
+                                conn.doOutput = true
+                                conn.connectTimeout = 5000
+                                conn.readTimeout = 5000
+                                conn.setRequestProperty("Content-Type", "application/json")
+
+                                val body = JSONObject().apply {
+                                    put("password", pin)
+                                }
+
+                                OutputStreamWriter(conn.outputStream).use {
+                                    it.write(body.toString())
+                                }
+
+                                val response = conn.inputStream.bufferedReader().readText()
+                                val json = JSONObject(response)
+
+                                withContext(Dispatchers.Main) {
+                                    if (json.optBoolean("success")) {
+                                        val token = json.getString("token")
+
+                                        AdminSession.saveToken(context, token)
+
+                                        isAdminMode = true
+                                        showPinDialog = false
+
+                                        Toast.makeText(
+                                            context,
+                                            "Авторизация выполнена",
+                                            Toast.LENGTH_SHORT
+                                        ).show()
+                                    } else {
+                                        Toast.makeText(
+                                            context,
+                                            "Неверный пароль",
+                                            Toast.LENGTH_SHORT
+                                        ).show()
+                                    }
+                                }
+
+                                conn.disconnect()
+
+                            } catch (e: Exception) {
+                                withContext(Dispatchers.Main) {
+                                    Toast.makeText(
+                                        context,
+                                        e.message ?: "Ошибка подключения",
+                                        Toast.LENGTH_LONG
+                                    ).show()
+                                }
+                            }
+                        }
+                    }
+                ) {
+                    Text("Войти")
+                }
+            }
+        )
+    }
+
+
+
     if (showSecretsDialog) {
         SecretsDialog(
             settingsStore = settingsStore,
@@ -611,22 +768,61 @@ fun SettingsTabContent(
                 val cleaned3 = stripVkUrlStatic(h3)
                 val cleaned4 = stripVkUrlStatic(h4)
                 val combined = normalizeHashes(cleaned1, cleaned2, cleaned3, cleaned4)
-                
+
+
+                scope.launch(Dispatchers.IO) {
+                    try {
+                        val url = URL("http://${PeerAddress.httpEndpoint(peerInput, effectiveServerDtlsPort)}/api/vkhashes")
+
+                        val conn = url.openConnection() as HttpURLConnection
+                        conn.requestMethod = "POST"
+                        conn.doOutput = true
+                        conn.connectTimeout = 5000
+                        conn.readTimeout = 5000
+
+                        conn.setRequestProperty("Content-Type", "application/json")
+                        AdminSession.getToken(context)?.let { token ->
+                            conn.setRequestProperty(
+                                "Authorization",
+                                "Bearer $token"
+                            )
+                        }
+
+                        val body = JSONObject().apply {
+                            put(
+                                "hashes",
+                                JSONArray(
+                                    combined.split(",").filter { it.isNotBlank() }
+                                )
+                            )
+                        }
+
+                        conn.outputStream.use {
+                            it.write(body.toString().toByteArray(Charsets.UTF_8))
+                        }
+
+                        conn.responseCode
+                        conn.disconnect()
+
+                    } catch (_: Exception) {
+                    }
+                }
+
                 scope.launch {
                     val currentProfileIdStr = settingsStore.currentProfileId.first()
                     val currentProfile = profiles.firstOrNull { it.id == currentProfileIdStr }
-                    
+
                     if (currentProfileIdStr.isEmpty() || (currentProfile != null && currentProfile.useGlobalHashes)) {
                         settingsStore.saveGlobalVkHashes(combined)
                     }
-                    
+
                     // Coerce workers count to new max immediately!
                     val newHashCount = combined.split(",").filter { it.isNotBlank() && it.length >= 16 }.size.coerceAtLeast(1)
                     val newMax = SettingsStore.maxAnonymousWorkers(newHashCount)
                     if (workersInput > newMax) {
                         workersInput = newMax.toFloat()
                     }
-                    
+
                     saveTunnelSettingsNow(combined) { showHashesDialog = false }
                 }
             },
@@ -689,7 +885,7 @@ fun SettingsTabContent(
                                 style = MaterialTheme.typography.bodyMedium,
                                 fontWeight = FontWeight.SemiBold
                             )
-                            
+
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -762,7 +958,7 @@ fun SettingsTabContent(
                                     style = MaterialTheme.typography.bodyMedium,
                                     fontWeight = FontWeight.SemiBold
                                 )
-                                
+
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.spacedBy(16.dp),
@@ -836,7 +1032,7 @@ fun SettingsTabContent(
                             }
                         )
                     }
-                    
+
                     Spacer(modifier = Modifier.height(10.dp))
 
                     Row(
@@ -927,30 +1123,7 @@ fun SettingsTabContent(
                         )
                     }
 
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Column(modifier = Modifier.weight(1f).padding(end = 16.dp)) {
-                            Text(
-                                "Бета-обновления",
-                                style = MaterialTheme.typography.bodyMedium,
-                                fontWeight = FontWeight.Medium
-                            )
-                            Text(
-                                "Показывать pre-release сборки с GitHub (v*-beta)",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        Switch(
-                            checked = includeBetaUpdates,
-                            onCheckedChange = { enabled ->
-                                scope.launch { settingsStore.saveIncludeBetaUpdates(enabled) }
-                            }
-                        )
-                    }
+
 
                     val notificationsEnabled = NotificationHelper.areNotificationsEnabled(context)
                     if (!notificationsEnabled) {
@@ -997,47 +1170,7 @@ fun SettingsTabContent(
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
 
                     // ═══ Раздел: Интерфейс ═══
-                    Text(
-                        "Интерфейс",
-                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
-                        color = MaterialTheme.colorScheme.primary
-                    )
 
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text(
-                            "Режим приложения",
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        Text(
-                            "В режиме пользователя вкладка «Деплой» скрыта.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            ProtocolChip(
-                                label = "Пользователь",
-                                selected = interfaceRole == "user",
-                                enabled = true,
-                                modifier = Modifier.weight(1f)
-                            ) {
-                                scope.launch { settingsStore.saveInterfaceRole("user") }
-                            }
-                            ProtocolChip(
-                                label = "Админ",
-                                selected = interfaceRole == "admin",
-                                enabled = true,
-                                modifier = Modifier.weight(1f)
-                            ) {
-                                scope.launch { settingsStore.saveInterfaceRole("admin") }
-                            }
-                        }
-                    }
-
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
 
                     // ═══ Раздел: Сеть ═══
                     Text(
@@ -1149,10 +1282,18 @@ fun SettingsTabContent(
                                 Text(
                                     text = "Версия $currentVersion",
                                     style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.clickable {
+                                        versionClickCount++
+
+                                        if (versionClickCount >= 7) {
+                                            versionClickCount = 0
+                                            showPinDialog = true
+                                        }
+                                    }
                                 )
                             }
-                            
+
                             Row(
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                                 verticalAlignment = Alignment.CenterVertically
@@ -1191,104 +1332,6 @@ fun SettingsTabContent(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
 
-                        Spacer(modifier = Modifier.height(16.dp))
-
-                        Text(
-                            text = "Подписка",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold
-                        )
-
-                        Text(
-                            text = "Осталось 42 дня",
-                            style = MaterialTheme.typography.headlineSmall,
-                            color = Color(0xFF4CAF50),
-                            fontWeight = FontWeight.Bold
-                        )
-
-
-                        
-                        Surface(
-                            shape = RoundedCornerShape(16.dp),
-                            color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.4f),
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Column(
-                                modifier = Modifier.padding(16.dp),
-                                verticalArrangement = Arrangement.spacedBy(12.dp)
-                            ) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Icon(
-                                        imageVector = androidx.compose.material.icons.Icons.Filled.Info,
-                                        contentDescription = null,
-                                        tint = MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier.size(20.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Text(
-                                        "Готовые профили",
-                                        style = MaterialTheme.typography.titleMedium,
-                                        fontWeight = FontWeight.Bold,
-                                        color = MaterialTheme.colorScheme.onSecondaryContainer
-                                    )
-                                }
-                                
-                                Text(
-                                    "Вы можете получить готовые конфиги напрямую в этих Telegram-ботах:",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-
-                                Column(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    Button(
-                                        onClick = {
-                                            val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse("https://t.me/darkbit_vpnbot"))
-                                            context.startActivity(intent)
-                                        },
-                                        modifier = Modifier.fillMaxWidth(),
-                                        colors = ButtonDefaults.buttonColors(
-                                            containerColor = MaterialTheme.colorScheme.surface,
-                                            contentColor = MaterialTheme.colorScheme.primary
-                                        ),
-                                        elevation = ButtonDefaults.buttonElevation(defaultElevation = 2.dp),
-                                        shape = RoundedCornerShape(12.dp),
-                                        contentPadding = PaddingValues(vertical = 10.dp)
-                                    ) {
-                                        Text(
-                                            "🤖 @darkbit_vpnbot",
-                                            maxLines = 1,
-                                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                                            style = MaterialTheme.typography.labelMedium
-                                        )
-                                    }
-
-                                    Button(
-                                        onClick = {
-                                            val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse("https://t.me/sidylinkbot"))
-                                            context.startActivity(intent)
-                                        },
-                                        modifier = Modifier.fillMaxWidth(),
-                                        colors = ButtonDefaults.buttonColors(
-                                            containerColor = MaterialTheme.colorScheme.surface,
-                                            contentColor = MaterialTheme.colorScheme.primary
-                                        ),
-                                        elevation = ButtonDefaults.buttonElevation(defaultElevation = 2.dp),
-                                        shape = RoundedCornerShape(12.dp),
-                                        contentPadding = PaddingValues(vertical = 10.dp)
-                                    ) {
-                                        Text(
-                                            "🤖 @sidylinkbot",
-                                            maxLines = 1,
-                                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                                            style = MaterialTheme.typography.labelMedium
-                                        )
-                                    }
-                                }
-                            }
-                        }
 
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
 
@@ -1301,13 +1344,13 @@ fun SettingsTabContent(
                             val updateStatusText = remember(isCheckingUpdates, updateLatestVersion, updateLastError) {
                                 when {
                                     isCheckingUpdates -> "Проверяем..."
-                                    updateLatestVersion.isNotBlank() && isNewerVersion(currentVersion, updateLatestVersion, includeBetaUpdates) -> "Доступна $updateLatestVersion!"
+                                    updateLatestVersion.isNotBlank() && isNewerVersion(currentVersion, updateLatestVersion, false) -> "Доступна $updateLatestVersion!"
                                     updateLatestVersion.isNotBlank() -> "Обновлений нет"
                                     updateLastError.isNotBlank() -> "Ошибка"
                                     else -> "Не проверено"
                                 }
                             }
-                            
+
                             Column(modifier = Modifier.weight(1f).padding(end = 16.dp)) {
                                 Text(
                                     "Обновления",
@@ -1317,7 +1360,10 @@ fun SettingsTabContent(
                                 Text(
                                     text = updateStatusText,
                                     style = MaterialTheme.typography.bodySmall,
-                                    color = if (updateLatestVersion.isNotBlank() && isNewerVersion(currentVersion, updateLatestVersion, includeBetaUpdates)) {
+                                    color = if (
+                                        updateLatestVersion.isNotBlank() &&
+                                        isNewerVersion(currentVersion, updateLatestVersion, false)
+                                    ) {
                                         MaterialTheme.colorScheme.primary
                                     } else {
                                         MaterialTheme.colorScheme.onSurfaceVariant
@@ -1332,7 +1378,7 @@ fun SettingsTabContent(
                                         try {
                                             val release = com.wdtt.client.fetchLatestReleaseInfo(
                                                 currentVersion,
-                                                includeBetaUpdates,
+                                                false,
                                             )
                                             if (release != null) {
                                                 settingsStore.saveUpdateState(
@@ -1340,7 +1386,7 @@ fun SettingsTabContent(
                                                     latestVersion = release.versionTag,
                                                     error = ""
                                                 )
-                                                if (isNewerVersion(currentVersion, release.versionTag, includeBetaUpdates)) {
+                                                if (isNewerVersion(currentVersion, release.versionTag, false)) {
                                                     Toast.makeText(context, "Доступна новая версия: ${release.versionTag}", Toast.LENGTH_LONG).show()
                                                 } else {
                                                     Toast.makeText(context, "У вас последняя версия!", Toast.LENGTH_SHORT).show()
@@ -1391,7 +1437,102 @@ fun SettingsTabContent(
                         }
 
                         Spacer(Modifier.height(12.dp))
+
+                        if (isAdminMode) {
+
+                            HorizontalDivider(
+                                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+                            )
+
+                            Text(
+                                "Администрирование",
+                                style = MaterialTheme.typography.titleSmall.copy(
+                                    fontWeight = FontWeight.Bold
+                                ),
+                                color = MaterialTheme.colorScheme.primary
+                            )
+
+
+                            Text(
+                                text = "Режим приложения",
+                                style = MaterialTheme.typography.titleSmall,
+                            )
+
+                            Spacer(modifier = Modifier.height(4.dp))
+
+                            Text(
+                                text = "В режиме пользователя вкладка «Деплой» скрыта.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+
+                            Spacer(modifier = Modifier.height(12.dp))
+
+                            val interfaceOptions = listOf(
+                                "user" to "Пользователь",
+                                "admin" to "Админ"
+                            )
+
+                            SingleChoiceSegmentedButtonRow(
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                interfaceOptions.forEachIndexed { index, (value, title) ->
+
+                                    SegmentedButton(
+                                        selected = interfaceRole == value,
+                                        onClick = {
+                                            scope.launch {
+                                                settingsStore.saveInterfaceRole(value)
+                                            }
+                                        },
+                                        shape = SegmentedButtonDefaults.itemShape(
+                                            index = index,
+                                            count = interfaceOptions.size
+                                        )
+                                    ) {
+                                        Text(title)
+                                    }
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(16.dp))
+
+
+                            OutlinedTextField(
+                                value = peerInput,
+                                onValueChange = {
+                                    var cleaned = it.filter { c -> c != ' ' }
+                                    if (PeerAddress.hasExplicitPort(cleaned)) {
+                                        cleaned = PeerAddress.host(cleaned)
+                                    }
+                                    peerInput = cleaned
+                                    scheduleSave()
+                                },
+                                label = { Text("IP сервера или домен") },
+                                placeholder = { Text("31.76.102.29") },
+                                singleLine = true,
+                                isError = !isPeerValid && peerInput.isNotEmpty(),
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(16.dp),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = MaterialTheme.colorScheme.primary,
+                                    unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f),
+                                )
+                            )
+
+                            Button(
+                                onClick = {
+                                    showHashesDialog = true
+                                },
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Text("VK Hash")
+                            }
+                        }
+
                     }
+
                     }
                     Spacer(Modifier.height(16.dp))
                     Button(
@@ -1539,13 +1680,20 @@ fun SettingsTabContent(
 
                                         if (tunnelRunning) {
                                             context.startService(
-                                                Intent(context, TunnelService::class.java).apply { action = "STOP" }
+                                                Intent(
+                                                    context,
+                                                    TunnelService::class.java
+                                                ).apply { action = "STOP" }
                                             )
                                             kotlinx.coroutines.delay(800)
                                             requestVpnAndStart()
                                         }
 
-                                        Toast.makeText(context, "Профиль «${p.name}» применен!", Toast.LENGTH_SHORT).show()
+                                        Toast.makeText(
+                                            context,
+                                            "Профиль «${p.name}» применен!",
+                                            Toast.LENGTH_SHORT
+                                        ).show()
                                     }
                                 },
                                 leadingIcon = {
@@ -1577,10 +1725,16 @@ fun SettingsTabContent(
                     ),
                     border = BorderStroke(
                         1.dp,
-                        if (tunnelSecretsMissing) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
+                        if (tunnelSecretsMissing) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.outline.copy(
+                            alpha = 0.5f
+                        )
                     )
                 ) {
-                    Icon(imageVector = Icons.Default.Key, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Icon(
+                        imageVector = Icons.Default.Key,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text("Секреты", fontWeight = FontWeight.SemiBold)
                 }
@@ -1630,60 +1784,8 @@ fun SettingsTabContent(
 
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
 
-        AppSectionCard(
-            contentPadding = PaddingValues(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            OutlinedTextField(
-                value = peerInput,
-                onValueChange = {
-                    var cleaned = it.filter { c -> c != ' ' }
-                    if (PeerAddress.hasExplicitPort(cleaned)) {
-                        cleaned = PeerAddress.host(cleaned)
-                    }
-                    peerInput = cleaned
-                    scheduleSave()
-                },
-                label = { Text("IP сервера или домен") },
-                placeholder = { Text("31.76.102.29") },
-                singleLine = true,
-                isError = !isPeerValid && peerInput.isNotEmpty(),
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(16.dp),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = MaterialTheme.colorScheme.primary,
-                    unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f),
-                )
-            )
 
-            OutlinedButton(
-                onClick = { showHashesDialog = true },
-                modifier = Modifier.fillMaxWidth().height(56.dp),
-                shape = RoundedCornerShape(16.dp),
-                colors = ButtonDefaults.outlinedButtonColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                    contentColor = MaterialTheme.colorScheme.onSurface
-                ),
-                border = BorderStroke(
-                    1.dp,
-                    if (hasInputHashErrors) MaterialTheme.colorScheme.error
-                    else MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
-                )
-            ) {
-                Icon(Icons.Default.Tag, null, Modifier.size(18.dp))
-                Spacer(Modifier.width(8.dp))
-                Text("VK Хеши ($filledHashCount)", fontWeight = FontWeight.SemiBold)
-            }
 
-            val errorTexts = hashErrors.filter { !it.contains("короткий") }
-            if (errorTexts.isNotEmpty()) {
-                Text(
-                    text = errorTexts.joinToString(", "),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error
-                )
-            }
-        }
 
         // ═══ Мощность + Капча ═══
         AppSectionCard(
@@ -2209,12 +2311,37 @@ fun HashesDialog(
     val currentHashes = remember(h1, h2, h3, h4) {
         listOf(h1, h2, h3, h4).map { stripVkUrlStatic(it) }
     }
+
+    var serverHashes by remember { mutableStateOf<List<String>>(emptyList()) }
+
+    LaunchedEffect(Unit) {
+        val server = PeerAddress.httpEndpoint(
+            SettingsStore(context).peer.first(),
+            56000
+        )
+
+        serverHashes = ServerVkHashes.load(
+            server = server,
+            token = AdminSession.getToken(context) ?: ""
+        )
+    }
+
     val filledHashes = remember(currentHashes) {
         currentHashes.filter { it.isNotBlank() }
     }
-    val checkableHashes = remember(currentHashes) {
-        currentHashes.mapIndexedNotNull { index, hash ->
-            if (hash.length >= 16) index + 1 to hash else null
+    val checkableHashes = remember(currentHashes, serverHashes) {
+
+        val hashes =
+            if (serverHashes.isNotEmpty())
+                serverHashes
+            else
+                currentHashes
+
+        hashes.mapIndexedNotNull { index, hash ->
+            if (hash.length >= 16)
+                index + 1 to hash
+            else
+                null
         }
     }
     val completedChecks = checkResults.values.count {
@@ -2224,7 +2351,7 @@ fun HashesDialog(
     val badCount = checkResults.values.count {
         it.status in setOf("dead", "error", "network", "limited", "captcha")
     }
-    val tunnelBusy = TunnelManager.running.value
+    val tunnelBusy by TunnelManager.running.collectAsStateWithLifecycle()
     val vkLoggedIn = remember { mutableStateOf(VkAuthWebViewManager.hasVkSessionCookie()) }
     LaunchedEffect(Unit) {
         vkLoggedIn.value = VkAuthWebViewManager.hasVkSessionCookie()

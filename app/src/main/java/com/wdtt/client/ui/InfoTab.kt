@@ -169,11 +169,16 @@ fun InfoTab() {
     var projectExpanded by rememberSaveable { mutableStateOf(true) }
     val updateLatestVersion by settingsStore.updateLatestVersion.collectAsStateWithLifecycle(initialValue = "")
     val updateLastError by settingsStore.updateLastError.collectAsStateWithLifecycle(initialValue = "")
-    val includeBetaUpdates by settingsStore.includeBetaUpdates.collectAsStateWithLifecycle(initialValue = false)
-    val updateStatus = remember(isCheckingUpdates, updateLatestVersion, updateLastError, currentVersion, includeBetaUpdates) {
+    val updateStatus = remember(
+        isCheckingUpdates,
+        updateLatestVersion,
+        updateLastError,
+        currentVersion
+    ) {
         when {
             isCheckingUpdates -> "Проверяем GitHub releases..."
-            updateLatestVersion.isNotBlank() && isNewerVersion(currentVersion, updateLatestVersion, includeBetaUpdates) ->
+            updateLatestVersion.isNotBlank() &&
+                    isNewerVersion(currentVersion, updateLatestVersion, false) ->
                 "На GitHub доступна версия $updateLatestVersion"
             updateLatestVersion.isNotBlank() -> "Последняя версия: $updateLatestVersion"
             updateLastError.isNotBlank() -> "Последняя проверка завершилась ошибкой"
@@ -279,7 +284,7 @@ fun InfoTab() {
                     isCheckingUpdates = true
                     scope.launch {
                         val checkedAt = System.currentTimeMillis()
-                        val release = fetchLatestReleaseInfo(currentVersion, includeBetaUpdates)
+                        val release = fetchLatestReleaseInfo(currentVersion, false)
                         val latest = release?.versionTag
                         settingsStore.saveUpdateState(
                             lastCheckAt = checkedAt,
@@ -298,7 +303,7 @@ fun InfoTab() {
                             return@launch
                         }
 
-                        if (isNewerVersion(currentVersion, release.versionTag, includeBetaUpdates)) {
+                        if (isNewerVersion(currentVersion, release.versionTag, false)) {
                             settingsStore.saveUpdateDialogShown(release.versionTag, checkedAt)
                             pendingManualRelease = release
                         } else {

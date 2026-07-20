@@ -142,7 +142,7 @@ fun ExportProfileSheet(
 
             Spacer(modifier = Modifier.height(24.dp))
             Text(
-                "Отсканируйте код другим устройством в приложении qWDTT",
+                "Отсканируйте код другим устройством в приложении Hoplet",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center

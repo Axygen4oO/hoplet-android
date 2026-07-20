@@ -57,6 +57,7 @@ class TunnelService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        android.util.Log.d("TUNNEL", "onStartCommand")
         if (intent == null) {
             restoreTunnel()
             return START_STICKY
@@ -66,7 +67,7 @@ class TunnelService : Service() {
             "START", "START_FORCED" -> {
                 val notification = createNotification("Запуск...")
                 startPersistentForeground(notification)
-
+                android.util.Log.d("TUNNEL", "Starting tunnel")
                 val appContext = applicationContext
                 TunnelManager.scope.launch {
                     try {
@@ -196,7 +197,7 @@ class TunnelService : Service() {
         // Подготавливаем CaptchaWebViewManager (не создаёт WebView — просто сохраняет контекст)
         // Вызываем всегда — дёшево, а WebView создаётся на лету при каждом запросе капчи
         CaptchaWebViewManager.onTunnelStart(applicationContext)
-        TunnelManager.start(this, params, isSwitching = false, forceStart = forceStart)
+
 
         TunnelManager.start(
     this,

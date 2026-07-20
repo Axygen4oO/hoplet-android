@@ -185,6 +185,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        android.util.Log.e("TEST_BUILD", "THIS IS MY CUSTOM BUILD")
         enableEdgeToEdge()
 
         checkAndRequestNotifications()
@@ -303,7 +304,7 @@ fun MainScreen(
     val updateCheckIntervalHours by settingsStore.updateCheckIntervalHours.collectAsStateWithLifecycle(
         initialValue = DEFAULT_UPDATE_CHECK_INTERVAL_HOURS
     )
-    val includeBetaUpdates by settingsStore.includeBetaUpdates.collectAsStateWithLifecycle(initialValue = false)
+
     val interfaceRole by settingsStore.interfaceRole.collectAsStateWithLifecycle(initialValue = "admin")
     val isAdminInterface = interfaceRole == "admin"
     val autoSwitchToLogs by settingsStore.autoSwitchToLogs.collectAsStateWithLifecycle(initialValue = true)
@@ -420,7 +421,7 @@ fun MainScreen(
         }
     }
 
-    LaunchedEffect(updateCheckIntervalHours, includeBetaUpdates) {
+    LaunchedEffect(updateCheckIntervalHours) {
         if (updateCheckIntervalHours == UPDATE_CHECK_NEVER) return@LaunchedEffect
 
         val intervalMillis = updateIntervalHoursToMillis(updateCheckIntervalHours)
@@ -429,8 +430,7 @@ fun MainScreen(
 
         suspend fun runUpdateCheck(reason: String) {
             val checkedAt = System.currentTimeMillis()
-            val includeBeta = settingsStore.includeBetaUpdates.first()
-            val release = fetchLatestReleaseInfo(currentVersion, includeBeta)
+            val release = fetchLatestReleaseInfo(currentVersion, false)
             settingsStore.saveUpdateState(
                 lastCheckAt = checkedAt,
                 latestVersion = release?.versionTag ?: "",
@@ -442,7 +442,7 @@ fun MainScreen(
                 return
             }
 
-            val hasUpdate = isNewerVersion(currentVersion, release.versionTag, includeBeta)
+            val hasUpdate = isNewerVersion(currentVersion, release.versionTag, false)
             val postponeVer = settingsStore.updatePostponeVersion.first()
             val postponeUntil = settingsStore.updatePostponeUntil.first()
             val isPostponed = postponeVer == release.versionTag && checkedAt < postponeUntil

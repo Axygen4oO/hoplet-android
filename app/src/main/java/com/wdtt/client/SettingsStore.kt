@@ -125,7 +125,6 @@ class SettingsStore(context: Context) {
         private val UPDATE_DIALOG_LAST_ACTION_VERSION = stringPreferencesKey("update_dialog_last_action_version")
         private val UPDATE_DIALOG_LAST_ACTION = stringPreferencesKey("update_dialog_last_action")
         private val UPDATE_DIALOG_LAST_ACTION_AT = longPreferencesKey("update_dialog_last_action_at")
-        private val INCLUDE_BETA_UPDATES = booleanPreferencesKey("include_beta_updates")
         private val CHANGELOG_SHOWN_VERSION_CODE = intPreferencesKey("changelog_shown_version_code")
         private val SUPPORT_NOTICE_SHOWN_VERSION_CODE = intPreferencesKey("support_notice_shown_version_code")
 
@@ -280,6 +279,9 @@ class SettingsStore(context: Context) {
             return normalizeVkAnonPath(SettingsStore(context).vkAnonPath.first())
         }
 
+
+
+
         private fun scheduleMigrations(store: SettingsStore) {
             if (migrationStarted) return
             synchronized(this) {
@@ -411,7 +413,7 @@ class SettingsStore(context: Context) {
     val updateDialogLastActionVersion: Flow<String> = dataStore.data.map { it[UPDATE_DIALOG_LAST_ACTION_VERSION] ?: "" }
     val updateDialogLastAction: Flow<String> = dataStore.data.map { it[UPDATE_DIALOG_LAST_ACTION] ?: "" }
     val updateDialogLastActionAt: Flow<Long> = dataStore.data.map { it[UPDATE_DIALOG_LAST_ACTION_AT] ?: 0L }
-    val includeBetaUpdates: Flow<Boolean> = dataStore.data.map { it[INCLUDE_BETA_UPDATES] ?: false }
+
     val changelogShownVersionCode: Flow<Int> = dataStore.data.map { it[CHANGELOG_SHOWN_VERSION_CODE] ?: 0 }
     val supportNoticeShownVersionCode: Flow<Int> = dataStore.data.map { it[SUPPORT_NOTICE_SHOWN_VERSION_CODE] ?: 0 }
 
@@ -497,11 +499,6 @@ class SettingsStore(context: Context) {
         }
     }
 
-    suspend fun saveIncludeBetaUpdates(enabled: Boolean) {
-        dataStore.edit { prefs ->
-            prefs[INCLUDE_BETA_UPDATES] = enabled
-        }
-    }
 
     suspend fun saveChangelogShownVersionCode(versionCode: Int) {
         dataStore.edit { prefs ->
