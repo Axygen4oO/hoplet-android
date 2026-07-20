@@ -100,7 +100,7 @@ private const val IssuesUrl = "https://github.com/Axygen4oO/hoplet-android/issue
 private const val DeveloperProfileUrl = "https://github.com/Axygen4oO"
 private const val RepositoryUrl = "https://github.com/Axygen4oO/hoplet-android"
 private const val TelegramChannelUrl = AppLinks.TELEGRAM_CHANNEL
-private const val DonateUrl = AppLinks.DONATE_URL
+
 
 private val browserPackages = listOf(
     "com.android.chrome",

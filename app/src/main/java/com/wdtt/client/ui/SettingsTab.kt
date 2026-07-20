@@ -112,6 +112,9 @@ import java.io.OutputStreamWriter
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.animation.expandHorizontally
+import androidx.compose.animation.shrinkHorizontally
+import androidx.compose.material3.LinearProgressIndicator
 
 
 private const val WORKERS_PER_GROUP = 9
@@ -254,7 +257,9 @@ fun SettingsTabContent(
     val useVKCallsAuth = !vkAnonPath.equals("legacy", ignoreCase = true)
     var portInput by rememberSaveable { mutableStateOf("9000") }
     var sniInput by rememberSaveable { mutableStateOf("") }
-
+    var showWelcomeDialog by rememberSaveable {
+        mutableStateOf(false)
+    }
 
 
     val currentWorkers = if (vkAccountAuth) {
@@ -738,6 +743,15 @@ fun SettingsTabContent(
         )
     }
 
+    if (showWelcomeDialog) {
+        WelcomeDialog(
+            onDismiss = {
+                showWelcomeDialog = false
+            }
+        )
+    }
+
+
     if (showHashesDialog) {
         val activeParts = currentHashesRaw.split(Regex("[,\\s\\n]+")).filter { it.isNotEmpty() }
         val captchaModeForCheck by settingsStore.captchaMode.collectAsStateWithLifecycle(initialValue = "auto")
@@ -1143,7 +1157,7 @@ fun SettingsTabContent(
                                     color = MaterialTheme.colorScheme.onErrorContainer,
                                 )
                                 Text(
-                                    "Без них не видно статус туннеля, капчу и вход VK. На Xiaomi/Samsung включите уведомления для qWDTT вручную.",
+                                    "Без них не видно статус туннеля, капчу и вход VK. На Xiaomi/Samsung включите уведомления для Hoplet вручную.",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onErrorContainer,
                                 )
@@ -1264,10 +1278,54 @@ fun SettingsTabContent(
 
                     val currentVersion = remember { "v${com.wdtt.client.BuildConfig.VERSION_NAME.removePrefix("v")}" }
                     var isCheckingUpdates by remember { mutableStateOf(false) }
+                        var latestRelease by remember {
+                            mutableStateOf<com.wdtt.client.AppReleaseInfo?>(null)
+                        }
+                        var downloadState by remember {
+                            mutableStateOf<com.wdtt.client.DownloadState>(com.wdtt.client.DownloadState.Idle)
+                        }
+
+                        var isDownloading by remember {
+                            mutableStateOf(false)
+                        }
+                        var lastDownloadRelease by remember {
+                            mutableStateOf<com.wdtt.client.AppReleaseInfo?>(null)
+                        }
                     val updateLatestVersion by settingsStore.updateLatestVersion.collectAsStateWithLifecycle(initialValue = "")
                     val updateLastError by settingsStore.updateLastError.collectAsStateWithLifecycle(initialValue = "")
+                        LaunchedEffect(updateLatestVersion) {
+                            if (
+                                latestRelease == null &&
+                                updateLatestVersion.isNotBlank() &&
+                                isNewerVersion(currentVersion, updateLatestVersion, false)
+                            ) {
+                                scope.launch {
+                                    try {
+                                        latestRelease =
+                                            com.wdtt.client.fetchLatestReleaseInfo(
+                                                currentVersion,
+                                                false
+                                            )
+                                    } catch (_: Exception) {
+                                    }
+                                }
+                            }
+                        }
 
                     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        OutlinedButton(
+                            onClick = {
+                                showWelcomeDialog = true
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Text("Как начать")
+                        }
+
+                        HorizontalDivider(
+                            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
+                        )
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically,
@@ -1341,13 +1399,27 @@ fun SettingsTabContent(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            val updateStatusText = remember(isCheckingUpdates, updateLatestVersion, updateLastError) {
+                            val updateStatusText = remember(
+                                isCheckingUpdates,
+                                latestRelease,
+                                updateLatestVersion,
+                                updateLastError
+                            ) {
                                 when {
-                                    isCheckingUpdates -> "Проверяем..."
-                                    updateLatestVersion.isNotBlank() && isNewerVersion(currentVersion, updateLatestVersion, false) -> "Доступна $updateLatestVersion!"
-                                    updateLatestVersion.isNotBlank() -> "Обновлений нет"
-                                    updateLastError.isNotBlank() -> "Ошибка"
-                                    else -> "Не проверено"
+                                    isCheckingUpdates ->
+                                        "Проверка обновлений..."
+
+                                    latestRelease != null ->
+                                        "⬇ Доступна ${latestRelease!!.versionTag}"
+
+                                    updateLatestVersion.isNotBlank() ->
+                                        "✓ Установлена последняя версия"
+
+                                    updateLastError.isNotBlank() ->
+                                        "Ошибка проверки"
+
+                                    else ->
+                                        "Не проверено"
                                 }
                             }
 
@@ -1360,59 +1432,250 @@ fun SettingsTabContent(
                                 Text(
                                     text = updateStatusText,
                                     style = MaterialTheme.typography.bodySmall,
-                                    color = if (
-                                        updateLatestVersion.isNotBlank() &&
-                                        isNewerVersion(currentVersion, updateLatestVersion, false)
-                                    ) {
-                                        MaterialTheme.colorScheme.primary
-                                    } else {
-                                        MaterialTheme.colorScheme.onSurfaceVariant
-                                    }
+                                    color =
+                                        if (latestRelease != null) {
+                                            MaterialTheme.colorScheme.primary
+                                        } else {
+                                            MaterialTheme.colorScheme.onSurfaceVariant
+                                        }
                                 )
                             }
 
-                            Button(
-                                onClick = {
-                                    scope.launch {
-                                        isCheckingUpdates = true
-                                        try {
-                                            val release = com.wdtt.client.fetchLatestReleaseInfo(
-                                                currentVersion,
-                                                false,
-                                            )
-                                            if (release != null) {
-                                                settingsStore.saveUpdateState(
-                                                    lastCheckAt = System.currentTimeMillis(),
-                                                    latestVersion = release.versionTag,
-                                                    error = ""
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+
+                                Button(
+                                    onClick = {
+                                        scope.launch {
+                                            isCheckingUpdates = true
+
+                                            try {
+                                                val release = com.wdtt.client.fetchLatestReleaseInfo(
+                                                    currentVersion,
+                                                    false
                                                 )
-                                                if (isNewerVersion(currentVersion, release.versionTag, false)) {
-                                                    Toast.makeText(context, "Доступна новая версия: ${release.versionTag}", Toast.LENGTH_LONG).show()
+
+                                                if (release != null) {
+
+                                                    val hasUpdate =
+                                                        isNewerVersion(currentVersion, release.versionTag, false)
+
+                                                    latestRelease =
+                                                        if (hasUpdate) release else null
+
+                                                    settingsStore.saveUpdateState(
+                                                        lastCheckAt = System.currentTimeMillis(),
+                                                        latestVersion = if (hasUpdate) release.versionTag else currentVersion,
+                                                        error = ""
+                                                    )
+
+                                                    Toast.makeText(
+                                                        context,
+                                                        if (latestRelease != null)
+                                                            "Доступна новая версия ${release.versionTag}"
+                                                        else
+                                                            "✓ Установлена последняя версия",
+                                                        Toast.LENGTH_SHORT
+                                                    ).show()
+
                                                 } else {
-                                                    Toast.makeText(context, "У вас последняя версия!", Toast.LENGTH_SHORT).show()
+
+                                                    latestRelease = null
+                                                    lastDownloadRelease = null
+
+                                                    settingsStore.saveUpdateState(
+                                                        lastCheckAt = System.currentTimeMillis(),
+                                                        latestVersion = "",
+                                                        error = "Ошибка"
+                                                    )
+
+                                                    Toast.makeText(
+                                                        context,
+                                                        "Не удалось проверить обновления",
+                                                        Toast.LENGTH_SHORT
+                                                    ).show()
                                                 }
-                                            } else {
-                                                settingsStore.saveUpdateState(
-                                                    lastCheckAt = System.currentTimeMillis(),
-                                                    latestVersion = "",
-                                                    error = "Ошибка"
-                                                )
-                                                Toast.makeText(context, "Не удалось проверить обновления", Toast.LENGTH_SHORT).show()
+
+                                            } catch (e: Exception) {
+
+                                                latestRelease = null
+
+                                                Toast.makeText(
+                                                    context,
+                                                    "Ошибка: ${e.message}",
+                                                    Toast.LENGTH_SHORT
+                                                ).show()
+
+                                            } finally {
+                                                isCheckingUpdates = false
                                             }
-                                        } catch (e: java.lang.Exception) {
-                                            Toast.makeText(context, "Ошибка: ${e.message}", Toast.LENGTH_SHORT).show()
-                                        } finally {
-                                            isCheckingUpdates = false
+                                        }
+                                    },
+                                    enabled = !isCheckingUpdates,
+                                    shape = RoundedCornerShape(8.dp),
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                                ) {
+
+                                    if (isCheckingUpdates) {
+
+                                        CircularProgressIndicator(
+                                            modifier = Modifier.size(16.dp),
+                                            strokeWidth = 2.dp
+                                        )
+
+                                    } else {
+
+                                        Text(
+                                            "Проверить",
+                                            style = MaterialTheme.typography.labelMedium
+                                        )
+                                    }
+                                }
+
+                                AnimatedVisibility(
+                                    visible = latestRelease != null,
+                                    enter = fadeIn() + expandHorizontally(),
+                                    exit = fadeOut() + shrinkHorizontally()
+                                ) {
+
+                                    Column(
+                                        horizontalAlignment = Alignment.CenterHorizontally,
+                                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+
+                                        AnimatedVisibility(
+                                            visible = downloadState is com.wdtt.client.DownloadState.Downloading,
+                                            enter = fadeIn(),
+                                            exit = fadeOut()
+                                        ) {
+
+                                            val progress =
+                                                (downloadState as com.wdtt.client.DownloadState.Downloading)
+                                                    .progress
+                                                    .coerceIn(0f, 1f)
+
+                                            Column(
+                                                horizontalAlignment = Alignment.CenterHorizontally
+                                            ) {
+
+                                                LinearProgressIndicator(
+                                                    progress = { progress },
+                                                    modifier = Modifier.width(120.dp)
+                                                )
+
+                                                Spacer(Modifier.height(4.dp))
+
+                                                Text(
+                                                    "${(progress * 100).toInt()}%",
+                                                    style = MaterialTheme.typography.labelSmall
+                                                )
+                                            }
+                                        }
+
+                                        OutlinedButton(
+                                            onClick = {
+
+                                                val release = latestRelease
+                                                    ?: lastDownloadRelease
+                                                    ?: return@OutlinedButton
+
+                                                val url = release.downloadUrl ?: release.releaseUrl
+
+                                                scope.launch {
+
+                                                    if (release.downloadUrl == null) {
+                                                        context.startActivity(
+                                                            Intent(
+                                                                Intent.ACTION_VIEW,
+                                                                Uri.parse(release.releaseUrl)
+                                                            )
+                                                        )
+                                                        return@launch
+                                                    }
+
+                                                    isDownloading = true
+                                                    lastDownloadRelease = release
+
+                                                    com.wdtt.client.downloadUpdate(
+                                                        context,
+                                                        url,
+                                                        release.versionTag
+                                                    ).collect { state ->
+
+                                                        downloadState = state
+
+                                                        when (state) {
+
+                                                            is com.wdtt.client.DownloadState.Finished -> {
+
+                                                                isDownloading = false
+                                                                downloadState = com.wdtt.client.DownloadState.Idle
+
+                                                                latestRelease?.let { release ->
+                                                                    scope.launch {
+                                                                        settingsStore.saveUpdateState(
+                                                                            lastCheckAt = System.currentTimeMillis(),
+                                                                            latestVersion = release.versionTag,
+                                                                            error = ""
+                                                                        )
+                                                                    }
+                                                                }
+
+                                                                latestRelease = null
+                                                                lastDownloadRelease = null
+
+                                                                com.wdtt.client.installApk(
+                                                                    context,
+                                                                    state.file
+                                                                )
+                                                            }
+
+                                                            is com.wdtt.client.DownloadState.Error -> {
+
+                                                                isDownloading = false
+                                                                downloadState =
+                                                                    com.wdtt.client.DownloadState.Idle
+
+                                                                Toast.makeText(
+                                                                    context,
+                                                                    state.message,
+                                                                    Toast.LENGTH_LONG
+                                                                ).show()
+                                                            }
+
+                                                            else -> {}
+                                                        }
+                                                    }
+                                                }
+                                            },
+                                            enabled = !isDownloading,
+                                            shape = RoundedCornerShape(8.dp),
+                                            contentPadding = PaddingValues(
+                                                horizontal = 8.dp,
+                                                vertical = 4.dp
+                                            )
+                                        ) {
+
+                                            Text(
+                                                when {
+                                                    isDownloading -> "Загрузка..."
+                                                    lastDownloadRelease != null &&
+                                                            downloadState is com.wdtt.client.DownloadState.Idle -> "Повторить"
+                                                    else -> "Скачать"
+                                                },
+                                                style = MaterialTheme.typography.labelMedium
+                                            )
                                         }
                                     }
-                                },
-                                enabled = !isCheckingUpdates,
-                                shape = RoundedCornerShape(8.dp),
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
-                            ) {
-                                Text("Проверить", style = MaterialTheme.typography.labelMedium)
-                            }
-                        }
+                                }
+
+
+                                    }
+                                }
+
+
 
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
 
@@ -1427,7 +1690,7 @@ fun SettingsTabContent(
                                     Устройство: ${Build.MANUFACTURER} ${Build.MODEL}
                                 """.trimIndent()
                                 val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-                                clipboard.setPrimaryClip(ClipData.newPlainText("qWDTT Report", reportText))
+                                clipboard.setPrimaryClip(ClipData.newPlainText("Hoplet Report", reportText))
                                 Toast.makeText(context, "Отчёт о системе скопирован!", Toast.LENGTH_SHORT).show()
                             },
                             modifier = Modifier.fillMaxWidth(),

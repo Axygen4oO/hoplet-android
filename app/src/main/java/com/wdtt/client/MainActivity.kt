@@ -72,7 +72,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.runtime.getValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.wdtt.client.ui.AppUpdateDialog
-import com.wdtt.client.ui.SupportNoticeDialog
+import com.wdtt.client.ui.WelcomeDialog
 import com.wdtt.client.ui.ProfilesTab
 import com.wdtt.client.ui.FloatingToolbar
 import com.wdtt.client.ui.LogsTab
@@ -580,109 +580,14 @@ fun MainScreen(
     }
 
     if (!hasSeenWelcomeDialog) {
-        AlertDialog(
-            onDismissRequest = { 
-                scope.launch { settingsStore.saveHasSeenWelcomeDialog(true) }
-            },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text(
-                        "Готовые профили",
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    Text(
-                        "Вы можете получить готовые конфиги напрямую в этих Telegram-ботах:",
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                    Column(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Button(
-                            onClick = {
-                                val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://t.me/darkbit_vpnbot"))
-                                context.startActivity(intent)
-                            },
-                            modifier = Modifier.fillMaxWidth(),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                                contentColor = MaterialTheme.colorScheme.onSecondaryContainer
-                            ),
-                            shape = RoundedCornerShape(12.dp),
-                            contentPadding = PaddingValues(vertical = 10.dp)
-                        ) {
-                            Text(
-                                "🤖 @darkbit_vpnbot",
-                                maxLines = 1,
-                                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                                style = MaterialTheme.typography.labelMedium
-                            )
-                        }
-
-                        Button(
-                            onClick = {
-                                val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://t.me/sidylinkbot"))
-                                context.startActivity(intent)
-                            },
-                            modifier = Modifier.fillMaxWidth(),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                                contentColor = MaterialTheme.colorScheme.onSecondaryContainer
-                            ),
-                            shape = RoundedCornerShape(12.dp),
-                            contentPadding = PaddingValues(vertical = 10.dp)
-                        ) {
-                            Text(
-                                "🤖 @sidylinkbot",
-                                maxLines = 1,
-                                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                                style = MaterialTheme.typography.labelMedium
-                            )
-                        }
-                    }
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        "Следите за обновлениями",
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    Text(
-                        "Все дальнейшие обновления и новости мы будем публиковать в нашем канале:",
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                    Button(
-                        onClick = {
-                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(AppLinks.TELEGRAM_CHANNEL))
-                            context.startActivity(intent)
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = MaterialTheme.colorScheme.primaryContainer,
-                            contentColor = MaterialTheme.colorScheme.onPrimaryContainer
-                        ),
-                        shape = RoundedCornerShape(12.dp),
-                        contentPadding = PaddingValues(vertical = 10.dp)
-                    ) {
-                        Text("📢 @darkbitVPN", style = MaterialTheme.typography.labelLarge)
-                    }
-                    Text(
-                        "Просто скопируйте текст профиля или конфигурационный файл и импортируйте его на вкладке «Профили». Эта памятка также доступна в настройках.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            },
-            confirmButton = {
-                Button(
-                    onClick = { scope.launch { settingsStore.saveHasSeenWelcomeDialog(true) } }
-                ) {
-                    Text("Понятно")
+        WelcomeDialog(
+            onDismiss = {
+                scope.launch {
+                    settingsStore.saveHasSeenWelcomeDialog(true)
                 }
             }
         )
     }
-
     pendingRelease?.let { release ->
         AppUpdateDialog(
             release = release,
@@ -716,12 +621,7 @@ fun MainScreen(
         )
     }
 
-    if (showSupportNotice) {
-        SupportNoticeDialog(
-            versionName = BuildConfig.VERSION_NAME,
-            onDismiss = { dismissSupportNotice() },
-        )
-    }
+
 
     if (showBlockerWarning) {
         var dontShowAgain by rememberSaveable { mutableStateOf(false) }

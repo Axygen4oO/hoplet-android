@@ -36,6 +36,12 @@ class SettingsStore(context: Context) {
             return n * WORKERS_PER_VK_GROUP * 3
         }
 
+
+        private val UPDATE_AVAILABLE_VERSION = stringPreferencesKey("update_available_version")
+        private val UPDATE_DOWNLOAD_URL = stringPreferencesKey("update_download_url")
+        private val UPDATE_RELEASE_URL = stringPreferencesKey("update_release_url")
+
+
         private val Context.dataStore by preferencesDataStore("settings")
         private val PEER = stringPreferencesKey("peer")
         private val VK_HASHES = stringPreferencesKey("vk_hashes")
@@ -278,6 +284,9 @@ class SettingsStore(context: Context) {
             awaitMigrations(context)
             return normalizeVkAnonPath(SettingsStore(context).vkAnonPath.first())
         }
+
+
+
 
 
 
