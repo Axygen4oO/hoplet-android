@@ -271,8 +271,8 @@ fun DeployTab() {
             Spacer(modifier = Modifier.width(8.dp))
             Text(
                 when {
-                    deploySecretsMissing && savedManualPorts -> "Секреты — укажите пароль WDTT, порты"
-                    deploySecretsMissing -> "Секреты — нужен пароль WDTT"
+                    deploySecretsMissing && savedManualPorts -> "Секреты — укажите пароль туннеля и порты"
+                    deploySecretsMissing -> "Секреты — нужен пароль туннеля"
                     savedManualPorts -> "Секреты (BOT, Пароли, Порты)"
                     else -> "Секреты (BOT, Пароли)"
                 },
@@ -1025,7 +1025,7 @@ private suspend fun performUninstall(
             timeout = 15000L
         )
 
-        onProgress(0.75f, "Удаление WDTT-интерфейса...")
+        onProgress(0.75f, "Удаление TUN-интерфейса...")
         ssh.exec(
             rootCommand(
                 "ip link show wdtt0 >/dev/null 2>&1 && ip link del wdtt0 2>/dev/null || true; " +
@@ -1078,30 +1078,27 @@ fun DeploySecretsDialog(
         return value.toIntOrNull()?.takeIf { it in 1..65535 }?.toString() ?: fallback
     }
 
-    androidx.compose.ui.window.Dialog(
+    HopletDialog(
         onDismissRequest = onDismiss,
         properties = androidx.compose.ui.window.DialogProperties(decorFitsSystemWindows = false)
     ) {
-        Surface(
-            modifier = Modifier.imePadding(),
-            shape = RoundedCornerShape(24.dp),
-            color = MaterialTheme.colorScheme.surface,
-            contentColor = MaterialTheme.colorScheme.onSurface,
-            tonalElevation = 8.dp
+        HopletModalSurface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .imePadding()
         ) {
-            Column(modifier = Modifier.padding(24.dp).fillMaxWidth().verticalScroll(rememberScrollState())) {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("Секреты Деплоя", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                    IconButton(onClick = onDismiss) {
-                        Icon(Icons.Default.Close, contentDescription = "Закрыть")
-                    }
+                    HopletSectionTitle("Секреты Деплоя")
+                    HopletDialogCloseButton(onClick = onDismiss)
                 }
-
-                Spacer(Modifier.height(16.dp))
 
                 OutlinedTextField(
                     value = passInput,
@@ -1110,14 +1107,12 @@ fun DeploySecretsDialog(
                     placeholder = { Text("Придумайте надежный пароль") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(16.dp)
+                    shape = HopletModalDefaults.fieldShape,
+                    colors = hopletOutlinedTextFieldColors()
                 )
 
-                Spacer(Modifier.height(16.dp))
-                HorizontalDivider()
-                Spacer(Modifier.height(8.dp))
+                HorizontalDivider(color = HopletModalDefaults.borderColor().copy(alpha = 0.75f))
                 Text("Телеграм бот для управления", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
-                Spacer(Modifier.height(8.dp))
 
                 OutlinedTextField(
                     value = adminIdInput,
@@ -1126,13 +1121,12 @@ fun DeploySecretsDialog(
                     placeholder = { Text("ID из @getmyid_bot") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(16.dp),
+                    shape = HopletModalDefaults.fieldShape,
                     keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
                         keyboardType = androidx.compose.ui.text.input.KeyboardType.Number
-                    )
+                    ),
+                    colors = hopletOutlinedTextFieldColors()
                 )
-
-                Spacer(Modifier.height(8.dp))
 
                 OutlinedTextField(
                     value = botTokenInput,
@@ -1141,14 +1135,12 @@ fun DeploySecretsDialog(
                     placeholder = { Text("Токен от BotFather") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(16.dp)
+                    shape = HopletModalDefaults.fieldShape,
+                    colors = hopletOutlinedTextFieldColors()
                 )
 
-                Spacer(Modifier.height(16.dp))
-                HorizontalDivider()
-                Spacer(Modifier.height(8.dp))
+                HorizontalDivider(color = HopletModalDefaults.borderColor().copy(alpha = 0.75f))
                 Text("SSH Порт", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
-                Spacer(Modifier.height(8.dp))
 
                 OutlinedTextField(
                     value = sshPortInput,
@@ -1157,18 +1149,16 @@ fun DeploySecretsDialog(
                     placeholder = { Text("22") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(16.dp),
+                    shape = HopletModalDefaults.fieldShape,
                     keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
                         keyboardType = androidx.compose.ui.text.input.KeyboardType.Number
-                    )
+                    ),
+                    colors = hopletOutlinedTextFieldColors()
                 )
 
                 if (manualPortsEnabled) {
-                    Spacer(Modifier.height(16.dp))
-                    HorizontalDivider()
-                    Spacer(Modifier.height(8.dp))
+                    HorizontalDivider(color = HopletModalDefaults.borderColor().copy(alpha = 0.75f))
                     Text("Порты сервера", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
-                    Spacer(Modifier.height(8.dp))
                     OutlinedTextField(
                         value = dtlsPortInput,
                         onValueChange = { dtlsPortInput = it.filter(Char::isDigit).take(5) },
@@ -1176,12 +1166,12 @@ fun DeploySecretsDialog(
                         placeholder = { Text("56000") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(16.dp),
+                        shape = HopletModalDefaults.fieldShape,
                         keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
                             keyboardType = androidx.compose.ui.text.input.KeyboardType.Number
-                        )
+                        ),
+                        colors = hopletOutlinedTextFieldColors()
                     )
-                    Spacer(Modifier.height(8.dp))
                     OutlinedTextField(
                         value = wgPortInput,
                         onValueChange = { wgPortInput = it.filter(Char::isDigit).take(5) },
@@ -1189,15 +1179,15 @@ fun DeploySecretsDialog(
                         placeholder = { Text("56001") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(16.dp),
+                        shape = HopletModalDefaults.fieldShape,
                         keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
                             keyboardType = androidx.compose.ui.text.input.KeyboardType.Number
-                        )
+                        ),
+                        colors = hopletOutlinedTextFieldColors()
                     )
                 }
 
-                Spacer(Modifier.height(24.dp))
-                Button(
+                HopletPrimaryButton(
                     onClick = {
                         val finalPort = if (sshPortInput.isBlank()) "22" else sshPortInput
                         val finalDtls = normalizePort(dtlsPortInput, "56000")
@@ -1209,11 +1199,11 @@ fun DeploySecretsDialog(
                             onDismiss()
                         }
                     },
-                    modifier = Modifier.fillMaxWidth().height(48.dp),
-                    shape = RoundedCornerShape(16.dp),
-                    enabled = passInput.isNotBlank(),
-                    colors = ButtonDefaults.buttonColors(contentColor = MaterialTheme.colorScheme.onPrimary)
-                ) { Text("Сохранить", fontWeight = FontWeight.SemiBold) }
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = passInput.isNotBlank()
+                ) {
+                    Text("Сохранить", fontWeight = FontWeight.SemiBold)
+                }
             }
         }
     }
@@ -1225,24 +1215,13 @@ fun UninstallConfirmDialog(onDismiss: () -> Unit, onConfirm: () -> Unit) {
     var confirmText by remember { mutableStateOf("") }
     val isConfirmed = confirmText.trim().lowercase() == "да"
 
-    androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
-        Surface(
-            shape = RoundedCornerShape(24.dp),
-            color = MaterialTheme.colorScheme.surface,
-            contentColor = MaterialTheme.colorScheme.onSurface,
-            tonalElevation = 8.dp
-        ) {
-            Column(modifier = Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                Text(
-                    "Удаление WDTT с сервера",
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.error
-                )
-                Text(
-                    "Будут удалены: бинарник, systemd-сервис, бот, конфигурация WDTT и только помеченные правила firewall/NAT для WDTT.\n\nЭто действие необратимо.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+    HopletAlertDialog(
+        onDismissRequest = onDismiss,
+        title = { HopletSectionTitle("Удаление Hoplet с сервера") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                HopletDialogBodyText(
+                    text = "Будут удалены: бинарник, systemd-сервис, бот, конфигурация Hoplet и только помеченные правила firewall/NAT для Hoplet.\n\nЭто действие необратимо."
                 )
                 OutlinedTextField(
                     value = confirmText,
@@ -1250,32 +1229,33 @@ fun UninstallConfirmDialog(onDismiss: () -> Unit, onConfirm: () -> Unit) {
                     label = { Text("Введите «да» для подтверждения") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(16.dp),
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = MaterialTheme.colorScheme.error,
-                        unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)
+                    shape = HopletModalDefaults.fieldShape,
+                    colors = hopletOutlinedTextFieldColors().copy(
+                        focusedIndicatorColor = MaterialTheme.colorScheme.error,
+                        cursorColor = MaterialTheme.colorScheme.error
                     )
                 )
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    OutlinedButton(
-                        onClick = onDismiss, modifier = Modifier.weight(1f).height(48.dp),
-                        shape = RoundedCornerShape(16.dp),
-                        colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.onSurface)
-                    ) { Text("Отмена") }
-                    Button(
-                        onClick = onConfirm, modifier = Modifier.weight(1f).height(48.dp),
-                        shape = RoundedCornerShape(16.dp), enabled = isConfirmed,
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = MaterialTheme.colorScheme.error,
-                            contentColor = MaterialTheme.colorScheme.onError
-                        )
-                    ) {
-                        Icon(Icons.Default.Delete, null, Modifier.size(18.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("Удалить", fontWeight = FontWeight.Bold)
-                    }
-                }
+            }
+        },
+        confirmButton = {
+            HopletPrimaryButton(
+                onClick = onConfirm,
+                modifier = Modifier.weight(1f),
+                enabled = isConfirmed,
+                destructive = true
+            ) {
+                Icon(Icons.Default.Delete, null, Modifier.size(18.dp))
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("Удалить", fontWeight = FontWeight.Bold)
+            }
+        },
+        dismissButton = {
+            HopletSecondaryButton(
+                onClick = onDismiss,
+                modifier = Modifier.weight(1f)
+            ) {
+                Text("Отмена")
             }
         }
-    }
+    )
 }

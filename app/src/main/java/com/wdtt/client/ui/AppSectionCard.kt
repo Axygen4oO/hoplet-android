@@ -11,26 +11,30 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Dp
 
-@Composable
-private fun appSectionCardColor(): Color {
-    val colors = MaterialTheme.colorScheme
-    val isDark = colors.background.luminance() < 0.22f
-    return if (isDark) {
-        lerp(colors.surface, colors.surfaceVariant, 0.10f)
-    } else {
-        lerp(colors.surface, colors.surfaceVariant, 0.28f)
+object AppCardDefaults {
+    @Composable
+    fun containerColor(): Color {
+        val colors = MaterialTheme.colorScheme
+        return remember(colors.background, colors.surface) {
+            val isDark = colors.background.luminance() < 0.22f
+            if (isDark) {
+                colors.surface.copy(alpha = 0.4f)
+            } else {
+                Color.White.copy(alpha = 0.5f)
+            }
+        }
     }
 }
 
 @Composable
-private fun appSectionCardBorderColor(): Color {
+internal fun appSectionCardBorderColor(): Color {
     val colors = MaterialTheme.colorScheme
     val isDark = colors.background.luminance() < 0.22f
     return if (isDark) {
@@ -53,7 +57,7 @@ fun AppSectionCard(
 ) {
     Surface(
         shape = RoundedCornerShape(28.dp),
-        color = color ?: appSectionCardColor(),
+        color = color ?: AppCardDefaults.containerColor(),
         contentColor = MaterialTheme.colorScheme.onSurface,
         border = border ?: BorderStroke(1.dp, appSectionCardBorderColor()),
         shadowElevation = shadowElevation ?: if (MaterialTheme.colorScheme.background.luminance() < 0.22f) 2.dp else 10.dp,

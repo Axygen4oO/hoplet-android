@@ -12,7 +12,7 @@ import kotlinx.coroutines.withContext
 object TunnelControl {
 
     fun toggle(context: Context) {
-        if (TunnelManager.running.value) {
+        if (TunnelManager.enabled.value) {
             stop(context)
         } else {
             startFromSavedSettings(context)
@@ -30,7 +30,6 @@ object TunnelControl {
             SettingsStore.awaitMigrations(appContext)
             val store = SettingsStore(appContext)
             val basePeer = store.peer.first()
-            val hashes = store.vkHashes.first()
             val workers = store.workersPerHash.first()
             val port = store.listenPort.first()
             val password = store.connectionPassword.first()
@@ -42,10 +41,17 @@ object TunnelControl {
             val manualPortsEnabled = store.manualPortsEnabled.first()
             val serverDtlsPort = if (manualPortsEnabled) store.serverDtlsPort.first() else 56000
             val peerWithPort = if (basePeer.isBlank()) basePeer else PeerAddress.ensurePort(basePeer, serverDtlsPort)
+            val hashes = VkHashSourceResolver.resolveForConnection(
+                context = appContext,
+                settingsStore = store,
+                peer = basePeer,
+            ).hashes
 
             if (peerWithPort.isBlank() || hashes.isBlank() || password.isBlank()) {
                 return@launch
             }
+
+            store.saveActiveVkHashes(hashes)
 
             val startIntent = Intent(appContext, TunnelService::class.java).apply {
                 action = "START_FORCED"

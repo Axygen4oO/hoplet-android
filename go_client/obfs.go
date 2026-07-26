@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/crypto/chacha20poly1305"
 )
@@ -79,12 +80,13 @@ func normalizeObfsMode(mode string) string {
 
 // ─── Per-direction state (sequence + timestamp counters) ───
 
-// ObfsState tracks monotonically increasing RTP sequence number and timestamp using a 48-bit packet counter.
+// ObfsState tracks RTP sequence/timestamp state for a single sender direction.
 type ObfsState struct {
-	mu      sync.Mutex
-	initSeq uint16
-	initTs  uint32
-	count   uint64
+	mu         sync.Mutex
+	seq        uint16
+	timestamp  uint32
+	lastPacket time.Time
+	count      uint64
 }
 
 // NewObfsState creates a state with random initial seq/ts and count=0.
@@ -92,10 +94,65 @@ func NewObfsState() *ObfsState {
 	var buf [6]byte
 	rand.Read(buf[:])
 	return &ObfsState{
-		initSeq: binary.BigEndian.Uint16(buf[0:2]),
-		initTs:  binary.BigEndian.Uint32(buf[2:6]),
-		count:   0,
+		seq:       binary.BigEndian.Uint16(buf[0:2]),
+		timestamp: binary.BigEndian.Uint32(buf[2:6]),
+		count:     0,
 	}
+}
+
+func rtpTimestampStep(elapsed time.Duration, jitter byte) uint32 {
+	samples := int(elapsed * 48000 / time.Second)
+	if samples < 120 {
+		samples = 120
+	} else if samples > 2880 {
+		samples = 2880
+	}
+
+	samples = ((samples + 60) / 120) * 120
+	switch jitter % 3 {
+	case 0:
+		samples -= 120
+	case 2:
+		samples += 120
+	}
+
+	if samples < 120 {
+		samples = 120
+	} else if samples > 2880 {
+		samples = 2880
+	}
+	return uint32(samples)
+}
+
+func rtpSequenceStep(selector byte) uint16 {
+	if selector&0x7F == 0 {
+		return 2 + uint16(selector>>7)
+	}
+	return 1
+}
+
+func useRTPPadding(selector byte) bool {
+	return selector&0x03 == 0
+}
+
+func useRTPMarker(selector byte) bool {
+	return selector&0x3F == 0
+}
+
+func (s *ObfsState) nextHeader(now time.Time, jitter, sequenceSelector byte) (uint16, uint32) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.count > 0 {
+		s.timestamp += rtpTimestampStep(now.Sub(s.lastPacket), jitter)
+	}
+
+	seq := s.seq
+	ts := s.timestamp
+	s.seq += rtpSequenceStep(sequenceSelector)
+	s.lastPacket = now
+	s.count++
+	return seq, ts
 }
 
 // ─── Nonce derivation ───
@@ -126,33 +183,37 @@ func obfsWrapPacket(key, payload []byte, cfg *ObfsConfig, state *ObfsState) ([]b
 		return nil, errors.New("obfs: empty payload")
 	}
 
-	state.mu.Lock()
-	c := state.count
-	state.count++
-	state.mu.Unlock()
+	var rndBuf [5]byte
+	rand.Read(rndBuf[:])
 
-	seq := state.initSeq + uint16(c)
-	ts := state.initTs + uint32(c)*960 + uint32(c>>16)
+	seq, ts := state.nextHeader(time.Now(), rndBuf[2], rndBuf[4])
 
 	// Build nonce from RTP fields
 	nonce := obfsBuildNonce(cfg.SSRC, seq, ts)
 
 	// Determine padding
 	padRand := 0
-	if cfg.PaddingMax > 0 {
-		var rndBuf [1]byte
-		rand.Read(rndBuf[:])
-		padRand = int(rndBuf[0]) % cfg.PaddingMax
+	if cfg.PaddingMax > 0 && useRTPPadding(rndBuf[0]) {
+		padRand = int(rndBuf[3]) % cfg.PaddingMax
 	}
-	padTotal := padRand + 1 // +1 for the length byte itself
+	padTotal := 0
+	if padRand > 0 || (cfg.PaddingMax > 0 && useRTPPadding(rndBuf[0])) {
+		padTotal = padRand + 1 // +1 for the length byte itself
+	}
 
 	// Allocate output: 12 (header) + payload + AEAD tag + padTotal
 	outLen := 12 + len(payload) + chacha20poly1305.Overhead + padTotal
 	out := make([]byte, outLen)
 
 	// RTP Header (12 bytes)
-	out[0] = 0x80 | 0x20 // V=2, P=1 (padding present)
+	out[0] = 0x80 // V=2
+	if padTotal > 0 {
+		out[0] |= 0x20 // P=1
+	}
 	out[1] = cfg.PayloadType & 0x7F
+	if useRTPMarker(rndBuf[1]) {
+		out[1] |= 0x80
+	}
 	binary.BigEndian.PutUint16(out[2:4], seq)
 	binary.BigEndian.PutUint32(out[4:8], ts)
 	binary.BigEndian.PutUint32(out[8:12], cfg.SSRC)
@@ -170,7 +231,9 @@ func obfsWrapPacket(key, payload []byte, cfg *ObfsConfig, state *ObfsState) ([]b
 	}
 
 	// Last byte = total padding count (RFC 3550 §5.1)
-	out[outLen-1] = byte(padTotal)
+	if padTotal > 0 {
+		out[outLen-1] = byte(padTotal)
+	}
 
 	return out, nil
 }

@@ -130,12 +130,14 @@ suspend fun fetchReleaseNotesForVersion(versionTag: String): String = withContex
 fun bundledReleaseNotes(versionTag: String): String {
     return when (normalizeVersionTag(versionTag)) {
         "1.3.2" -> """
-            • SSH-ключ для деплоя на VPS
-            • Упрощён ввод IP — порт только в «Секретах»
-            • Кнопка «Подключить» сразу на экране туннеля
-            • Сторонний VPN не отключается при простом открытии приложения
-            • Опция «Отключать на Wi-Fi»
-            • Автогенерация VK-хешей при входе в аккаунт
+            • 🚀 Добавлена схема подключения с отображением всех этапов соединения
+              🔄 Реализовано автоматическое переподключение при потере соединения
+              ⚙️ Добавлен выбор источника VK Hash (SERVER / LOCAL)
+              🔀 Локальные и серверные VK Hash теперь работают независимо
+              📱 Переработан интерфейс настроек
+              📥 Улучшен механизм получения обновлений
+              🔌 Повышена стабильность подключения
+              🛠 Исправлены ошибки и улучшена общая стабильность приложения
         """.trimIndent()
         else -> ""
     }
@@ -464,7 +466,7 @@ fun downloadUpdate(context: Context, downloadUrl: String, versionTag: String): F
         // Clean up old updates
         updatesDir.listFiles()?.forEach { it.delete() }
         
-        val apkFile = File(updatesDir, "qWDTT_$versionTag.apk")
+        val apkFile = File(updatesDir, "Hoplet_$versionTag.apk")
         
         conn = URL(downloadUrl).openConnection() as HttpURLConnection
         conn.requestMethod = "GET"

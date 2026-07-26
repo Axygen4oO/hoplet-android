@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -106,8 +107,10 @@ import androidx.compose.material.icons.filled.FileOpen
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material3.IconButton
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.SwipeToDismiss
 import androidx.compose.material.DismissValue
@@ -562,39 +565,79 @@ fun ProfilesTab(
     }
 
     if (editorVisible) {
-        AlertDialog(
+        HopletAlertDialog(
             onDismissRequest = { editorVisible = false },
             properties = androidx.compose.ui.window.DialogProperties(decorFitsSystemWindows = false),
             modifier = Modifier.imePadding(),
-            title = { Text(if (editingProfileId == null) "Новый профиль" else "Редактировать профиль") },
+            title = {
+                HopletSectionTitle(if (editingProfileId == null) "Новый профиль" else "Редактировать профиль")
+            },
             text = {
                 Column(
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                    modifier = Modifier.verticalScroll(rememberScrollState())
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState())
                 ) {
-                    OutlinedTextField(value = nameInput, onValueChange = { nameInput = it }, label = { Text("Название") }, singleLine = true)
-                    OutlinedTextField(value = peerInput, onValueChange = { peerInput = it }, label = { Text("Peer") }, singleLine = true)
-                    
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { useGlobalHashesInput = !useGlobalHashesInput }
-                            .padding(vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                    OutlinedTextField(
+                        value = nameInput,
+                        onValueChange = { nameInput = it },
+                        label = { Text("Название") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = HopletModalDefaults.fieldShape,
+                        colors = hopletOutlinedTextFieldColors()
+                    )
+                    OutlinedTextField(
+                        value = peerInput,
+                        onValueChange = { peerInput = it },
+                        label = { Text("Peer") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = HopletModalDefaults.fieldShape,
+                        colors = hopletOutlinedTextFieldColors()
+                    )
+
+                    AppSectionCard(
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 14.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        color = HopletModalDefaults.softContainerColor(),
+                        shadowElevation = 0.dp,
+                        tonalElevation = 0.dp,
+                        border = HopletModalDefaults.border()
                     ) {
-                        Text(
-                            text = "Использовать общие хеши",
-                            modifier = Modifier.weight(1f),
-                            style = MaterialTheme.typography.bodyMedium
-                        )
-                        androidx.compose.material3.Switch(
-                            checked = useGlobalHashesInput,
-                            onCheckedChange = { useGlobalHashesInput = it }
-                        )
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { useGlobalHashesInput = !useGlobalHashesInput },
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Text(
+                                    text = "Использовать общие хеши",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.Medium
+                                )
+                                HopletSectionCaption("Брать VK-хеши из главной вкладки Hoplet.")
+                            }
+                            HopletSwitch(
+                                checked = useGlobalHashesInput,
+                                onCheckedChange = { useGlobalHashesInput = it }
+                            )
+                        }
                     }
 
                     if (!useGlobalHashesInput) {
-                        OutlinedTextField(value = hashesInput, onValueChange = { hashesInput = it }, label = { Text("VK-хеши") }, minLines = 2)
+                        OutlinedTextField(
+                            value = hashesInput,
+                            onValueChange = { hashesInput = it },
+                            label = { Text("VK-хеши") },
+                            minLines = 2,
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = HopletModalDefaults.fieldShape,
+                            colors = hopletOutlinedTextFieldColors()
+                        )
                     } else {
                         OutlinedTextField(
                             value = globalHashes.ifEmpty { "Не заданы (настройте на главной)" },
@@ -602,26 +645,48 @@ fun ProfilesTab(
                             label = { Text("VK Хеши (из главной вкладки)") },
                             minLines = 2,
                             enabled = false,
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = HopletModalDefaults.fieldShape,
+                            colors = hopletOutlinedTextFieldColors()
                         )
                     }
-                    
+
                     OutlinedTextField(
                         value = workersInput,
                         onValueChange = { workersInput = it.filter(Char::isDigit) },
                         label = { Text("Потоки") },
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                         singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = HopletModalDefaults.fieldShape,
+                        colors = hopletOutlinedTextFieldColors()
                     )
-                    OutlinedTextField(value = passwordInput, onValueChange = { passwordInput = it }, label = { Text("Пароль") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(
+                        value = passwordInput,
+                        onValueChange = { passwordInput = it },
+                        label = { Text("Пароль") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = HopletModalDefaults.fieldShape,
+                        colors = hopletOutlinedTextFieldColors()
+                    )
                 }
             },
             confirmButton = {
-                TextButton(onClick = { saveEditor() }) { Text("Сохранить") }
+                HopletPrimaryButton(
+                    onClick = { saveEditor() },
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text("Сохранить")
+                }
             },
             dismissButton = {
-                TextButton(onClick = { editorVisible = false }) { Text("Отмена") }
+                HopletSecondaryButton(
+                    onClick = { editorVisible = false },
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text("Отмена")
+                }
             }
         )
     }
@@ -701,32 +766,31 @@ fun ProfilesTab(
 
     if (deleteTarget != null) {
         val target = deleteTarget!!
-        AlertDialog(
+        HopletAlertDialog(
             onDismissRequest = { deleteTarget = null },
             title = {
-                Text(
-                    text = "Удалить профиль?",
-                    fontWeight = FontWeight.Bold,
-                    style = MaterialTheme.typography.titleLarge
-                )
+                HopletSectionTitle("Удалить профиль?")
             },
             text = {
-                Text("Вы действительно хотите удалить профиль «${target.name}»?\n\nЭто действие нельзя будет отменить.")
+                HopletDialogBodyText("Вы действительно хотите удалить профиль «${target.name}»?\n\nЭто действие нельзя будет отменить.")
             },
             confirmButton = {
-                Button(
+                HopletPrimaryButton(
                     onClick = {
                         scope.launch { profilesStore.deleteProfile(target.id) }
                         deleteTarget = null
                     },
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
-                    shape = RoundedCornerShape(12.dp)
+                    modifier = Modifier.weight(1f),
+                    destructive = true
                 ) {
-                    Text("Удалить", color = MaterialTheme.colorScheme.onError)
+                    Text("Удалить")
                 }
             },
             dismissButton = {
-                TextButton(onClick = { deleteTarget = null }) {
+                HopletSecondaryButton(
+                    onClick = { deleteTarget = null },
+                    modifier = Modifier.weight(1f)
+                ) {
                     Text("Отмена")
                 }
             }
@@ -735,23 +799,19 @@ fun ProfilesTab(
 
     if (unbindTarget != null) {
         val target = unbindTarget!!
-        AlertDialog(
+        HopletAlertDialog(
             onDismissRequest = { unbindTarget = null },
             title = {
-                Text(
-                    text = "Отвязать устройство",
-                    fontWeight = FontWeight.Bold,
-                    style = MaterialTheme.typography.titleLarge
-                )
+                HopletSectionTitle("Отвязать устройство")
             },
             text = {
-                Text(
+                HopletDialogBodyText(
                     if (unbindOnlyCurrent) "Вы действительно хотите отвязать текущее устройство от этого профиля?"
                     else "Вы действительно хотите сбросить ВСЕ привязанные устройства от этого профиля?\n\nЭто освободит все лимиты подключения."
                 )
             },
             confirmButton = {
-                Button(
+                HopletPrimaryButton(
                     onClick = {
                         val androidId = android.provider.Settings.Secure.getString(context.contentResolver, android.provider.Settings.Secure.ANDROID_ID) ?: "unknown"
                         val deviceIdToSend = if (unbindOnlyCurrent) androidId else ""
@@ -774,14 +834,17 @@ fun ProfilesTab(
                         }
                         unbindTarget = null
                     },
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
-                    shape = RoundedCornerShape(12.dp)
+                    modifier = Modifier.weight(1f),
+                    destructive = true
                 ) {
-                    Text(if (unbindOnlyCurrent) "Отвязать" else "Сбросить", color = MaterialTheme.colorScheme.onError)
+                    Text(if (unbindOnlyCurrent) "Отвязать" else "Сбросить")
                 }
             },
             dismissButton = {
-                TextButton(onClick = { unbindTarget = null }) {
+                HopletSecondaryButton(
+                    onClick = { unbindTarget = null },
+                    modifier = Modifier.weight(1f)
+                ) {
                     Text("Отмена")
                 }
             }
@@ -790,7 +853,7 @@ fun ProfilesTab(
 
     if (scannedProfile != null) {
         val profile = scannedProfile!!
-        AlertDialog(
+        HopletAlertDialog(
             onDismissRequest = { scannedProfile = null },
             title = {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -801,46 +864,53 @@ fun ProfilesTab(
                         modifier = Modifier.size(24.dp)
                     )
                     Spacer(Modifier.width(8.dp))
-                    Text("Импорт профиля", fontWeight = FontWeight.Bold)
+                    HopletSectionTitle("Импорт профиля")
                 }
             },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
                     Text(
                         text = "Найден новый профиль для импорта!",
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.SemiBold
                     )
-                    
-                    Surface(
-                        shape = RoundedCornerShape(12.dp),
-                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+
+                    AppSectionCard(
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 14.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                        color = HopletModalDefaults.softContainerColor(),
+                        shadowElevation = 0.dp,
+                        tonalElevation = 0.dp,
+                        border = HopletModalDefaults.border()
                     ) {
-                        Column(
-                            modifier = Modifier.padding(12.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            Text("📝 Название: ${profile.name}", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
-                            Text("🌐 Сервер: ${profile.peer}", style = MaterialTheme.typography.bodyMedium)
-                            Text("⚡ Потоков: ${profile.workersPerHash}", style = MaterialTheme.typography.bodyMedium)
-                            val hashCount = if (profile.vkHashes.isBlank()) 0 else profile.vkHashes.trim().split(",").count { it.isNotBlank() }
-                            Text("🔑 Хешей: $hashCount", style = MaterialTheme.typography.bodyMedium)
-                        }
+                        Text("Название: ${profile.name}", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+                        Text("Сервер: ${profile.peer}", style = MaterialTheme.typography.bodyMedium)
+                        Text("Потоков: ${profile.workersPerHash}", style = MaterialTheme.typography.bodyMedium)
+                        val hashCount = if (profile.vkHashes.isBlank()) 0 else profile.vkHashes.trim().split(",").count { it.isNotBlank() }
+                        Text("Хешей: $hashCount", style = MaterialTheme.typography.bodyMedium)
                     }
 
                     if (profile.vkHashes.isBlank()) {
-                        Surface(
-                            shape = RoundedCornerShape(10.dp),
-                            color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.6f),
-                            modifier = Modifier.fillMaxWidth()
+                        AppSectionCard(
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                            color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.32f),
+                            shadowElevation = 0.dp,
+                            tonalElevation = 0.dp,
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.tertiary.copy(alpha = 0.28f))
                         ) {
                             Row(
-                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                                 verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
                             ) {
-                                Text("⚠️", style = MaterialTheme.typography.bodyMedium)
+                                Icon(
+                                    imageVector = Icons.Filled.Info,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.tertiary
+                                )
                                 Text(
                                     text = "Хеш звонка ВКонтакте не указан. После сохранения добавьте его вручную в настройках профиля.",
                                     style = MaterialTheme.typography.bodySmall,
@@ -849,16 +919,12 @@ fun ProfilesTab(
                             }
                         }
                     }
-                    
-                    Text(
-                        text = "Вы хотите сохранить его в список профилей?",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+
+                    HopletDialogBodyText("Вы хотите сохранить его в список профилей?")
                 }
             },
             confirmButton = {
-                Button(
+                HopletPrimaryButton(
                     onClick = {
                         scope.launch {
                             profilesStore.saveProfile(profile)
@@ -866,13 +932,16 @@ fun ProfilesTab(
                             scannedProfile = null
                         }
                     },
-                    shape = RoundedCornerShape(12.dp)
+                    modifier = Modifier.weight(1f)
                 ) {
                     Text("Сохранить")
                 }
             },
             dismissButton = {
-                TextButton(onClick = { scannedProfile = null }) {
+                HopletSecondaryButton(
+                    onClick = { scannedProfile = null },
+                    modifier = Modifier.weight(1f)
+                ) {
                     Text("Отмена")
                 }
             }
@@ -885,7 +954,7 @@ fun ProfilesTab(
         var folderNameInput by remember { mutableStateOf(parsed.suggestedName ?: "Новая группа") }
         val importBlocked = groups.find { it.name.equals(folderNameInput.trim(), ignoreCase = true) }
             ?.let { subscriptionGroupIds.contains(it.id) } == true
-        AlertDialog(
+        HopletAlertDialog(
             onDismissRequest = { scannedMultipleProfiles = null },
             icon = {
                 Icon(
@@ -896,11 +965,7 @@ fun ProfilesTab(
                 )
             },
             title = {
-                Text(
-                    text = "Импорт группы",
-                    fontWeight = FontWeight.Bold,
-                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
-                )
+                HopletSectionTitle("Импорт группы")
             },
             text = {
                 Column(
@@ -953,12 +1018,14 @@ fun ProfilesTab(
                         onValueChange = { folderNameInput = it },
                         label = { Text("Название папки") },
                         singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = HopletModalDefaults.fieldShape,
+                        colors = hopletOutlinedTextFieldColors()
                     )
                 }
             },
             confirmButton = {
-                Button(
+                HopletPrimaryButton(
                     onClick = {
                         scope.launch {
                             val finalName = folderNameInput.trim()
@@ -988,13 +1055,16 @@ fun ProfilesTab(
                         }
                     },
                     enabled = !importBlocked,
-                    shape = RoundedCornerShape(12.dp)
+                    modifier = Modifier.weight(1f)
                 ) {
                     Text("Импортировать")
                 }
             },
             dismissButton = {
-                TextButton(onClick = { scannedMultipleProfiles = null }) {
+                HopletSecondaryButton(
+                    onClick = { scannedMultipleProfiles = null },
+                    modifier = Modifier.weight(1f)
+                ) {
                     Text("Отмена")
                 }
             }
@@ -1002,7 +1072,7 @@ fun ProfilesTab(
     }
 
     if (showFormatsInfoDialog) {
-        AlertDialog(
+        HopletAlertDialog(
             onDismissRequest = { showFormatsInfoDialog = false },
             title = {
                 Row(
@@ -1015,10 +1085,7 @@ fun ProfilesTab(
                         tint = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.size(24.dp)
                     )
-                    Text(
-                        "Поддерживаемые форматы",
-                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
-                    )
+                    HopletSectionTitle("Поддерживаемые форматы")
                 }
             },
             text = {
@@ -1037,15 +1104,18 @@ fun ProfilesTab(
                     // 1. URI ссылки
                     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Text("1. Ссылки / QR-коды", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
-                        Surface(
-                            shape = RoundedCornerShape(12.dp),
-                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                            modifier = Modifier.fillMaxWidth()
+                        AppSectionCard(
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 12.dp),
+                            verticalArrangement = Arrangement.spacedBy(0.dp),
+                            color = HopletModalDefaults.softContainerColor(),
+                            shadowElevation = 0.dp,
+                            tonalElevation = 0.dp,
+                            border = HopletModalDefaults.border()
                         ) {
                             Text(
                                 "qwdtt://config?peer=IP:порт&pass=пароль&workers=потоки&port=локальный_порт&name=имя&hashes=vk_хеши",
                                 style = MaterialTheme.typography.bodySmall,
-                                modifier = Modifier.padding(12.dp).horizontalScroll(rememberScrollState()),
+                                modifier = Modifier.horizontalScroll(rememberScrollState()),
                                 fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
                                 maxLines = 1
                             )
@@ -1070,10 +1140,13 @@ fun ProfilesTab(
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
-                        Surface(
-                            shape = RoundedCornerShape(12.dp),
-                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                            modifier = Modifier.fillMaxWidth()
+                        AppSectionCard(
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 12.dp),
+                            verticalArrangement = Arrangement.spacedBy(0.dp),
+                            color = HopletModalDefaults.softContainerColor(),
+                            shadowElevation = 0.dp,
+                            tonalElevation = 0.dp,
+                            border = HopletModalDefaults.border()
                         ) {
                             Text(
                                 "{\n" +
@@ -1085,7 +1158,7 @@ fun ProfilesTab(
                                 "  \"port\": 9000\n" +
                                 "}",
                                 style = MaterialTheme.typography.bodySmall,
-                                modifier = Modifier.padding(12.dp).horizontalScroll(rememberScrollState()),
+                                modifier = Modifier.horizontalScroll(rememberScrollState()),
                                 fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
                             )
                         }
@@ -1099,10 +1172,13 @@ fun ProfilesTab(
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
-                        Surface(
-                            shape = RoundedCornerShape(12.dp),
-                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                            modifier = Modifier.fillMaxWidth()
+                        AppSectionCard(
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 12.dp),
+                            verticalArrangement = Arrangement.spacedBy(0.dp),
+                            color = HopletModalDefaults.softContainerColor(),
+                            shadowElevation = 0.dp,
+                            tonalElevation = 0.dp,
+                            border = HopletModalDefaults.border()
                         ) {
                             Text(
                                 "{\n" +
@@ -1116,7 +1192,7 @@ fun ProfilesTab(
                                 "  ]\n" +
                                 "}",
                                 style = MaterialTheme.typography.bodySmall,
-                                modifier = Modifier.padding(12.dp).horizontalScroll(rememberScrollState()),
+                                modifier = Modifier.horizontalScroll(rememberScrollState()),
                                 fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
                             )
                         }
@@ -1124,715 +1200,400 @@ fun ProfilesTab(
                 }
             },
             confirmButton = {
-                TextButton(onClick = { showFormatsInfoDialog = false }) {
+                HopletPrimaryButton(
+                    onClick = { showFormatsInfoDialog = false },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
                     Text("Понятно", fontWeight = FontWeight.Bold)
                 }
-            },
-            shape = RoundedCornerShape(28.dp),
-            properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = true)
+            }
         )
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
+        val currentFilterLabel = when (selectedFilterGroup) {
+            null -> "Все профили"
+            "" -> "Без папки"
+            else -> groups.firstOrNull { it.id == selectedFilterGroup }?.name ?: "Фильтр"
+        }
+        val activeProfileCount = profiles.count { it.id == currentProfileId }
+        val issueProfileCount = profiles.count { profile ->
+            val effectiveHashes = if (profile.useGlobalHashes) {
+                globalHashes.ifEmpty { profile.vkHashes }
+            } else {
+                profile.vkHashes
+            }
+            effectiveHashes.isBlank() || profile.password.isBlank()
+        }
+
+        val activeStatus = profiles
+            .mapNotNull { deviceStatuses[it.id] }
+            .firstOrNull { !it.isError && it.expiresAt > 0L }
+
+        val subscriptionStatus: String
+        val subscriptionSubtitle: String
+        val subscriptionColor: Color
+        val subscriptionIcon: androidx.compose.ui.graphics.vector.ImageVector
+
+        if (activeStatus == null) {
+            subscriptionStatus = "Подписка отсутствует"
+            subscriptionSubtitle = "Нет активной подписки"
+            subscriptionColor = MaterialTheme.colorScheme.onSurfaceVariant
+            subscriptionIcon = Icons.Filled.Info
+        } else {
+            val now = currentTime
+            if (now >= activeStatus.expiresAt) {
+                subscriptionStatus = "Подписка истекла"
+                subscriptionSubtitle = "Требуется продление"
+                subscriptionColor = MaterialTheme.colorScheme.error
+                subscriptionIcon = Icons.Filled.Info
+            } else {
+                val daysLeft = kotlin.math.ceil(
+                    (activeStatus.expiresAt - now) / 86400.0
+                ).toInt()
+                subscriptionStatus = "Подписка активна"
+                subscriptionSubtitle = "Осталось $daysLeft дн."
+                subscriptionColor = when {
+                    daysLeft < 5 -> MaterialTheme.colorScheme.error
+                    daysLeft < 10 -> Color(0xFFDC8A00)
+                    else -> Color(0xFF1E9E64)
+                }
+                subscriptionIcon = Icons.Filled.RssFeed
+            }
+        }
+
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
-                .padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 88.dp),
+                .padding(start = 16.dp, end = 16.dp, top = 14.dp, bottom = if (isSubscriptionFilter) 96.dp else 112.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text(
-                        text = "Профили",
-                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                    androidx.compose.material3.IconButton(
-                        onClick = { showFormatsInfoDialog = true },
-                        modifier = Modifier.size(24.dp)
-                    ) {
-                        androidx.compose.material3.Icon(
-                            imageVector = Icons.Filled.Info,
-                            contentDescription = "Справка",
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(16.dp)
-                        )
-                    }
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(0.dp)) {
-
-                    androidx.compose.material3.IconButton(
-                        onClick = { pingAllProfiles(profiles) }
-                    ) {
-                        androidx.compose.material3.Icon(
-                            imageVector = Icons.Filled.SignalCellularAlt,
-                            contentDescription = "Проверить пинг",
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                    }
-
-                    androidx.compose.material3.IconButton(
-                        onClick = {
-                            scope.launch { settingsStore.saveSortProfilesByPing(!sortByPing) }
-                        },
-                        modifier = Modifier.background(
-                            color = if (sortByPing) MaterialTheme.colorScheme.primaryContainer else androidx.compose.ui.graphics.Color.Transparent,
-                            shape = androidx.compose.foundation.shape.CircleShape
-                        )
-                    ) {
-                        androidx.compose.material3.Icon(
-                            imageVector = Icons.Filled.Sort,
-                            contentDescription = "Сортировать по пингу",
-                            tint = if (sortByPing) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-
-                    androidx.compose.foundation.layout.Box {
-                        androidx.compose.material3.IconButton(
-                            onClick = { showMoreMenu = true }
-                        ) {
-                            androidx.compose.material3.Icon(
-                                imageVector = Icons.Filled.MoreVert,
-                                contentDescription = "Дополнительно",
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        DropdownMenu(
-                            expanded = showMoreMenu,
-                            onDismissRequest = { showMoreMenu = false }
-                        ) {
-                            DropdownMenuItem(
-                                text = { Text("Управление папками") },
-                                leadingIcon = {
-                                    androidx.compose.material3.Icon(
-                                        Icons.Filled.Folder,
-                                        contentDescription = null,
-                                        tint = MaterialTheme.colorScheme.primary
-                                    )
-                                },
-                                onClick = {
-                                    showGroupManagement = true
-                                    showMoreMenu = false
-                                }
-                            )
-
-
-
-                            DropdownMenuItem(
-                                text = { Text("Экспорт всех профилей (ZIP)") },
-                                onClick = {
-                                    showMoreMenu = false
-                                    exportZipLauncher.launch("wdtt_profiles_export.zip")
-                                }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Импорт профилей (ZIP)") },
-                                onClick = {
-                                    showMoreMenu = false
-                                    importZipLauncher.launch("application/zip")
-                                }
-                            )
-                        }
-                    }
-                }
-            }
+            ProfilesHeaderCard(
+                totalProfiles = profiles.size,
+                visibleProfiles = visibleProfiles.size,
+                activeProfiles = activeProfileCount,
+                issueProfiles = issueProfileCount,
+                currentFilterLabel = currentFilterLabel,
+                sortByPing = sortByPing,
+                showMoreMenu = showMoreMenu,
+                onInfoClick = { showFormatsInfoDialog = true },
+                onPingAllClick = { pingAllProfiles(profiles) },
+                onSortClick = {
+                    scope.launch { settingsStore.saveSortProfilesByPing(!sortByPing) }
+                },
+                onMoreClick = { showMoreMenu = true },
+                onDismissMoreMenu = { showMoreMenu = false },
+                onManageGroupsClick = { showGroupManagement = true },
+                onExportZipClick = { exportZipLauncher.launch("hoplet_profiles_export.zip") },
+                onImportZipClick = { importZipLauncher.launch("application/zip") }
+            )
 
             if (groups.isNotEmpty()) {
-                androidx.compose.foundation.lazy.LazyRow(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp)
-                ) {
-                    item {
-                        FilterChip(
-                            selected = selectedFilterGroup == null,
-                            onClick = { selectedFilterGroup = null },
-                            label = { Text("Все") }
-                        )
-                    }
-                    item {
-                        FilterChip(
-                            selected = selectedFilterGroup == "",
-                            onClick = { selectedFilterGroup = "" },
-                            label = { Text("Без папки") }
-                        )
-                    }
-                    items(groups) { group ->
-                        val isSub = subscriptionGroupIds.contains(group.id)
-                        FilterChip(
-                            selected = selectedFilterGroup == group.id,
-                            onClick = { selectedFilterGroup = group.id },
-                            label = {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                                ) {
-                                    if (isSub) {
-                                        Icon(
-                                            Icons.Filled.RssFeed,
-                                            contentDescription = null,
-                                            modifier = Modifier.size(14.dp)
-                                        )
-                                    }
-                                    Text(group.name)
+                ProfilesFilterCard(
+                    groups = groups,
+                    selectedFilterGroup = selectedFilterGroup,
+                    subscriptionGroupIds = subscriptionGroupIds,
+                    onFilterSelected = { selectedFilterGroup = it }
+                )
+            }
+
+            if (visibleSubscriptions.isNotEmpty()) {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    visibleSubscriptions.forEach { sub ->
+                        ProfilesSubscriptionCard(
+                            sub = sub,
+                            isRefreshing = refreshingSubId == sub.id,
+                            onRefresh = {
+                                refreshingSubId = sub.id
+                                scope.launch {
+                                    val result = profilesStore.refreshSubscription(sub.id)
+                                    refreshingSubId = null
+                                    result.fold(
+                                        onSuccess = { count ->
+                                            Toast.makeText(
+                                                context,
+                                                "Обновлено профилей: $count",
+                                                Toast.LENGTH_SHORT
+                                            ).show()
+                                        },
+                                        onFailure = { e ->
+                                            Toast.makeText(
+                                                context,
+                                                "Ошибка: ${e.message}",
+                                                Toast.LENGTH_LONG
+                                            ).show()
+                                        }
+                                    )
                                 }
+                            },
+                            onDelete = { deleteSubTarget = sub },
+                            onOpenGroup = if (selectedFilterGroup == null && sub.groupId.isNotBlank()) {
+                                { selectedFilterGroup = sub.groupId }
+                            } else {
+                                null
                             }
                         )
                     }
                 }
             }
 
-            visibleSubscriptions.forEach { sub ->
-                SubscriptionInfoCard(
-                    sub = sub,
-                    isRefreshing = refreshingSubId == sub.id,
-                    onRefresh = {
-                        refreshingSubId = sub.id
-                        scope.launch {
-                            val result = profilesStore.refreshSubscription(sub.id)
-                            refreshingSubId = null
-                            result.fold(
-                                onSuccess = { count ->
-                                    Toast.makeText(
-                                        context,
-                                        "Обновлено профилей: $count",
-                                        Toast.LENGTH_SHORT
-                                    ).show()
-                                },
-                                onFailure = { e ->
-                                    Toast.makeText(
-                                        context,
-                                        "Ошибка: ${e.message}",
-                                        Toast.LENGTH_LONG
-                                    ).show()
-                                }
-                            )
-                        }
-                    },
-                    onDelete = { deleteSubTarget = sub },
-                    onOpenGroup = if (selectedFilterGroup == null && sub.groupId.isNotBlank()) {
-                        { selectedFilterGroup = sub.groupId }
-                    } else {
-                        null
-                    }
+            if (profiles.isNotEmpty() || visibleSubscriptions.isNotEmpty()) {
+                ProfilesStatusSummaryCard(
+                    title = subscriptionStatus,
+                    subtitle = subscriptionSubtitle,
+                    accentColor = subscriptionColor,
+                    icon = subscriptionIcon
                 )
             }
 
-            if (profiles.isEmpty()) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 48.dp, horizontal = 16.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(16.dp)
-                    ) {
-                        androidx.compose.material3.Icon(
-                            imageVector = Icons.Filled.Folder,
-                            contentDescription = null,
-                            modifier = Modifier.size(64.dp),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
-                        )
-                        Text(
-                            text = "Пока нет сохранённых профилей",
-
-                            style = MaterialTheme.typography.titleMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
-                        )
-                        Text(
-                            text = "Нажмите + внизу экрана, чтобы добавить профиль",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
-                        )
-
-                        Spacer(modifier = Modifier.height(24.dp))
-
-                    }
+            when {
+                profiles.isEmpty() -> {
+                    ProfilesEmptyStateCard(
+                        title = "Пока нет сохранённых профилей",
+                        description = "Добавьте первый профиль вручную, из файла, по подписке или через QR-код.",
+                        primaryActionLabel = "Добавить профиль",
+                        onPrimaryAction = { showCreateSheet = true }
+                    )
                 }
-            }
-
-            val subscriptionStatus: String
-            val subscriptionSubtitle: String
-            val subscriptionColor: Color
-
-            val activeStatus = profiles
-                .mapNotNull { deviceStatuses[it.id] }
-                .firstOrNull { !it.isError && it.expiresAt > 0L }
-
-            if (activeStatus == null) {
-                subscriptionStatus = "Подписка отсутствует"
-                subscriptionSubtitle = "Нет активной подписки"
-                subscriptionColor = MaterialTheme.colorScheme.onSurfaceVariant
-            } else {
-                val now = currentTime
-
-                if (now >= activeStatus.expiresAt) {
-                    subscriptionStatus = "Подписка истекла"
-                    subscriptionSubtitle = "Требуется продление"
-                    subscriptionColor = MaterialTheme.colorScheme.error
-                } else {
-                    val daysLeft = kotlin.math.ceil(
-                        (activeStatus.expiresAt - now) / 86400.0
-                    ).toInt()
-
-                    subscriptionStatus = "Подписка активна"
-                    subscriptionSubtitle = "Осталось $daysLeft дн."
-                    subscriptionColor = when {
-                        daysLeft < 5 -> MaterialTheme.colorScheme.error
-                        daysLeft < 10 -> Color(0xFFFF9800)
-                        else -> Color(0xFF4CAF50)
-                    }
-                }
-            }
-
-
-            HopletSubscriptionCard(
-                context = context,
-                status = subscriptionStatus,
-                subtitle = subscriptionSubtitle,
-                subtitleColor = subscriptionColor
-            )
-         if (visibleProfiles.isEmpty()) {
-
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f)
-                    .padding(32.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = if (isSubscriptionFilter) {
-                        "Профилей пока нет. Нажмите обновить на карточке подписки."
-                    } else {
-                        "Папка пуста"
-                    },
-                    style = MaterialTheme.typography.titleMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
-                )
-            }
-        } else {
-            draggingList.forEachIndexed { index, profile ->
-                androidx.compose.runtime.key(profile.id) {
-                    val isActive = profile.id == currentProfileId
-                    val effectiveHashes = if (profile.useGlobalHashes) globalHashes.ifEmpty { profile.vkHashes } else profile.vkHashes
-                    val hasIssue = effectiveHashes.isBlank() || profile.password.isBlank()
-
-                    val dismissState = rememberDismissState(
-                        confirmStateChange = { value ->
-                            if (value == DismissValue.DismissedToStart) {
-                                deleteTarget = profile
+                visibleProfiles.isEmpty() -> {
+                    val canResetFilter = selectedFilterGroup != null
+                    ProfilesEmptyStateCard(
+                        title = if (isSubscriptionFilter) {
+                            "В выбранной подписке пока нет профилей"
+                        } else {
+                            "Этот фильтр пока пуст"
+                        },
+                        description = if (isSubscriptionFilter) {
+                            "Обновите подписку или вернитесь ко всем профилям."
+                        } else {
+                            "Сбросьте фильтр или добавьте новый профиль в нужную папку."
+                        },
+                        primaryActionLabel = if (canResetFilter) "Сбросить фильтр" else "Добавить профиль",
+                        onPrimaryAction = {
+                            if (canResetFilter) {
+                                selectedFilterGroup = null
+                            } else {
+                                showCreateSheet = true
                             }
-                            false
                         }
                     )
-
-                    val isCurrentDragged = draggedIndex != null && draggingList.getOrNull(draggedIndex!!)?.id == profile.id
-                    val translationY = if (isCurrentDragged) dragOffset else 0f
-                    val scale = if (isCurrentDragged) 1.04f else 1.0f
-                    val elevation = if (isCurrentDragged) 8.dp else 0.dp
-
-                    SwipeToDismiss(
-                    state = dismissState,
-                    directions = setOf(DismissDirection.EndToStart),
-                    modifier = Modifier
-                        .onGloballyPositioned { coords ->
-                            itemHeights = itemHeights + (profile.id to coords.size.height)
-                        }
-                        .graphicsLayer {
-                            this.translationY = translationY
-                            this.scaleX = scale
-                            this.scaleY = scale
-                            this.shadowElevation = elevation.toPx()
-                            this.shape = RoundedCornerShape(28.dp)
-                            this.clip = isCurrentDragged
-                        }
-                        .pointerInput(profile.id) {
-                            detectDragGesturesAfterLongPress(
-                                onDragStart = { offset ->
-                                    if (sortByPing) {
-                                        Toast.makeText(context, "Отключите сортировку по пингу для ручного перемещения", Toast.LENGTH_SHORT).show()
-                                        return@detectDragGesturesAfterLongPress
-                                    }
-                                    isDragging = true
-                                    draggedIndex = draggingList.indexOfFirst { it.id == profile.id }
-                                    dragOffset = 0f
-                                },
-                                onDrag = { change, dragAmount ->
-                                    change.consume()
-                                    val currentIdx = draggedIndex ?: return@detectDragGesturesAfterLongPress
-                                    dragOffset += dragAmount.y
-
-                                    // Swap down
-                                    if (dragOffset > 0f && currentIdx < draggingList.size - 1) {
-                                        val nextProfile = draggingList[currentIdx + 1]
-                                        val nextHeight = itemHeights[nextProfile.id] ?: 0
-                                        val swapThreshold = (nextHeight + spacingPx) / 2f
-                                        if (dragOffset > swapThreshold) {
-                                            val newList = draggingList.toMutableList()
-                                            newList[currentIdx] = nextProfile
-                                            newList[currentIdx + 1] = profile
-                                            draggingList = newList
-                                            draggedIndex = currentIdx + 1
-                                            dragOffset -= (nextHeight + spacingPx)
-                                        }
-                                    }
-                                    // Swap up
-                                    else if (dragOffset < 0f && currentIdx > 0) {
-                                        val prevProfile = draggingList[currentIdx - 1]
-                                        val prevHeight = itemHeights[prevProfile.id] ?: 0
-                                        val swapThreshold = (prevHeight + spacingPx) / 2f
-                                        if (dragOffset < -swapThreshold) {
-                                            val newList = draggingList.toMutableList()
-                                            newList[currentIdx] = prevProfile
-                                            newList[currentIdx - 1] = profile
-                                            draggingList = newList
-                                            draggedIndex = currentIdx - 1
-                                            dragOffset += (prevHeight + spacingPx)
-                                        }
-                                    }
-                                },
-                                onDragEnd = {
-                                    isDragging = false
-                                    draggedIndex = null
-                                    dragOffset = 0f
-                                    scope.launch {
-                                        val idsList = draggingList.map { it.id }
-                                        profilesStore.reorderProfiles(idsList)
-                                    }
-                                },
-                                onDragCancel = {
-                                    isDragging = false
-                                    draggedIndex = null
-                                    dragOffset = 0f
-                                }
-                            )
-                        },
-                    background = {
-                        if (dismissState.dismissDirection != null) {
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .clip(RoundedCornerShape(28.dp))
-                                    .background(MaterialTheme.colorScheme.errorContainer),
-                                contentAlignment = Alignment.CenterEnd
-                            ) {
-                                Icon(
-                                    Icons.Filled.Delete,
-                                    contentDescription = "Удалить",
-                                    tint = MaterialTheme.colorScheme.onErrorContainer,
-                                    modifier = Modifier.padding(end = 32.dp).size(28.dp)
-                                )
-                            }
-                        }
-                    }
-                ) {
-                    AppSectionCard(
-                        contentPadding = PaddingValues(16.dp),
-                        border = if (isActive) BorderStroke(2.dp, MaterialTheme.colorScheme.primary)
-                        else if (hasIssue) BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.5f))
-                        else null,
-                        color = if (hasIssue) MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.05f)
-                        else null,
-                        shadowElevation = if (isActive || hasIssue) 0.dp else null,
-                        tonalElevation = if (isActive || hasIssue) 0.dp else null,
-                        modifier = Modifier.clickable {
-                            scope.launch {
-                                profilesStore.applyProfile(context = context, id = profile.id)
-                                Toast.makeText(context, "Применено", Toast.LENGTH_SHORT).show()
-                                onProfileApplied()
-                            }
-                        }
-                    ) {
+                }
+                else -> {
                     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.Top
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                ) {
-                                    val flag = getCountryFlag(profile.name)
-                                    val displayName = if (flag.isNotEmpty()) "$flag ${profile.name}" else profile.name
-                                    Text(
-                                        text = displayName,
-                                        style = MaterialTheme.typography.titleMedium.copy(
-                                            platformStyle = PlatformTextStyle(includeFontPadding = false)
-                                        ),
-                                        fontWeight = FontWeight.Bold,
-                                        maxLines = 1,
-                                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                                        modifier = Modifier.weight(1f, fill = false)
-                                    )
+                        draggingList.forEach { profile ->
+                            androidx.compose.runtime.key(profile.id) {
+                                val isActive = profile.id == currentProfileId
+                                val effectiveHashes = if (profile.useGlobalHashes) {
+                                    globalHashes.ifEmpty { profile.vkHashes }
+                                } else {
+                                    profile.vkHashes
                                 }
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                                    modifier = Modifier.fillMaxWidth()
-                                ) {
-                                    Text(
-                                        text = obfuscatePeer(profile.peer),
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        maxLines = 1,
-                                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                                        modifier = Modifier.weight(1f, fill = false)
-                                    )
-                                    val pingMs = pingResults[profile.id]
-                                    if (pingMs != null) {
-                                        val color = when {
-                                            pingMs < 0 -> MaterialTheme.colorScheme.error
-                                            pingMs < 700 -> androidx.compose.ui.graphics.Color(0xFF4CAF50)
-                                            pingMs < 1000 -> androidx.compose.ui.graphics.Color(0xFFFFA000)
-                                            else -> MaterialTheme.colorScheme.error
-                                        }
-                                        Box(modifier = Modifier.size(6.dp).clip(androidx.compose.foundation.shape.CircleShape).background(color))
-                                        Text(
-                                            text = if (pingMs < 0) "Fail" else "${pingMs}ms",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = color,
-                                            maxLines = 1,
-                                            softWrap = false
-                                        )
-                                    }
-                                }
+                                val hasIssue = effectiveHashes.isBlank() || profile.password.isBlank()
+                                val groupName = groups.firstOrNull { it.id == profile.groupId }?.name
 
-                                val status = deviceStatuses[profile.id]
-                                if (status != null && !status.isError && !profile.password.isBlank() && !profile.peer.isBlank()) {
-                                    Spacer(Modifier.height(8.dp))
-                                    Column(
-                                        verticalArrangement = Arrangement.spacedBy(4.dp)
-                                    ) {
-                                        if (status.isLoading) {
-                                            Row(
-                                                verticalAlignment = Alignment.CenterVertically,
-                                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                            ) {
-                                                CircularProgressIndicator(
-                                                    modifier = Modifier.size(10.dp),
-                                                    strokeWidth = 1.dp,
-                                                    color = MaterialTheme.colorScheme.primary
-                                                )
-                                                Text(
-                                                    "Загрузка статуса...",
-                                                    style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.sp),
-                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                                )
-                                            }
-                                        } else {
-                                            val isExpired = status.expiresAt > 0L && System.currentTimeMillis() > status.expiresAt * 1000L
-                                            if (isExpired) {
-                                                Text(
-                                                    "⏰ Пароль истёк",
-                                                    style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.sp, fontWeight = FontWeight.Bold),
-                                                    color = MaterialTheme.colorScheme.error
-                                                )
-                                            } else {
-                                                Row(
-                                                    verticalAlignment = Alignment.CenterVertically,
-                                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                                ) {
-                                                    val isFull = status.boundDevices >= status.maxDevices && !status.isCurrentBound
-                                                    Surface(
-                                                        shape = RoundedCornerShape(6.dp),
-                                                        color = if (isFull) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.4f),
-                                                        contentColor = if (isFull) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onSecondaryContainer
-                                                    ) {
-                                                        Text(
-                                                            text = "Устройства: ${status.boundDevices} из ${status.maxDevices}",
-                                                            style = MaterialTheme.typography.labelSmall,
-                                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                                        )
+                                val dismissState = rememberDismissState(
+                                    confirmStateChange = { value ->
+                                        if (value == DismissValue.DismissedToStart) {
+                                            deleteTarget = profile
+                                        }
+                                        false
+                                    }
+                                )
+
+                                val isCurrentDragged = draggedIndex != null && draggingList.getOrNull(draggedIndex!!)?.id == profile.id
+                                val translationY = if (isCurrentDragged) dragOffset else 0f
+                                val scale = if (isCurrentDragged) 1.02f else 1f
+                                val elevation = if (isCurrentDragged) 8.dp else 0.dp
+
+                                SwipeToDismiss(
+                                    state = dismissState,
+                                    directions = setOf(DismissDirection.EndToStart),
+                                    modifier = Modifier
+                                        .onGloballyPositioned { coords ->
+                                            itemHeights = itemHeights + (profile.id to coords.size.height)
+                                        }
+                                        .graphicsLayer {
+                                            this.translationY = translationY
+                                            this.scaleX = scale
+                                            this.scaleY = scale
+                                            this.shadowElevation = elevation.toPx()
+                                            this.shape = RoundedCornerShape(28.dp)
+                                            this.clip = isCurrentDragged
+                                        }
+                                        .pointerInput(profile.id) {
+                                            detectDragGesturesAfterLongPress(
+                                                onDragStart = {
+                                                    if (sortByPing) {
+                                                        Toast.makeText(context, "Отключите сортировку по пингу для ручного перемещения", Toast.LENGTH_SHORT).show()
+                                                        return@detectDragGesturesAfterLongPress
                                                     }
-                                                    if (status.boundDevices > 0 && status.isCurrentBound) {
-                                                        Box(
-                                                            modifier = Modifier
-                                                                .size(20.dp)
-                                                                .clip(androidx.compose.foundation.shape.CircleShape)
-                                                                .background(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.2f))
-                                                                .clickable {
-                                                                    unbindOnlyCurrent = true
-                                                                    unbindTarget = profile
-                                                                },
-                                                            contentAlignment = Alignment.Center
-                                                        ) {
-                                                            Icon(
-                                                                imageVector = Icons.Filled.Delete,
-                                                                contentDescription = "Отвязать это устройство",
-                                                                tint = MaterialTheme.colorScheme.error,
-                                                                modifier = Modifier.size(12.dp)
-                                                            )
+                                                    isDragging = true
+                                                    draggedIndex = draggingList.indexOfFirst { it.id == profile.id }
+                                                    dragOffset = 0f
+                                                },
+                                                onDrag = { change, dragAmount ->
+                                                    change.consume()
+                                                    val currentIdx = draggedIndex ?: return@detectDragGesturesAfterLongPress
+                                                    dragOffset += dragAmount.y
+
+                                                    if (dragOffset > 0f && currentIdx < draggingList.size - 1) {
+                                                        val nextProfile = draggingList[currentIdx + 1]
+                                                        val nextHeight = itemHeights[nextProfile.id] ?: 0
+                                                        val swapThreshold = (nextHeight + spacingPx) / 2f
+                                                        if (dragOffset > swapThreshold) {
+                                                            val newList = draggingList.toMutableList()
+                                                            newList[currentIdx] = nextProfile
+                                                            newList[currentIdx + 1] = profile
+                                                            draggingList = newList
+                                                            draggedIndex = currentIdx + 1
+                                                            dragOffset -= (nextHeight + spacingPx)
+                                                        }
+                                                    } else if (dragOffset < 0f && currentIdx > 0) {
+                                                        val prevProfile = draggingList[currentIdx - 1]
+                                                        val prevHeight = itemHeights[prevProfile.id] ?: 0
+                                                        val swapThreshold = (prevHeight + spacingPx) / 2f
+                                                        if (dragOffset < -swapThreshold) {
+                                                            val newList = draggingList.toMutableList()
+                                                            newList[currentIdx] = prevProfile
+                                                            newList[currentIdx - 1] = profile
+                                                            draggingList = newList
+                                                            draggedIndex = currentIdx - 1
+                                                            dragOffset += (prevHeight + spacingPx)
                                                         }
                                                     }
+                                                },
+                                                onDragEnd = {
+                                                    isDragging = false
+                                                    draggedIndex = null
+                                                    dragOffset = 0f
+                                                    scope.launch {
+                                                        profilesStore.reorderProfiles(draggingList.map { it.id })
+                                                    }
+                                                },
+                                                onDragCancel = {
+                                                    isDragging = false
+                                                    draggedIndex = null
+                                                    dragOffset = 0f
                                                 }
+                                            )
+                                        },
+                                    background = {
+                                        if (dismissState.dismissDirection != null) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .fillMaxSize()
+                                                    .clip(RoundedCornerShape(28.dp))
+                                                    .background(MaterialTheme.colorScheme.errorContainer),
+                                                contentAlignment = Alignment.CenterEnd
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Filled.Delete,
+                                                    contentDescription = "Удалить",
+                                                    tint = MaterialTheme.colorScheme.onErrorContainer,
+                                                    modifier = Modifier
+                                                        .padding(end = 28.dp)
+                                                        .size(24.dp)
+                                                )
                                             }
                                         }
                                     }
-                                }
-                            }
-                            
-                            Spacer(Modifier.width(8.dp))
-                            
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                androidx.compose.material3.FilledIconButton(
-                                    onClick = { pingProfile(profile) },
-                                    modifier = Modifier.size(28.dp),
-                                    colors = androidx.compose.material3.IconButtonDefaults.filledIconButtonColors(
-                                        containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                                        contentColor = MaterialTheme.colorScheme.primary
-                                    ),
-                                    enabled = pingingState[profile.id] != true
                                 ) {
-                                    if (pingingState[profile.id] == true) {
-                                        CircularProgressIndicator(
-                                            modifier = Modifier.size(14.dp),
-                                            strokeWidth = 1.5.dp,
-                                            color = MaterialTheme.colorScheme.primary
-                                        )
-                                    } else {
-                                        androidx.compose.material3.Icon(
-                                            imageVector = Icons.Filled.SignalCellularAlt,
-                                            contentDescription = "Проверить пинг",
-                                            modifier = Modifier.size(16.dp)
+                                    AppSectionCard(
+                                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 14.dp),
+                                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                                        border = if (isActive) {
+                                            BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.75f))
+                                        } else if (hasIssue) {
+                                            BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.35f))
+                                        } else {
+                                            null
+                                        },
+                                        color = AppCardDefaults.containerColor(),
+                                        shadowElevation = if (isCurrentDragged) 0.dp else 0.dp,
+                                        tonalElevation = 0.dp,
+                                        modifier = Modifier.clickable {
+                                            scope.launch {
+                                                profilesStore.applyProfile(context = context, id = profile.id)
+                                                Toast.makeText(context, "Применено", Toast.LENGTH_SHORT).show()
+                                                onProfileApplied()
+                                            }
+                                        }
+                                    ) {
+                                        ProfilesProfileCardContent(
+                                            profile = profile,
+                                            groupName = groupName,
+                                            isActive = isActive,
+                                            hasIssue = hasIssue,
+                                            missingHashes = effectiveHashes.isBlank(),
+                                            pingMs = pingResults[profile.id],
+                                            isPinging = pingingState[profile.id] == true,
+                                            status = deviceStatuses[profile.id],
+                                            onPing = { pingProfile(profile) },
+                                            onMoveToGroup = { moveToGroupTarget = profile },
+                                            onShare = { showExportSheet = profile },
+                                            onEdit = { openEditor(profile) },
+                                            onUnbindCurrentDevice = {
+                                                unbindOnlyCurrent = true
+                                                unbindTarget = profile
+                                            }
                                         )
                                     }
                                 }
-
-                                Spacer(Modifier.width(8.dp))
-
-                                androidx.compose.material3.FilledIconButton(
-                                    onClick = { moveToGroupTarget = profile },
-                                    modifier = Modifier.size(28.dp),
-                                    colors = androidx.compose.material3.IconButtonDefaults.filledIconButtonColors(
-                                        containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                                        contentColor = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                ) {
-                                    androidx.compose.material3.Icon(
-                                        androidx.compose.material.icons.Icons.Filled.Folder,
-                                        contentDescription = "В папку...",
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                }
-
-                                Spacer(Modifier.width(8.dp))
-
-                                androidx.compose.material3.FilledIconButton(
-                                    onClick = { showExportSheet = profile },
-                                    modifier = Modifier.size(28.dp),
-                                    colors = androidx.compose.material3.IconButtonDefaults.filledIconButtonColors(
-                                        containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                                        contentColor = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                ) {
-                                    androidx.compose.material3.Icon(
-                                        androidx.compose.material.icons.Icons.Filled.Share,
-                                        contentDescription = "Поделиться",
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                }
-
-                                Spacer(Modifier.width(8.dp))
-
-                                androidx.compose.material3.FilledIconButton(
-                                    onClick = { openEditor(profile) },
-                                    modifier = Modifier.size(28.dp),
-                                    colors = androidx.compose.material3.IconButtonDefaults.filledIconButtonColors(
-                                        containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                                        contentColor = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                ) {
-                                    androidx.compose.material3.Icon(
-                                        Icons.Filled.Edit,
-                                        contentDescription = "Изменить",
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                }
                             }
                         }
 
-                        if (hasIssue) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                val warnings = mutableListOf<String>()
-                                if (effectiveHashes.isBlank()) warnings.add("хеш не указан")
-                                if (profile.password.isBlank()) warnings.add("пароль не указан")
-                                Surface(
-                                    color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.5f),
-                                    shape = RoundedCornerShape(8.dp)
-                                ) {
-                                    Text(
-                                        text = "⚠️ " + warnings.joinToString(", ").replaceFirstChar { it.uppercase() },
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.error,
-                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                                    )
-                                }
-                            }
-                        }
+                        Text(
+                            text = "Смахните профиль влево для удаления. Удерживайте карточку для перестановки.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f),
+                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 6.dp)
+                        )
                     }
-                }
                 }
             }
         }
-        if (profiles.isNotEmpty()) {
-            Spacer(modifier = Modifier.height(16.dp))
-            Text(
-                text = "💡 Смахните профиль влево для удаления",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                modifier = Modifier.align(Alignment.CenterHorizontally).padding(bottom = 16.dp)
-            )
-        }
-    }
-}
-        
-    SnackbarHost(hostState = snackbarHostState, modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 92.dp))
 
-    if (!isSubscriptionFilter) {
-        FloatingActionButton(
-            onClick = { showCreateSheet = true },
+        SnackbarHost(
+            hostState = snackbarHostState,
             modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .padding(16.dp),
-            containerColor = MaterialTheme.colorScheme.primary
-        ) {
-            Icon(Icons.Filled.Add, contentDescription = "Добавить")
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 92.dp)
+        )
+
+        if (!isSubscriptionFilter) {
+            FloatingActionButton(
+                onClick = { showCreateSheet = true },
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(16.dp),
+                containerColor = MaterialTheme.colorScheme.primary
+            ) {
+                Icon(Icons.Filled.Add, contentDescription = "Добавить")
+            }
         }
-    }
     }
 
     val isPingingAny = pingingState.values.any { it }
     if (isPingingAny) {
-        androidx.compose.ui.window.Dialog(onDismissRequest = { }) {
-            Surface(
-                shape = RoundedCornerShape(28.dp),
-                color = MaterialTheme.colorScheme.surface,
-                tonalElevation = 6.dp,
+        HopletDialog(
+            onDismissRequest = { },
+            properties = androidx.compose.ui.window.DialogProperties(
+                dismissOnBackPress = false,
+                dismissOnClickOutside = false,
+                usePlatformDefaultWidth = false,
+                decorFitsSystemWindows = false
+            )
+        ) {
+            HopletModalSurface(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 24.dp)
+                    .padding(horizontal = 24.dp),
+                contentPadding = PaddingValues(horizontal = 24.dp, vertical = 24.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
                 Column(
-                    modifier = Modifier.padding(24.dp),
+                    modifier = Modifier.fillMaxWidth(),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(16.dp)
                 ) {
@@ -1880,61 +1641,63 @@ fun ProfilesTab(
     }
 
     if (showCreateSheet) {
-        ModalBottomSheet(
-            onDismissRequest = { showCreateSheet = false },
-            sheetState = sheetState
+        HopletModalBottomSheet(
+            onDismissRequest = { showCreateSheet = false }
         ) {
-            Column(modifier = Modifier.padding(bottom = 32.dp)) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp)
+                    .padding(bottom = 32.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
                 Text(
-                    text = "Добавить",
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                    text = "Добавить профиль",
+                    style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
+                    color = MaterialTheme.colorScheme.onSurface
                 )
-                Row(
-                    modifier = Modifier.fillMaxWidth().clickable {
+                Text(
+                    text = "Выберите источник импорта или создайте профиль вручную.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                ProfilesCreateOptionRow(
+                    icon = Icons.Filled.RssFeed,
+                    title = "Подписка",
+                    subtitle = "Профили по адресу JSON на сервере",
+                    onClick = {
                         showCreateSheet = false
                         showAddSubscriptionDialog = true
-                    }.padding(horizontal = 16.dp, vertical = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(16.dp)
-                ) {
-                    Icon(Icons.Filled.RssFeed, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("Подписка", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurface)
-                        Text("Профили по адресу JSON на сервере", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                }
-                Row(
-                    modifier = Modifier.fillMaxWidth().clickable {
+                    },
+                    tint = MaterialTheme.colorScheme.primary
+                )
+
+                ProfilesCreateOptionRow(
+                    icon = Icons.Filled.Add,
+                    title = "Вручную",
+                    subtitle = "Создать новый профиль с нуля",
+                    onClick = {
                         showCreateSheet = false
                         openEditor()
-                    }.padding(horizontal = 16.dp, vertical = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(16.dp)
-                ) {
-                    Icon(Icons.Filled.Add, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("Вручную", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurface)
-                        Text("Создать новый профиль с нуля", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
-                }
-                Row(
-                    modifier = Modifier.fillMaxWidth().clickable {
+                )
+
+                ProfilesCreateOptionRow(
+                    icon = Icons.Filled.FileOpen,
+                    title = "Из файла",
+                    subtitle = "Выбрать файл конфигурации на устройстве",
+                    onClick = {
                         showCreateSheet = false
                         filePickerLauncher.launch("*/*")
-                    }.padding(horizontal = 16.dp, vertical = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(16.dp)
-                ) {
-                    Icon(Icons.Filled.FileOpen, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("Из файла", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurface)
-                        Text("Выбрать файл конфигурации на устройстве", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
-                }
-                Row(
-                    modifier = Modifier.fillMaxWidth().clickable {
+                )
+
+                ProfilesCreateOptionRow(
+                    icon = Icons.Filled.ContentCopy,
+                    title = "Из буфера",
+                    subtitle = "Вставить скопированную конфигурацию",
+                    onClick = {
                         showCreateSheet = false
                         try {
                             val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
@@ -1958,18 +1721,14 @@ fun ProfilesTab(
                         } catch (e: Exception) {
                             Toast.makeText(context, "Не удалось прочитать буфер: ${e.message}", Toast.LENGTH_SHORT).show()
                         }
-                    }.padding(horizontal = 16.dp, vertical = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(16.dp)
-                ) {
-                    Icon(Icons.Filled.ContentCopy, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("Из буфера", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurface)
-                        Text("Вставить скопированную конфигурацию", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
-                }
-                Row(
-                    modifier = Modifier.fillMaxWidth().clickable {
+                )
+
+                ProfilesCreateOptionRow(
+                    icon = Icons.Filled.QrCodeScanner,
+                    title = "Сканировать QR-код",
+                    subtitle = "Считать профиль с другого устройства",
+                    onClick = {
                         showCreateSheet = false
                         try {
                             val activity = run {
@@ -2008,16 +1767,8 @@ fun ProfilesTab(
                                 Toast.makeText(context, "Не удалось запустить сканер: $msg", Toast.LENGTH_SHORT).show()
                             }
                         }
-                    }.padding(horizontal = 16.dp, vertical = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(16.dp)
-                ) {
-                    Icon(Icons.Filled.QrCodeScanner, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("Сканировать QR-код", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurface)
-                        Text("Считать профиль с другого устройства", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
-                }
+                )
             }
         }
     }
@@ -2032,6 +1783,877 @@ fun ProfilesTab(
     }
 }
 
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ProfilesActionButton(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    contentDescription: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    selected: Boolean = false,
+    enabled: Boolean = true,
+    tint: Color? = null
+) {
+    val colors = MaterialTheme.colorScheme
+    Surface(
+        onClick = onClick,
+        enabled = enabled,
+        shape = RoundedCornerShape(14.dp),
+        color = if (selected) {
+            colors.primary.copy(alpha = 0.14f)
+        } else {
+            colors.surfaceVariant.copy(alpha = 0.48f)
+        },
+        border = BorderStroke(
+            1.dp,
+            if (selected) {
+                colors.primary.copy(alpha = 0.32f)
+            } else {
+                colors.outlineVariant.copy(alpha = 0.18f)
+            }
+        ),
+        tonalElevation = 0.dp,
+        shadowElevation = 0.dp,
+        modifier = modifier
+    ) {
+        Box(
+            modifier = Modifier.size(42.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = contentDescription,
+                tint = if (selected) colors.primary else (tint ?: colors.onSurfaceVariant),
+                modifier = Modifier.size(18.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun ProfilesCompactChip(
+    text: String,
+    color: Color,
+    modifier: Modifier = Modifier,
+    backgroundAlpha: Float = 0.12f,
+    leading: (@Composable () -> Unit)? = null
+) {
+    Surface(
+        shape = RoundedCornerShape(999.dp),
+        color = color.copy(alpha = backgroundAlpha),
+        border = BorderStroke(1.dp, color.copy(alpha = 0.22f)),
+        modifier = modifier
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            leading?.invoke()
+            Text(
+                text = text,
+                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
+                color = color,
+                maxLines = 1
+            )
+        }
+    }
+}
+
+private fun formatProfilesTrafficMb(value: Double): String {
+    return when {
+        value >= 1024 -> String.format(java.util.Locale.US, "%.2f ГБ", value / 1024.0)
+        value >= 1 -> String.format(java.util.Locale.US, "%.1f МБ", value)
+        value > 0 -> String.format(java.util.Locale.US, "%.2f МБ", value)
+        else -> "0 МБ"
+    }
+}
+
+private fun formatProfilesSyncTime(ts: Long): String {
+    if (ts <= 0L) return "ещё не обновлялась"
+    return java.text.SimpleDateFormat("dd.MM.yyyy HH:mm", java.util.Locale.getDefault())
+        .format(java.util.Date(ts))
+}
+
+@Composable
+private fun ProfilesHeaderCard(
+    totalProfiles: Int,
+    visibleProfiles: Int,
+    activeProfiles: Int,
+    issueProfiles: Int,
+    currentFilterLabel: String,
+    sortByPing: Boolean,
+    showMoreMenu: Boolean,
+    onInfoClick: () -> Unit,
+    onPingAllClick: () -> Unit,
+    onSortClick: () -> Unit,
+    onMoreClick: () -> Unit,
+    onDismissMoreMenu: () -> Unit,
+    onManageGroupsClick: () -> Unit,
+    onExportZipClick: () -> Unit,
+    onImportZipClick: () -> Unit
+) {
+    val colors = MaterialTheme.colorScheme
+
+    Surface(
+        shape = RoundedCornerShape(28.dp),
+        color = AppCardDefaults.containerColor(),
+        border = BorderStroke(1.dp, colors.outlineVariant.copy(alpha = 0.24f)),
+        tonalElevation = 0.dp,
+        shadowElevation = 8.dp,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 18.dp, vertical = 18.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        text = "Профили",
+                        style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
+                        color = colors.onSurface
+                    )
+                    Text(
+                        text = "Быстрый доступ к профилям, фильтрам и импорту без лишнего шума.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.onSurfaceVariant
+                    )
+                }
+
+                ProfilesActionButton(
+                    icon = Icons.Filled.Info,
+                    contentDescription = "Справка",
+                    onClick = onInfoClick,
+                    tint = colors.primary
+                )
+            }
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                ProfilesCompactChip(
+                    text = "Всего $totalProfiles",
+                    color = colors.primary
+                )
+                ProfilesCompactChip(
+                    text = "Видимых $visibleProfiles",
+                    color = colors.secondary
+                )
+                if (activeProfiles > 0) {
+                    ProfilesCompactChip(
+                        text = "Активен $activeProfiles",
+                        color = Color(0xFF1E9E64)
+                    )
+                }
+                if (issueProfiles > 0) {
+                    ProfilesCompactChip(
+                        text = "Проблемы $issueProfiles",
+                        color = colors.error
+                    )
+                }
+                ProfilesCompactChip(
+                    text = currentFilterLabel,
+                    color = colors.tertiary
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                ProfilesActionButton(
+                    icon = Icons.Filled.SignalCellularAlt,
+                    contentDescription = "Проверить пинг",
+                    onClick = onPingAllClick,
+                    tint = colors.primary
+                )
+                ProfilesActionButton(
+                    icon = Icons.Filled.Sort,
+                    contentDescription = "Сортировать по пингу",
+                    onClick = onSortClick,
+                    selected = sortByPing,
+                    tint = colors.onSurfaceVariant
+                )
+                Box {
+                    ProfilesActionButton(
+                        icon = Icons.Filled.MoreVert,
+                        contentDescription = "Дополнительно",
+                        onClick = onMoreClick,
+                        tint = colors.onSurfaceVariant
+                    )
+                    HopletDropdownMenu(
+                        expanded = showMoreMenu,
+                        onDismissRequest = onDismissMoreMenu
+                    ) {
+                        HopletDropdownMenuItem(
+                            text = { Text("Управление папками") },
+                            leadingIcon = {
+                                Icon(
+                                    Icons.Filled.Folder,
+                                    contentDescription = null,
+                                    tint = colors.primary
+                                )
+                            },
+                            onClick = {
+                                onManageGroupsClick()
+                                onDismissMoreMenu()
+                            }
+                        )
+                        HopletDropdownMenuItem(
+                            text = { Text("Экспорт всех профилей (ZIP)") },
+                            onClick = {
+                                onExportZipClick()
+                                onDismissMoreMenu()
+                            }
+                        )
+                        HopletDropdownMenuItem(
+                            text = { Text("Импорт профилей (ZIP)") },
+                            onClick = {
+                                onImportZipClick()
+                                onDismissMoreMenu()
+                            }
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ProfilesFilterCard(
+    groups: List<ProfileGroup>,
+    selectedFilterGroup: String?,
+    subscriptionGroupIds: Set<String>,
+    onFilterSelected: (String?) -> Unit
+) {
+    AppSectionCard(
+        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 14.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+        color = AppCardDefaults.containerColor(),
+        shadowElevation = 0.dp,
+        tonalElevation = 0.dp
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "Фильтры",
+                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            if (selectedFilterGroup != null) {
+                TextButton(onClick = { onFilterSelected(null) }) {
+                    Text("Сбросить")
+                }
+            }
+        }
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            FilterChip(
+                selected = selectedFilterGroup == null,
+                onClick = { onFilterSelected(null) },
+                label = { Text("Все") }
+            )
+            FilterChip(
+                selected = selectedFilterGroup == "",
+                onClick = { onFilterSelected("") },
+                label = { Text("Без папки") }
+            )
+            groups.forEach { group ->
+                val isSubscriptionGroup = subscriptionGroupIds.contains(group.id)
+                FilterChip(
+                    selected = selectedFilterGroup == group.id,
+                    onClick = { onFilterSelected(group.id) },
+                    label = {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            if (isSubscriptionGroup) {
+                                Icon(
+                                    Icons.Filled.RssFeed,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                            }
+                            Text(group.name)
+                        }
+                    }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ProfilesSubscriptionCard(
+    sub: ProfileSubscription,
+    isRefreshing: Boolean,
+    onRefresh: () -> Unit,
+    onDelete: () -> Unit,
+    onOpenGroup: (() -> Unit)? = null
+) {
+    val colors = MaterialTheme.colorScheme
+    val openGroupAction = onOpenGroup
+    val hasLimit = sub.trafficLimitMb > 0
+    val hasTraffic = sub.remoteTrafficUsedMb > 0 || hasLimit
+    val progress = if (hasLimit && sub.trafficLimitMb > 0) {
+        (sub.remoteTrafficUsedMb / sub.trafficLimitMb).toFloat().coerceIn(0f, 1f)
+    } else {
+        0f
+    }
+
+    AppSectionCard(
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+        color = AppCardDefaults.containerColor(),
+        border = BorderStroke(1.dp, colors.primary.copy(alpha = 0.14f)),
+        shadowElevation = 0.dp,
+        tonalElevation = 0.dp,
+        modifier = Modifier.then(
+            if (openGroupAction != null) {
+                Modifier.clickable { openGroupAction() }
+            } else {
+                Modifier
+            }
+        )
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.Top
+        ) {
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(36.dp)
+                            .background(
+                                color = colors.primary.copy(alpha = 0.12f),
+                                shape = RoundedCornerShape(12.dp)
+                            ),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.RssFeed,
+                            contentDescription = null,
+                            tint = colors.primary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(
+                            text = sub.name,
+                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+                            color = colors.onSurface,
+                            maxLines = 1,
+                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                        )
+                        if (sub.description.isNotBlank()) {
+                            Text(
+                                text = sub.description,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colors.onSurfaceVariant,
+                                maxLines = 2,
+                                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                }
+            }
+
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                ProfilesActionButton(
+                    icon = Icons.Filled.Refresh,
+                    contentDescription = "Обновить подписку",
+                    onClick = onRefresh,
+                    enabled = !isRefreshing,
+                    tint = colors.primary
+                )
+                ProfilesActionButton(
+                    icon = Icons.Filled.Delete,
+                    contentDescription = "Удалить подписку",
+                    onClick = onDelete,
+                    tint = colors.error
+                )
+            }
+        }
+
+        if (hasTraffic) {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(
+                    text = if (hasLimit) {
+                        "Трафик: ${formatProfilesTrafficMb(sub.remoteTrafficUsedMb)} из ${formatProfilesTrafficMb(sub.trafficLimitMb)}"
+                    } else {
+                        "Трафик: ${formatProfilesTrafficMb(sub.remoteTrafficUsedMb)}"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.onSurfaceVariant
+                )
+                if (hasLimit) {
+                    LinearProgressIndicator(
+                        progress = { progress },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(5.dp)
+                            .clip(RoundedCornerShape(999.dp)),
+                        color = colors.primary,
+                        trackColor = colors.primary.copy(alpha = 0.14f)
+                    )
+                }
+            }
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "Обновлено: ${formatProfilesSyncTime(sub.lastSyncAt)}",
+                style = MaterialTheme.typography.labelSmall,
+                color = colors.onSurfaceVariant
+            )
+            if (onOpenGroup != null) {
+                Text(
+                    text = "Открыть папку",
+                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                    color = colors.primary
+                )
+            }
+        }
+
+        if (sub.lastSyncError.isNotBlank()) {
+            ProfilesCompactChip(
+                text = "Ошибка: ${sub.lastSyncError}",
+                color = colors.error,
+                backgroundAlpha = 0.08f
+            )
+        }
+    }
+}
+
+@Composable
+private fun ProfilesStatusSummaryCard(
+    title: String,
+    subtitle: String,
+    accentColor: Color,
+    icon: androidx.compose.ui.graphics.vector.ImageVector
+) {
+    AppSectionCard(
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 14.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+        color = AppCardDefaults.containerColor(),
+        border = BorderStroke(1.dp, accentColor.copy(alpha = 0.18f)),
+        shadowElevation = 0.dp,
+        tonalElevation = 0.dp
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(
+                modifier = Modifier.weight(1f),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(36.dp)
+                        .background(
+                            color = accentColor.copy(alpha = 0.12f),
+                            shape = RoundedCornerShape(12.dp)
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = icon,
+                        contentDescription = null,
+                        tint = accentColor,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(
+                        text = "Подписка",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        text = title,
+                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+            }
+
+            ProfilesCompactChip(
+                text = subtitle,
+                color = accentColor
+            )
+        }
+    }
+}
+
+@Composable
+private fun ProfilesEmptyStateCard(
+    title: String,
+    description: String,
+    primaryActionLabel: String,
+    onPrimaryAction: () -> Unit,
+    secondaryActionLabel: String? = null,
+    onSecondaryAction: (() -> Unit)? = null
+) {
+    AppSectionCard(
+        contentPadding = PaddingValues(horizontal = 20.dp, vertical = 24.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+        color = AppCardDefaults.containerColor(),
+        shadowElevation = 0.dp,
+        tonalElevation = 0.dp
+    ) {
+        Box(
+            modifier = Modifier
+                .size(52.dp)
+                .background(
+                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.1f),
+                    shape = RoundedCornerShape(16.dp)
+                ),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = Icons.Filled.Folder,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(24.dp)
+            )
+        }
+
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            Text(
+                text = description,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Button(
+                onClick = onPrimaryAction,
+                shape = RoundedCornerShape(14.dp)
+            ) {
+                Text(primaryActionLabel)
+            }
+            if (secondaryActionLabel != null && onSecondaryAction != null) {
+                TextButton(onClick = onSecondaryAction) {
+                    Text(secondaryActionLabel)
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ProfilesCreateOptionRow(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    title: String,
+    subtitle: String,
+    onClick: () -> Unit,
+    tint: Color? = null
+) {
+    val colors = MaterialTheme.colorScheme
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(22.dp),
+        color = colors.surface.copy(alpha = 0.96f),
+        border = BorderStroke(1.dp, colors.outlineVariant.copy(alpha = 0.2f)),
+        tonalElevation = 0.dp,
+        shadowElevation = 0.dp,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .background(
+                        color = (tint ?: colors.primary).copy(alpha = 0.12f),
+                        shape = RoundedCornerShape(14.dp)
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = tint ?: colors.primary,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+                    color = colors.onSurface
+                )
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.onSurfaceVariant
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ProfilesProfileCardContent(
+    profile: ConnectionProfile,
+    groupName: String?,
+    isActive: Boolean,
+    hasIssue: Boolean,
+    missingHashes: Boolean,
+    pingMs: Long?,
+    isPinging: Boolean,
+    status: ProfileDeviceStatus?,
+    onPing: () -> Unit,
+    onMoveToGroup: () -> Unit,
+    onShare: () -> Unit,
+    onEdit: () -> Unit,
+    onUnbindCurrentDevice: (() -> Unit)? = null
+) {
+    val colors = MaterialTheme.colorScheme
+    val displayFlag = getCountryFlag(profile.name)
+    val displayName = if (displayFlag.isNotEmpty()) "$displayFlag ${profile.name}" else profile.name
+    val pingColor = when {
+        pingMs == null -> colors.onSurfaceVariant
+        pingMs < 0 -> colors.error
+        pingMs < 700 -> Color(0xFF1E9E64)
+        pingMs < 1000 -> Color(0xFFDC8A00)
+        else -> colors.error
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.Top
+        ) {
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = displayName,
+                        style = MaterialTheme.typography.titleSmall.copy(
+                            fontWeight = FontWeight.SemiBold,
+                            platformStyle = PlatformTextStyle(includeFontPadding = false)
+                        ),
+                        color = colors.onSurface,
+                        modifier = Modifier.weight(1f, fill = false),
+                        maxLines = 1,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                    )
+                    if (isActive) {
+                        ProfilesCompactChip(
+                            text = "Активен",
+                            color = colors.primary
+                        )
+                    }
+                    if (hasIssue) {
+                        ProfilesCompactChip(
+                            text = "Проверить",
+                            color = colors.error
+                        )
+                    }
+                }
+
+                Text(
+                    text = obfuscatePeer(profile.peer),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                )
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    ProfilesCompactChip(
+                        text = "W${profile.workersPerHash}",
+                        color = colors.secondary
+                    )
+                    ProfilesCompactChip(
+                        text = "Порт ${profile.listenPort}",
+                        color = colors.tertiary
+                    )
+                    if (!groupName.isNullOrBlank()) {
+                        ProfilesCompactChip(
+                            text = groupName,
+                            color = colors.primary
+                        )
+                    }
+                }
+            }
+
+            Spacer(Modifier.width(12.dp))
+
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    ProfilesActionButton(
+                        icon = Icons.Filled.SignalCellularAlt,
+                        contentDescription = "Проверить пинг",
+                        onClick = onPing,
+                        selected = isPinging,
+                        enabled = !isPinging,
+                        tint = colors.primary
+                    )
+                    ProfilesActionButton(
+                        icon = Icons.Filled.Folder,
+                        contentDescription = "В папку",
+                        onClick = onMoveToGroup,
+                        tint = colors.onSurfaceVariant
+                    )
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    ProfilesActionButton(
+                        icon = Icons.Filled.Share,
+                        contentDescription = "Поделиться",
+                        onClick = onShare,
+                        tint = colors.onSurfaceVariant
+                    )
+                    ProfilesActionButton(
+                        icon = Icons.Filled.Edit,
+                        contentDescription = "Изменить",
+                        onClick = onEdit,
+                        tint = colors.onSurfaceVariant
+                    )
+                }
+            }
+        }
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            if (status != null && !status.isError && profile.password.isNotBlank() && profile.peer.isNotBlank()) {
+                if (status.isLoading) {
+                    ProfilesCompactChip(
+                        text = "Загрузка статуса",
+                        color = colors.primary,
+                        leading = {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(10.dp),
+                                strokeWidth = 1.4.dp,
+                                color = colors.primary
+                            )
+                        }
+                    )
+                } else {
+                    val isExpired = status.expiresAt > 0L && System.currentTimeMillis() > status.expiresAt * 1000L
+                    if (isExpired) {
+                        ProfilesCompactChip(
+                            text = "Пароль истёк",
+                            color = colors.error
+                        )
+                    } else {
+                        val isFull = status.boundDevices >= status.maxDevices && !status.isCurrentBound
+                        ProfilesCompactChip(
+                            text = "Устройства ${status.boundDevices}/${status.maxDevices}",
+                            color = if (isFull) colors.error else colors.secondary
+                        )
+                        if (status.boundDevices > 0 && status.isCurrentBound && onUnbindCurrentDevice != null) {
+                            ProfilesActionButton(
+                                icon = Icons.Filled.Delete,
+                                contentDescription = "Отвязать текущее устройство",
+                                onClick = onUnbindCurrentDevice,
+                                tint = colors.error
+                            )
+                        }
+                    }
+                }
+            }
+
+            if (pingMs != null) {
+                ProfilesCompactChip(
+                    text = if (pingMs < 0) "Ping fail" else "${pingMs} ms",
+                    color = pingColor
+                )
+            }
+        }
+
+        if (hasIssue) {
+            val warnings = mutableListOf<String>()
+            if (missingHashes) warnings.add("хеш")
+            if (profile.password.isBlank()) warnings.add("пароль")
+            val message = if (warnings.isNotEmpty()) {
+                "Проверьте: ${warnings.joinToString(", ")}"
+            } else {
+                "Проверьте параметры профиля"
+            }
+            ProfilesCompactChip(
+                text = message,
+                color = colors.error,
+                backgroundAlpha = 0.08f
+            )
+        }
+    }
+}
 
 private fun parseQrConfig(rawText: String): ConnectionProfile? {
     val trimmed = rawText.trim()
@@ -2050,7 +2672,7 @@ private fun parseQrConfig(rawText: String): ConnectionProfile? {
                 val hash = parts.drop(5).joinToString(":")
                 return ConnectionProfile(
                     id = java.util.UUID.randomUUID().toString(),
-                    name = "WDTT $ip",
+                    name = "Hoplet $ip",
                     peer = "$ip:$dtlsPort",
                     vkHashes = hash,
                     workersPerHash = 16,

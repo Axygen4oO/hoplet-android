@@ -339,7 +339,7 @@ cleanup_config_dir_keep_access_db() {
 # ─── Очистка старого WDTT ─────────────────────────────────────────────────────
 wdtt_cleanup() {
     prog 0.05 "Очистка..."
-    echo "🧹 Очистка старой установки WDTT..."
+    echo "🧹 Очистка старой установки Hoplet..."
 
     systemctl unmask wdtt 2>/dev/null || true
     systemctl stop wdtt 2>/dev/null || true
@@ -438,11 +438,11 @@ setup_wdtt_binary() {
 # ─── Systemd-сервис WDTT ─────────────────────────────────────────────────────
 setup_wdtt_service() {
     prog 0.75 "Сервис..."
-    echo "🔧 Создание systemd-сервиса WDTT..."
+    echo "🔧 Создание systemd-сервиса Hoplet..."
 
     cat > /etc/systemd/system/wdtt.service << WDTTSVC
 [Unit]
-Description=WDTT VPN Server
+Description=Hoplet VPN Server
 After=network.target network-online.target
 Wants=network-online.target
 
@@ -468,7 +468,7 @@ WDTTSVC
 # ─── Запуск WDTT ─────────────────────────────────────────────────────────────
 start_wdtt() {
     prog 0.90 "Запуск..."
-    echo "🚀 Запуск WDTT VPN Server..."
+    echo "🚀 Запуск Hoplet VPN Server..."
 
     if [ ! -f /usr/local/bin/wdtt-server ]; then
         echo "⚠ wdtt-server не установлен — запуск пропущен"
@@ -506,7 +506,7 @@ start_wdtt() {
 
 # ─── Команда: uninstall ──────────────────────────────────────────────────────
 do_uninstall() {
-    log_step "Удаление WDTT..."
+    log_step "Удаление Hoplet..."
 
     systemctl stop wdtt 2>/dev/null || true
     systemctl disable wdtt 2>/dev/null || true
@@ -523,12 +523,12 @@ do_uninstall() {
     rm -f /etc/sysctl.d/99-wdtt.conf
     sysctl --system >/dev/null 2>&1 || true
 
-    log_info "WDTT удалён. База доступа сохранена: ${WDTT_CONFIG_DIR}/${WDTT_ACCESS_DB}"
+    log_info "Hoplet удалён. База доступа сохранена: ${WDTT_CONFIG_DIR}/${WDTT_ACCESS_DB}"
 }
 
 # ─── Команда: status ─────────────────────────────────────────────────────────
 do_status() {
-    echo "Статус WDTT:"
+    echo "Статус Hoplet:"
     echo ""
     if systemctl is-active wdtt &>/dev/null; then
         log_info "Сервис: АКТИВЕН"
@@ -541,9 +541,9 @@ do_status() {
         log_warn "Бинарник: НЕ найден"
     fi
     if ip link show "$WDTT_IFACE" &>/dev/null; then
-        log_info "WDTT интерфейс ($WDTT_IFACE): активен"
+        log_info "Hoplet интерфейс ($WDTT_IFACE): активен"
     else
-        log_warn "WDTT интерфейс ($WDTT_IFACE): не активен"
+        log_warn "Hoplet интерфейс ($WDTT_IFACE): не активен"
     fi
 }
 
@@ -552,7 +552,7 @@ do_status() {
 # ══════════════════════════════════════════════════════════════════════════════
 main() {
     echo "╔══════════════════════════════════════════════════════════════╗"
-    echo "║       WDTT VPN Server — Installer v${SCRIPT_VERSION}                    ║"
+    echo "║      Hoplet VPN Server — Installer v${SCRIPT_VERSION}                   ║"
     echo "║       DTLS: ${DTLS_PORT}  |  WG: ${WG_PORT}  |  SSH: ${SSH_PORT}       ║"
     echo "╚══════════════════════════════════════════════════════════════╝"
 
@@ -563,7 +563,7 @@ main() {
     validate_port "WDTT_SSH_PORT" "$SSH_PORT"
 
     mkdir -p "$(dirname "$LOG_FILE")"
-    echo "=== WDTT Installer v${SCRIPT_VERSION} — $(date) ===" >> "$LOG_FILE"
+    echo "=== Hoplet Installer v${SCRIPT_VERSION} — $(date) ===" >> "$LOG_FILE"
 
     detect_os
     install_prerequisites

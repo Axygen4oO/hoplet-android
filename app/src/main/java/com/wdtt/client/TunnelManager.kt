@@ -20,6 +20,7 @@ import kotlinx.coroutines.sync.withLock
 import java.io.File
 import java.net.DatagramSocket
 import java.net.InetSocketAddress
+import java.util.Collections
 import java.util.concurrent.TimeUnit
 import kotlin.math.min
 import kotlin.math.pow
@@ -37,12 +38,30 @@ data class LogEntry(
     val isError: Boolean = false
 )
 
+private data class RecoveryTrigger(
+    val reason: String,
+    val details: String? = null,
+    val stabilizationDelayMs: Long = 0L,
+)
+
+private data class RecoverySession(
+    val id: Long,
+    val startedAtMs: Long,
+    val loggedSteps: MutableSet<String> = mutableSetOf(),
+)
+
 object TunnelManager {
     // 100% защита от утечек: единый управляемый глобальный Scope
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    private val processLock = Any()
     private var process: Process? = null
     private var readerJob: Job? = null
+    private var nextSessionId = 0L
+    private val expectedStopSessionIds = Collections.synchronizedSet(mutableSetOf<Long>())
+
+    @Volatile
+    private var activeSessionId = 0L
 
     private var startJob: Job? = null
 
@@ -70,6 +89,7 @@ object TunnelManager {
     private const val STALE_STATS_MS = 90_000L
     private const val HEALTH_CHECK_GRACE_MS = 120_000L
     private const val MIN_RECONNECT_INTERVAL_MS = 10_000L
+    private const val DEFAULT_RECOVERY_STABILIZATION_MS = 1_500L
     private var activeHashIndex = 0 // 0: primary, 1: secondary
     private var currentParams: TunnelParams? = null
     private var lastContext: java.lang.ref.WeakReference<Context>? = null
@@ -82,7 +102,12 @@ object TunnelManager {
     private var activeProfileId = ""
     private var lastSavedTrafficMb = 0.0
     private var lastSessionTrafficMb = 0.0
+    private var recoverySessionCounter = 0L
 
+    @Volatile
+    private var activeRecoverySession: RecoverySession? = null
+
+    val enabled = MutableStateFlow(false)
     val running = MutableStateFlow(false)
 
     /** true с момента нажатия «Подключить» до запуска Go-процесса или ошибки/отмены. */
@@ -112,7 +137,139 @@ val showBlockerWarning = MutableStateFlow(false)
         connectedSinceMs.value = if (value) System.currentTimeMillis() else 0L
     }
 
-    
+    private fun bindProcess(proc: Process): Long = synchronized(processLock) {
+        process = proc
+        val sessionId = ++nextSessionId
+        activeSessionId = sessionId
+        sessionId
+    }
+
+    private fun currentProcess(): Process? = synchronized(processLock) {
+        process
+    }
+
+    private fun isActiveSession(sessionId: Long, proc: Process? = null): Boolean =
+        synchronized(processLock) {
+            activeSessionId == sessionId && (proc == null || process === proc)
+        }
+
+    private fun invalidateActiveSession(): Process? = synchronized(processLock) {
+        activeSessionId = ++nextSessionId
+        process.also { process = null }
+    }
+
+    private fun clearSessionIfCurrent(sessionId: Long, proc: Process?) {
+        synchronized(processLock) {
+            if (activeSessionId == sessionId && process === proc) {
+                activeSessionId = ++nextSessionId
+                process = null
+            }
+        }
+        expectedStopSessionIds.remove(sessionId)
+    }
+
+    private fun markExpectedStopForActiveSession() {
+        synchronized(processLock) {
+            if (activeSessionId != 0L) {
+                expectedStopSessionIds.add(activeSessionId)
+            }
+        }
+    }
+
+    private fun isExpectedStop(sessionId: Long): Boolean = expectedStopSessionIds.contains(sessionId)
+
+    private fun formatDurationMs(elapsedMs: Long): String {
+        val seconds = elapsedMs.coerceAtLeast(0L) / 1000.0
+        return String.format(java.util.Locale.US, "%.1f с", seconds)
+    }
+
+    private fun beginRecoverySession(trigger: RecoveryTrigger): RecoverySession {
+        val session = RecoverySession(
+            id = ++recoverySessionCounter,
+            startedAtMs = System.currentTimeMillis(),
+        )
+        activeRecoverySession = session
+        recoveryLog(
+            session,
+            "header",
+            "🔄 Автовосстановление TUN #${session.id} · ${formatRecoveryReason(trigger)}",
+        )
+        return session
+    }
+
+    private fun recoveryLog(
+        session: RecoverySession,
+        stepId: String,
+        message: String,
+        isError: Boolean = false,
+    ) {
+        val key = "recovery_${session.id}_$stepId"
+        updateLog(
+            key,
+            "[TUN #${session.id}] $message",
+            4,
+            isError,
+        )
+    }
+
+    private fun recoveryLogOnce(stepId: String, message: String, isError: Boolean = false) {
+        val session = activeRecoverySession ?: return
+        if (!session.loggedSteps.add(stepId)) return
+        recoveryLog(session, stepId, message, isError)
+    }
+
+    private fun finishRecoverySession(success: Boolean, detail: String? = null) {
+        val session = activeRecoverySession ?: return
+        val elapsed = formatDurationMs(System.currentTimeMillis() - session.startedAtMs)
+        val summary = if (success) {
+            "✅ Выполнено за $elapsed · TUN восстановлен · DTLS активен · потоки активны"
+        } else {
+            "❌ Не удалось за $elapsed" +
+                detail?.takeIf { it.isNotBlank() }?.let { " · $it" }.orEmpty()
+        }
+        recoveryLog(
+            session,
+            if (success) "done_ok" else "done_fail",
+            summary,
+            isError = !success,
+        )
+        activeRecoverySession = null
+    }
+
+    private fun cancelRecoverySession(detail: String) {
+        val session = activeRecoverySession ?: return
+        val elapsed = formatDurationMs(System.currentTimeMillis() - session.startedAtMs)
+        recoveryLog(
+            session,
+            "done_cancel",
+            "⏹ Автовосстановление остановлено · $detail · $elapsed",
+        )
+        activeRecoverySession = null
+    }
+
+    private fun formatRecoveryReason(trigger: RecoveryTrigger): String {
+        val reason = trigger.reason.trim()
+        val details = trigger.details?.trim().orEmpty()
+        return when {
+            reason.equals("изменилась активная сеть", ignoreCase = true) && details.isNotEmpty() -> details
+            reason.equals("подключились к Wi-Fi", ignoreCase = true) && details.isNotEmpty() -> details
+            reason.equals("подключились к Wi-Fi", ignoreCase = true) -> "подключились к Wi-Fi"
+            reason.equals("сеть вернулась после обрыва", ignoreCase = true) -> "интернет снова доступен"
+            reason.equals("сеть восстановлена", ignoreCase = true) -> "интернет снова доступен"
+            details.isNotEmpty() -> "$reason: $details"
+            else -> reason
+        }
+    }
+
+    private fun isExpectedReaderFailure(sessionId: Long, error: Exception): Boolean {
+        if (isExpectedStop(sessionId)) return true
+        val message = error.message?.lowercase().orEmpty()
+        return error is kotlinx.coroutines.CancellationException ||
+            message.contains("context canceled") ||
+            message.contains("stream closed") ||
+            message.contains("socket closed") ||
+            message.contains("broken pipe")
+    }
 
 
     val cooldownSeconds = MutableStateFlow(0)
@@ -130,8 +287,9 @@ val showBlockerWarning = MutableStateFlow(false)
 
     /** Сразу показывает статус на вкладке «Логи», ещё до старта сервиса / VK auth. */
     fun beginConnecting(hint: String = "Подключение…") {
-        if (running.value) return
+        if (enabled.value) return
         connectingStartedAtMs = System.currentTimeMillis()
+        enabled.value = true
         isConnecting.value = true
         stats.value = hint
     }
@@ -243,9 +401,11 @@ val showBlockerWarning = MutableStateFlow(false)
             clearLogs()
             config.value = null
             connectingStartedAtMs = System.currentTimeMillis()
+            enabled.value = true
             isConnecting.value = true
             stats.value = "Ожидание данных..."
             updateLog("start_progress", "Подключение…", 0, false)
+            ConnectionProgressManager.beginConnection()
 
             detailedLogsJob?.cancel()
             detailedLogsJob = scope.launch {
@@ -305,7 +465,7 @@ val showBlockerWarning = MutableStateFlow(false)
                                         99,
                                         true
                                     )
-                                    finishConnectingFailed()
+                                    finishConnectingFailed(clearEnabled = true)
                                     showBlockerWarning.value = true
                                     android.util.Log.d("WDTT", "Network blocked, returning.")
                                     return@launch
@@ -328,12 +488,12 @@ val showBlockerWarning = MutableStateFlow(false)
 
                 if (hashList.isEmpty()) {
                     updateLog("hash_error", "Ошибка: Хеш не указан", 99, true)
-                    finishConnectingFailed()
+                    finishConnectingFailed(clearEnabled = !isSwitching)
                     return@launch
                 }
                 if (params.connectionPassword.isBlank()) {
                     updateLog("password_error", "Ошибка: пароль подключения не указан", 99, true)
-                    finishConnectingFailed()
+                    finishConnectingFailed(clearEnabled = !isSwitching)
                     return@launch
                 }
 
@@ -356,7 +516,7 @@ val showBlockerWarning = MutableStateFlow(false)
 
                 if (!binaryFile.exists()) {
                     updateLog("binary_error", "Ошибка: Бинарный файл не найден", 99, true)
-                    finishConnectingFailed()
+                    finishConnectingFailed(clearEnabled = !isSwitching)
                     return@launch
                 }
 
@@ -439,6 +599,17 @@ val showBlockerWarning = MutableStateFlow(false)
                         false
                     )
                 }
+                if (params.vkAuthMode.equals("anonymous", ignoreCase = true)) {
+                    ConnectionProgressManager.completeStageAndRun(
+                        ConnectionStage.DNS,
+                        ConnectionStage.WRAP
+                    )
+                } else {
+                    ConnectionProgressManager.completeStageAndRun(
+                        ConnectionStage.DNS,
+                        ConnectionStage.VK
+                    )
+                }
 
                 if (!params.vkAuthMode.equals("anonymous", ignoreCase = true)) {
                     try {
@@ -450,23 +621,24 @@ val showBlockerWarning = MutableStateFlow(false)
                         cmd.add(credsFile.absolutePath)
                         stats.value = "Запуск туннеля…"
                         updateLog("vk_auth_ok", "[VK Auth] TURN OK (${credsByHash.size})", 5, false)
+                        ConnectionProgressManager.completeStageAndRun(
+                            ConnectionStage.VK,
+                            ConnectionStage.WRAP
+                        )
                     } catch (e: kotlinx.coroutines.CancellationException) {
                         updateLog("start_cancelled", "Подключение отменено", 50, false)
-                        finishConnectingFailed()
-                        throw e
-                    } catch (e: kotlinx.coroutines.CancellationException) {
-                        updateLog("start_cancelled", "Подключение отменено", 50, false)
-                        finishConnectingFailed()
+                        finishConnectingFailed(clearEnabled = !isSwitching)
                         throw e
                     } catch (e: Exception) {
                         val msg = e.message ?: e::class.java.simpleName
                         updateLog("vk_auth_fail", "Ошибка авторизации VK: $msg", 99, true)
-                        finishConnectingFailed()
+                        ConnectionProgressManager.fail(ConnectionStage.VK, msg)
+                        finishConnectingFailed(clearEnabled = !isSwitching)
                         return@launch
                     }
                 }
                 if (!isActive) {
-                    finishConnectingFailed()
+                    finishConnectingFailed(clearEnabled = !isSwitching)
                     return@launch
                 }
 
@@ -478,7 +650,8 @@ val showBlockerWarning = MutableStateFlow(false)
                 val env = pb.environment()
                 env["LD_LIBRARY_PATH"] = context.applicationInfo.nativeLibraryDir
 
-                process = pb.start()
+                val proc = pb.start()
+                val sessionId = bindProcess(proc)
                 processStartedAtMs = System.currentTimeMillis()
                 wrapAuthTimeoutCount = 0
                 lastActiveAtMs = 0L
@@ -486,12 +659,14 @@ val showBlockerWarning = MutableStateFlow(false)
                 isConnecting.value = false
                 markRunning(true)
                 stats.value = "Ожидание данных..."
-                updateLog("start_progress", "Туннель запускается…", 0, false)
-                startLogReader()
-                startWatchdog(appContext, params)
+                if (!isSwitching) {
+                    updateLog("start_progress", "Туннель запускается…", 0, false)
+                }
+                startLogReader(proc, sessionId)
+                startWatchdog(params, sessionId)
             } catch (e: kotlinx.coroutines.CancellationException) {
                 updateLog("start_cancelled", "Подключение отменено", 50, false)
-                finishConnectingFailed()
+                finishConnectingFailed(clearEnabled = !isSwitching)
                 throw e
             } catch (e: Exception) {
                     updateLog(
@@ -501,15 +676,22 @@ val showBlockerWarning = MutableStateFlow(false)
                         true
                     )
                     e.printStackTrace()
-                    finishConnectingFailed()
+                    finishConnectingFailed(clearEnabled = !isSwitching)
                 }
             }
         }
     }
 
-            private fun finishConnectingFailed() {
+    private fun finishConnectingFailed(clearEnabled: Boolean = true) {
         isConnecting.value = false
+        if (clearEnabled) {
+            enabled.value = false
+        }
         markRunning(false)
+        activeWorkers.value = 0
+        if (ConnectionProgressManager.state.value.lifecycle == ConnectionLifecycle.CONNECTING) {
+            ConnectionProgressManager.failCurrent("Подключение не удалось")
+        }
         if (stats.value == "Подключение…" ||
             stats.value.startsWith("VK:") ||
             stats.value == "Запуск туннеля…"
@@ -519,9 +701,9 @@ val showBlockerWarning = MutableStateFlow(false)
     }
 
     @SuppressLint("StaticFieldLeak")
-    private fun startLogReader() {
+    private fun startLogReader(proc: Process, sessionId: Long) {
         readerJob = scope.launch {
-            val reader = process?.inputStream?.bufferedReader() ?: return@launch
+            val reader = proc.inputStream.bufferedReader()
             var collectingConfig = false
             val configBuilder = StringBuilder()
 
@@ -798,6 +980,12 @@ val showBlockerWarning = MutableStateFlow(false)
                         }
                         lineTrim.contains("[WRAP]") -> {
                             val text = lineTrim.substringAfter("[WRAP]").trim()
+                            if (ConnectionProgressManager.state.value.lifecycle == ConnectionLifecycle.CONNECTING) {
+                                val currentStage = ConnectionProgressManager.state.value.currentStage
+                                if (currentStage == ConnectionStage.DNS || currentStage == ConnectionStage.VK) {
+                                    ConnectionProgressManager.runStage(ConnectionStage.WRAP)
+                                }
+                            }
                             updateLog("wrap_status", "[WRAP] $text", 1, false)
                         }
                         lineTrim.contains("[TURN]") -> {
@@ -805,14 +993,53 @@ val showBlockerWarning = MutableStateFlow(false)
                             val turnError = text.contains("Ошибка", true) ||
                                 text.contains("не удалось", true) ||
                                 text.contains("неполный ответ", true)
+                            if (ConnectionProgressManager.state.value.lifecycle == ConnectionLifecycle.CONNECTING) {
+                                if (turnError) {
+                                    ConnectionProgressManager.fail(ConnectionStage.TURN, text)
+                                } else {
+                                    ConnectionProgressManager.completeStageAndRun(
+                                        ConnectionStage.WRAP,
+                                        ConnectionStage.TURN
+                                    )
+                                }
+                            }
                             updateLog("turn_${text.take(32).hashCode()}", "[TURN] $text", 2, turnError)
                         }
-                        lineTrim.contains("Relay:") ->
-                            updateLog("dtls_start", "[DTLS] Рукопожатие (Handshake)...", 1, false)
-                        lineTrim.contains("DTLS ОК") ->
-                            updateLog("dtls_ok", "[DTLS] Соединение установлено ✓", 1, false)
-                        lineTrim.contains("Активна ✓") ->
-                            updateLog("ready", "[READY] Туннель готов к работе ✓", 2, false)
+                        lineTrim.contains("Relay:") -> {
+                            if (ConnectionProgressManager.state.value.lifecycle == ConnectionLifecycle.CONNECTING) {
+                                ConnectionProgressManager.completeStageAndRun(
+                                    ConnectionStage.TURN,
+                                    ConnectionStage.DTLS
+                                )
+                            }
+                            if (activeRecoverySession == null) {
+                                updateLog("dtls_start", "[DTLS] Рукопожатие (Handshake)...", 1, false)
+                            }
+                        }
+                        lineTrim.contains("DTLS ОК") -> {
+                            if (ConnectionProgressManager.state.value.lifecycle == ConnectionLifecycle.CONNECTING) {
+                                ConnectionProgressManager.completeStageAndRun(
+                                    ConnectionStage.DTLS,
+                                    ConnectionStage.STREAMS
+                                )
+                            }
+                            if (activeRecoverySession == null) {
+                                updateLog("dtls_ok", "[DTLS] Соединение установлено ✓", 1, false)
+                            }
+                            recoveryLogOnce("dtls_ok", "🤝 DTLS восстановлен")
+                        }
+                        lineTrim.contains("Активна ✓") -> {
+                            if (ConnectionProgressManager.state.value.lifecycle == ConnectionLifecycle.CONNECTING) {
+                                ConnectionProgressManager.completeStage(
+                                    ConnectionStage.STREAMS,
+                                    "Подготовка TUN…"
+                                )
+                            }
+                            if (activeRecoverySession == null) {
+                                updateLog("ready", "[READY] Туннель готов к работе ✓", 2, false)
+                            }
+                            recoveryLogOnce("streams_ok", "📡 Потоки восстановлены")
+                        }
                         
                         // Ошибки (в конец)
                         isError -> {
@@ -855,9 +1082,26 @@ val showBlockerWarning = MutableStateFlow(false)
                             
                             scope.launch(Dispatchers.Main) {
                                 try {
+                                    ConnectionProgressManager.runStage(
+                                        ConnectionStage.VPN,
+                                        statusText = "Запуск TUN…"
+                                    )
                                     wgHelper?.startTunnel(configStr)
+                                    ConnectionProgressManager.completeStage(ConnectionStage.VPN)
+                                    ConnectionProgressManager.markConnected()
+                                    finishRecoverySession(
+                                        success = true,
+                                    )
                                 } catch (e: Exception) {
-                                    updateLog("vpn_start_error", "Ошибка запуска VPN: ${e.readableMessage()}", 99, true)
+                                    ConnectionProgressManager.fail(
+                                        ConnectionStage.VPN,
+                                        e.readableMessage()
+                                    )
+                                    updateLog("tun_start_error", "Ошибка запуска TUN: ${e.readableMessage()}", 99, true)
+                                    finishRecoverySession(
+                                        success = false,
+                                        detail = "не удалось заново поднять TUN: ${e.readableMessage()}",
+                                    )
                                 }
                             }
                         } else if (line.contains("║")) {
@@ -875,19 +1119,31 @@ val showBlockerWarning = MutableStateFlow(false)
                     }
                 }
             } catch (e: Exception) {
-                updateLog("sys_error", "Процесс остановлен: ${e.message}", -1, true)
+                if (!isExpectedReaderFailure(sessionId, e)) {
+                    updateLog("sys_error", "Процесс остановлен: ${e.message}", -1, true)
+                }
             } finally {
                 // Если процесс умер сам, ловим код выхода
                 try {
-                    val exitCode = process?.exitValue()
-                    if (exitCode != null && exitCode != 0) {
+                    val exitCode = proc.exitValue()
+                    if (exitCode != 0 && !isExpectedStop(sessionId)) {
                         updateLog("sys_exit", "Процесс крашнулся с кодом $exitCode", 99, true)
                     }
                 } catch (_: IllegalThreadStateException) {
-                    process?.destroy()
+                    if (proc.isAlive) {
+                        proc.destroy()
+                    }
                 }
-                markRunning(false)
-                process = null
+                if (isActiveSession(sessionId, proc) &&
+                    ConnectionProgressManager.state.value.lifecycle == ConnectionLifecycle.CONNECTING
+                ) {
+                    ConnectionProgressManager.failCurrent("Подключение прервано")
+                }
+                if (isActiveSession(sessionId, proc)) {
+                    markRunning(false)
+                    activeWorkers.value = 0
+                }
+                clearSessionIfCurrent(sessionId, proc)
             }
         }
     }
@@ -945,13 +1201,13 @@ val showBlockerWarning = MutableStateFlow(false)
     // ==================== WATCHDOG ====================
     // Проверяет, жив ли Go-процесс. Если умер — перезапускает.
     // Если процесс жив, но 0 воркеров уже 30 сек — тоже перезапуск (зомби).
-    private fun startWatchdog(context: Context, params: TunnelParams) {
+    private fun startWatchdog(params: TunnelParams, sessionId: Long) {
         watchdogJob?.cancel()
         watchdogJob = scope.launch {
             var zeroWorkersSince = 0L
             delay(10_000) // Даём 10 сек на старт
-            while (isActive && running.value) {
-                val proc = process
+            while (isActive && enabled.value && isActiveSession(sessionId)) {
+                val proc = currentProcess()
                 if (proc == null || !proc.isAlive) {
                     // Go-процесс мёртв! применяем экспоненциальный бэкофф перед перезапуском
                     val backoffMs = min(maxRestartBackoffSec * 1000L, (1000.0 * 2.0.pow(restartAttempts.toDouble())).toLong())
@@ -959,7 +1215,7 @@ val showBlockerWarning = MutableStateFlow(false)
                     activeWorkers.value = 0
                     forceRegenerateUA = true
                     delay(backoffMs)
-                    if (running.value) {
+                    if (enabled.value && isActiveSession(sessionId)) {
                         restartAttempts = (restartAttempts + 1).coerceAtMost(6)
                         reconnectAll("процесс упал")
                     }
@@ -1015,14 +1271,30 @@ val showBlockerWarning = MutableStateFlow(false)
         }
     }
 
-    fun restartTransport() {
-        reconnectAll("смена сети")
+    fun restartTransport(
+        reason: String = "сменились параметры сети",
+        details: String? = null,
+        stabilizationDelayMs: Long = DEFAULT_RECOVERY_STABILIZATION_MS,
+    ) {
+        reconnectAll(reason, details, stabilizationDelayMs)
     }
 
     fun reconnectAll(reason: String) {
+        reconnectAll(reason, null, 0L)
+    }
+
+    fun reconnectAll(
+        reason: String,
+        details: String? = null,
+        stabilizationDelayMs: Long = 0L,
+    ) {
+        reconnectAll(RecoveryTrigger(reason, details, stabilizationDelayMs))
+    }
+
+    private fun reconnectAll(trigger: RecoveryTrigger) {
         val params = currentParams ?: return
         val context = lastContext?.get() ?: return
-        if (!running.value) return
+        if (!enabled.value) return
 
         scope.launch {
             reconnectMutex.withLock {
@@ -1030,9 +1302,22 @@ val showBlockerWarning = MutableStateFlow(false)
                 if (now - lastReconnectAtMs < MIN_RECONNECT_INTERVAL_MS) return@launch
                 lastReconnectAtMs = now
 
+                val recoverySession = beginRecoverySession(trigger)
                 isReconnecting.value = true
-                updateLog("reconnect", "🔄 Переподключение ($reason)...", 50, false)
                 try {
+                    if (trigger.stabilizationDelayMs > 0L) {
+                        recoveryLog(
+                            recoverySession,
+                            "wait",
+                            "⏳ Ожидание стабилизации сети",
+                        )
+                        delay(trigger.stabilizationDelayMs)
+                    }
+                    recoveryLog(
+                        recoverySession,
+                        "restart",
+                        "🛡 Перезапуск TUN",
+                    )
                     withContext(Dispatchers.IO) {
                         ensureTransportStopped(params.port)
                     }
@@ -1041,9 +1326,14 @@ val showBlockerWarning = MutableStateFlow(false)
                             wgHelper?.reloadTunnel()
                         }
                     }
-                    if (running.value) {
+                    if (enabled.value) {
                         start(context, params, isSwitching = true)
                     }
+                } catch (e: Exception) {
+                    finishRecoverySession(
+                        success = false,
+                        detail = e.message ?: e::class.java.simpleName,
+                    )
                 } finally {
                     isReconnecting.value = false
                 }
@@ -1052,23 +1342,49 @@ val showBlockerWarning = MutableStateFlow(false)
     }
 
     fun pause() {
-        if (!running.value) return
-        killProcess() // Не ставим running=false, чтоб сервис не умер
+        if (!enabled.value) return
+        killProcess()
+        markRunning(false)
         activeWorkers.value = 0
     }
 
-    fun resume() {
+    fun resume(
+        reason: String = "сеть восстановлена",
+        details: String? = null,
+        stabilizationDelayMs: Long = DEFAULT_RECOVERY_STABILIZATION_MS,
+    ) {
         val resumeCtx = lastContext?.get()
-        if (currentParams != null && resumeCtx != null) {
+        if (enabled.value && currentParams != null && resumeCtx != null) {
             scope.launch {
+                val recoverySession = beginRecoverySession(
+                    RecoveryTrigger(reason, details, stabilizationDelayMs)
+                )
                 isReconnecting.value = true
                 try {
+                    if (stabilizationDelayMs > 0L) {
+                        recoveryLog(
+                            recoverySession,
+                            "wait",
+                            "⏳ Ожидание стабилизации сети",
+                        )
+                        delay(stabilizationDelayMs)
+                    }
+                    recoveryLog(
+                        recoverySession,
+                        "restart",
+                        "🛡 Перезапуск TUN",
+                    )
                     withContext(Dispatchers.Main) {
                         if (config.value != null) {
                             wgHelper?.reloadTunnel()
                         }
                     }
                     start(resumeCtx, currentParams!!, isSwitching = true)
+                } catch (e: Exception) {
+                    finishRecoverySession(
+                        success = false,
+                        detail = e.message ?: e::class.java.simpleName,
+                    )
                 } finally {
                     isReconnecting.value = false
                 }
@@ -1076,16 +1392,15 @@ val showBlockerWarning = MutableStateFlow(false)
         }
     }
 
-    // Убивает процесс без изменения running
     private fun killProcess() {
         watchdogJob?.cancel()
         readerJob?.cancel()
+        markExpectedStopForActiveSession()
         stopGoProcessGracefully()
     }
 
     private fun stopGoProcessGracefully() {
-        val proc = process
-        process = null
+        val proc = invalidateActiveSession()
         if (proc == null) return
         try {
             proc.outputStream.write("STOP\n".toByteArray(Charsets.UTF_8))
@@ -1181,15 +1496,18 @@ val showBlockerWarning = MutableStateFlow(false)
 
     fun stop(force: Boolean = false) {
         if (!force && isConnecting.value && !running.value) {
-    val age = System.currentTimeMillis() - connectingStartedAtMs
-    if (age in 0 until CONNECT_STOP_GRACE_MS) {
-        android.util.Log.w("WDTT", "Ignoring STOP during connect grace (${age}ms)")
-        return
-    }
-}
+            val age = System.currentTimeMillis() - connectingStartedAtMs
+            if (age in 0 until CONNECT_STOP_GRACE_MS) {
+                android.util.Log.w("WDTT", "Ignoring STOP during connect grace (${age}ms)")
+                return
+            }
+        }
+        ConnectionProgressManager.markDisconnecting()
+        enabled.value = false
+        cancelRecoverySession("туннель выключен вручную")
         saveRemainingTraffic()
         startJob?.cancel()
-startJob = null
+        startJob = null
 
 try {
     VkAuthWebViewManager.notifyCancelled()
@@ -1200,7 +1518,7 @@ try {
         }
         killProcess()
         markRunning(false)
-isConnecting.value = false
+        isConnecting.value = false
         activeWorkers.value = 0
         currentParams = null
         ManlCaptchaWebViewManager.cancelCaptcha()
@@ -1208,9 +1526,12 @@ isConnecting.value = false
 
     // Suspend-версия: гарантирует что процесс мёртв и UDP-порт свободен
     suspend fun stopAndWait() {
+        ConnectionProgressManager.markDisconnecting()
+        enabled.value = false
+        cancelRecoverySession("туннель выключен вручную")
         saveRemainingTraffic()
         startJob?.cancel()
-startJob = null
+        startJob = null
 
 try {
     VkAuthWebViewManager.notifyCancelled()
@@ -1223,7 +1544,7 @@ try {
         withContext(Dispatchers.IO) {
             ensureTransportStopped(port)
             markRunning(false)
-isConnecting.value = false
+            isConnecting.value = false
             activeWorkers.value = 0
             currentParams = null
             ManlCaptchaWebViewManager.cancelCaptcha()

@@ -12,15 +12,11 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Update
-import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.runtime.Composable
@@ -41,7 +37,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.wdtt.client.AppReleaseInfo
 import com.wdtt.client.RemoteVersionSource
@@ -69,25 +64,17 @@ fun AppUpdateDialog(
         "Доступна новая версия Hoplet ${release.versionTag}.\n\nРекомендуется установить обновление, чтобы получить новые возможности, исправления ошибок и улучшения производительности."
     }
 
-    Dialog(
+    HopletDialog(
         onDismissRequest = {},
         properties = DialogProperties(
             usePlatformDefaultWidth = false,
             dismissOnBackPress = false,
-            dismissOnClickOutside = false
+            dismissOnClickOutside = false,
+            decorFitsSystemWindows = false
         )
     ) {
-        Surface(
-            shape = RoundedCornerShape(28.dp),
-            color = MaterialTheme.colorScheme.surface,
-            contentColor = MaterialTheme.colorScheme.onSurface,
-            tonalElevation = 8.dp,
-            modifier = Modifier.fillMaxWidth(0.92f)
-        ) {
+        HopletModalSurface(modifier = Modifier.fillMaxWidth()) {
             Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 22.dp, vertical = 20.dp),
                 verticalArrangement = Arrangement.spacedBy(14.dp)
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -121,10 +108,7 @@ fun AppUpdateDialog(
                     lineHeight = 20.sp
                 )
 
-
-
                 if (release.releaseNotes.isNotBlank()) {
-
                     Text(
                         text = "Что нового",
                         style = MaterialTheme.typography.titleSmall,
@@ -132,12 +116,14 @@ fun AppUpdateDialog(
                         color = MaterialTheme.colorScheme.onSurface
                     )
 
-                    Surface(
+                    AppSectionCard(
                         modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(16.dp),
-                        color = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.35f)
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(0.dp),
+                        color = HopletModalDefaults.softContainerColor(),
+                        shadowElevation = 0.dp,
+                        tonalElevation = 0.dp
                     ) {
-
                         Text(
                             text = release.releaseNotes,
                             style = MaterialTheme.typography.bodySmall,
@@ -145,7 +131,6 @@ fun AppUpdateDialog(
                             lineHeight = 20.sp,
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(16.dp)
                                 .heightIn(max = 180.dp)
                                 .verticalScroll(rememberScrollState())
                         )
@@ -171,17 +156,16 @@ fun AppUpdateDialog(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
-                            OutlinedButton(
+                            HopletSecondaryButton(
                                 onClick = onPostpone,
                                 modifier = Modifier
                                     .weight(1f)
-                                    .height(50.dp),
-                                shape = RoundedCornerShape(22.dp)
+                                    .height(52.dp)
                             ) {
                                 Text("Позже", fontWeight = FontWeight.SemiBold)
                             }
         
-                            Button(
+                            HopletPrimaryButton(
                                 onClick = {
                                     if (release.downloadUrl != null && !isTagOnly) {
                                         scope.launch {
@@ -203,8 +187,7 @@ fun AppUpdateDialog(
                                 },
                                 modifier = Modifier
                                     .weight(1f)
-                                    .height(50.dp),
-                                shape = RoundedCornerShape(22.dp)
+                                    .height(52.dp)
                             ) {
                                 Text(
                                     if (release.downloadUrl != null && !isTagOnly)

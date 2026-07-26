@@ -20,7 +20,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.*
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -276,7 +275,7 @@ class ManlCaptchaActivity : ComponentActivity() {
         val redirectUri = intent.getStringExtra("redirectUri") ?: return finish()
 
         setContent {
-            MaterialTheme(colorScheme = if (isSystemInDarkTheme()) darkColorScheme() else lightColorScheme()) {
+            WDTTTheme {
                 Box(modifier = Modifier.fillMaxSize()) {
                     Column(
                         modifier = Modifier.align(Alignment.Center),

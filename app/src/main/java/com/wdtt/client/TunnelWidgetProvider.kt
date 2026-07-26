@@ -18,16 +18,29 @@ class TunnelWidgetProvider : AppWidgetProvider() {
 
     override fun onReceive(context: Context, intent: Intent) {
         super.onReceive(context, intent)
-        
+
         if (intent.action == ACTION_TOGGLE) {
-            TunnelControl.toggle(context)
+            if (TunnelManager.enabled.value) {
+                TunnelControl.stop(context)
+                return
+            }
+
+            try {
+                VpnPermissionActivity.createPendingIntent(
+                    context,
+                    VpnPermissionActivity.SOURCE_WIDGET,
+                    2001,
+                ).send()
+            } catch (e: PendingIntent.CanceledException) {
+                e.printStackTrace()
+            }
         }
     }
 
     companion object {
         const val ACTION_TOGGLE = "net.qwdtt.client.ACTION_TOGGLE"
 
-        fun updateWidgetState(context: Context, running: Boolean, statsText: String?) {
+        fun updateWidgetState(context: Context, enabled: Boolean, statsText: String?) {
             val appWidgetManager = AppWidgetManager.getInstance(context)
             val thisWidget = ComponentName(context, TunnelWidgetProvider::class.java)
             val allWidgetIds = appWidgetManager.getAppWidgetIds(thisWidget)
@@ -36,15 +49,15 @@ class TunnelWidgetProvider : AppWidgetProvider() {
                 val views = RemoteViews(context.packageName, R.layout.tunnel_widget)
                 
                 // Update status dot and title
-                if (running) {
+                if (enabled) {
                     views.setImageViewResource(R.id.widget_status_dot, R.drawable.widget_dot_green)
-                    views.setTextViewText(R.id.widget_status_title, "qWDTT: Активен")
-                    views.setTextViewText(R.id.widget_stats_text, statsText ?: "Туннель запущен")
+                    views.setTextViewText(R.id.widget_status_title, "Hoplet: Включен")
+                    views.setTextViewText(R.id.widget_stats_text, statsText ?: "Туннель включен")
                     views.setImageViewResource(R.id.widget_toggle_button, android.R.drawable.ic_media_pause)
                     views.setInt(R.id.widget_toggle_button, "setColorFilter", android.graphics.Color.parseColor("#FF5252")) // Red pause button
                 } else {
                     views.setImageViewResource(R.id.widget_status_dot, R.drawable.widget_dot_gray)
-                    views.setTextViewText(R.id.widget_status_title, "qWDTT: Отключен")
+                    views.setTextViewText(R.id.widget_status_title, "Hoplet: Выключен")
                     views.setTextViewText(R.id.widget_stats_text, "Нажмите для подключения")
                     views.setImageViewResource(R.id.widget_toggle_button, android.R.drawable.ic_media_play)
                     views.setInt(R.id.widget_toggle_button, "setColorFilter", android.graphics.Color.parseColor("#3DDC84")) // Green play button
@@ -66,19 +79,19 @@ class TunnelWidgetProvider : AppWidgetProvider() {
 
         private fun updateAppWidget(context: Context, appWidgetManager: AppWidgetManager, appWidgetId: Int) {
             val views = RemoteViews(context.packageName, R.layout.tunnel_widget)
-            val running = TunnelManager.running.value
+            val enabled = TunnelManager.enabled.value
             val stats = TunnelManager.stats.value
             
             // Set initial state
-            if (running) {
+            if (enabled) {
                 views.setImageViewResource(R.id.widget_status_dot, R.drawable.widget_dot_green)
-                views.setTextViewText(R.id.widget_status_title, "qWDTT: Активен")
-                views.setTextViewText(R.id.widget_stats_text, stats)
+                views.setTextViewText(R.id.widget_status_title, "Hoplet: Включен")
+                views.setTextViewText(R.id.widget_stats_text, stats.ifBlank { "Туннель включен" })
                 views.setImageViewResource(R.id.widget_toggle_button, android.R.drawable.ic_media_pause)
                 views.setInt(R.id.widget_toggle_button, "setColorFilter", android.graphics.Color.parseColor("#FF5252"))
             } else {
                 views.setImageViewResource(R.id.widget_status_dot, R.drawable.widget_dot_gray)
-                views.setTextViewText(R.id.widget_status_title, "qWDTT: Отключен")
+                views.setTextViewText(R.id.widget_status_title, "Hoplet: Выключен")
                 views.setTextViewText(R.id.widget_stats_text, "Нажмите для подключения")
                 views.setImageViewResource(R.id.widget_toggle_button, android.R.drawable.ic_media_play)
                 views.setInt(R.id.widget_toggle_button, "setColorFilter", android.graphics.Color.parseColor("#3DDC84"))

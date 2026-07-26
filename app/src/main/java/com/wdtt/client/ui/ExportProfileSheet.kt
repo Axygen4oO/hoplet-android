@@ -89,11 +89,7 @@ fun ExportProfileSheet(
         }
     }
 
-    ModalBottomSheet(
-        onDismissRequest = onDismissRequest,
-        shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
-        containerColor = MaterialTheme.colorScheme.surface
-    ) {
+    HopletModalBottomSheet(onDismissRequest = onDismissRequest) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -154,28 +150,24 @@ fun ExportProfileSheet(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(16.dp)
             ) {
-                Button(
+                HopletSecondaryButton(
                     onClick = {
                         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                        clipboard.setPrimaryClip(ClipData.newPlainText("WDTT Profile", link))
+                        clipboard.setPrimaryClip(ClipData.newPlainText("Hoplet Profile", link))
                         Toast.makeText(context, "Ссылка скопирована", Toast.LENGTH_SHORT).show()
                     },
-                    modifier = Modifier.weight(1f).height(50.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
-                    shape = RoundedCornerShape(16.dp)
+                    modifier = Modifier.weight(1f).height(52.dp)
                 ) {
-                    Icon(Icons.Default.ContentCopy, null, tint = MaterialTheme.colorScheme.onSecondaryContainer, modifier = Modifier.size(20.dp))
+                    Icon(Icons.Default.ContentCopy, null, modifier = Modifier.size(20.dp))
                     Spacer(Modifier.width(8.dp))
-                    Text("Ссылка", color = MaterialTheme.colorScheme.onSecondaryContainer, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                    Text("Ссылка", fontSize = 15.sp, fontWeight = FontWeight.Bold)
                 }
 
-                Button(
+                HopletPrimaryButton(
                     onClick = {
                         createDocumentLauncher.launch("${profile.name}.conf")
                     },
-                    modifier = Modifier.weight(1f).height(50.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
-                    shape = RoundedCornerShape(16.dp)
+                    modifier = Modifier.weight(1f).height(52.dp)
                 ) {
                     Icon(Icons.Default.Save, null, modifier = Modifier.size(20.dp))
                     Spacer(Modifier.width(8.dp))
@@ -206,4 +198,3 @@ private fun generateQrCode(text: String, size: Int): Bitmap? {
         null
     }
 }
-

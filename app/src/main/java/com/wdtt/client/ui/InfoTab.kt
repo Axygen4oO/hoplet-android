@@ -248,7 +248,7 @@ fun InfoTab() {
                     modifier = Modifier.weight(1f),
                     onClick = {
                         val clipboard = context.getSystemService(ClipboardManager::class.java)
-                        clipboard?.setPrimaryClip(ClipData.newPlainText("qWDTT Report", buildSupportReport()))
+                        clipboard?.setPrimaryClip(ClipData.newPlainText("Hoplet Report", buildSupportReport()))
                         Toast.makeText(context, "Отчёт сформирован и скопирован", Toast.LENGTH_SHORT).show()
                     },
                     icon = {
@@ -264,7 +264,7 @@ fun InfoTab() {
 
             WideActionTile(
                 title = "Справка",
-                subtitle = "Коротко про VPN, исключения, капчу и запуск",
+                subtitle = "Коротко про TUN, исключения, капчу и запуск",
                 onClick = { showHelpDialog = true },
                 icon = {
                     Icon(
@@ -389,7 +389,7 @@ fun InfoTab() {
 
             ProjectLinkRow(
                 title = "Telegram-канал",
-                subtitle = "Канал автора форка darkbitVPN",
+                subtitle = "Hoplet",
                 onClick = { openUrlInBrowser(context, TelegramChannelUrl) },
                 icon = {
                     Icon(
@@ -402,7 +402,7 @@ fun InfoTab() {
             )
 
             ProjectLinkRow(
-                title = "Репозиторий qWDTT",
+                title = "Репозиторий Hoplet",
                 subtitle = "Исходники и релизы приложения",
                 onClick = { openUrlInBrowser(context, RepositoryUrl) },
                 icon = {
@@ -416,9 +416,9 @@ fun InfoTab() {
             )
 
             ProjectLinkRow(
-                title = "Оригинальный проект",
-                subtitle = "Форк репозитория amurcanov",
-                onClick = { openUrlInBrowser(context, "https://github.com/amurcanov/proxy-turn-vk-android") },
+                title = "Сайт Hoplet",
+                subtitle = "Официальный сайт проекта",
+                onClick = { openUrlInBrowser(context, AppLinks.WEBSITE) },
                 icon = {
                     Icon(
                         painter = painterResource(id = R.drawable.ic_github),
@@ -454,21 +454,12 @@ fun InfoTab() {
 private fun InfoHeroCard(currentVersion: String) {
     val colors = MaterialTheme.colorScheme
     val isDark = colors.background.luminance() < 0.22f
-    val heroBrush = remember(colors.primaryContainer, colors.secondaryContainer, colors.surfaceVariant) {
-        Brush.linearGradient(
-            listOf(
-                colors.primaryContainer,
-                colors.secondaryContainer,
-                colors.surfaceVariant
-            )
-        )
-    }
     val glassColor = if (isDark) colors.surface.copy(alpha = 0.46f) else Color.White.copy(alpha = 0.54f)
     val glassBorder = colors.outlineVariant.copy(alpha = if (isDark) 0.50f else 0.32f)
 
     Surface(
         shape = RoundedCornerShape(32.dp),
-        color = Color.Transparent,
+        color = AppCardDefaults.containerColor(),
         contentColor = MaterialTheme.colorScheme.onSurface,
         shadowElevation = 10.dp,
         tonalElevation = 0.dp
@@ -476,27 +467,8 @@ private fun InfoHeroCard(currentVersion: String) {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(32.dp))
-                .background(heroBrush)
                 .padding(22.dp)
         ) {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .offset(x = 30.dp, y = (-34).dp)
-                    .size(138.dp)
-                    .clip(Android16BlobShape)
-                    .background(colors.primary.copy(alpha = 0.10f))
-            )
-            Box(
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .offset(x = 26.dp, y = 30.dp)
-                    .size(112.dp)
-                    .clip(Android16BlobShape)
-                    .background(colors.secondary.copy(alpha = 0.12f))
-            )
-
             Column(
                 modifier = Modifier.fillMaxWidth(),
                 verticalArrangement = Arrangement.spacedBy(18.dp)
@@ -507,7 +479,7 @@ private fun InfoHeroCard(currentVersion: String) {
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     HeroMetaPill(
-                        text = "qWDTT",
+                        text = "Hoplet",
                         containerColor = glassColor,
                         borderColor = glassBorder,
                         modifier = Modifier.weight(1f)
@@ -522,7 +494,7 @@ private fun InfoHeroCard(currentVersion: String) {
 
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        text = "qWDTT VPN Tunnel",
+                        text = "Hoplet TUN",
                         style = MaterialTheme.typography.headlineSmall.copy(
                             fontWeight = FontWeight.Black,
                             fontSize = 30.sp,
@@ -635,7 +607,7 @@ private fun ExpandableSectionCard(
 private fun MetaChip(text: String) {
     Surface(
         shape = RoundedCornerShape(14.dp),
-        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.88f),
+        color = AppCardDefaults.containerColor(),
         contentColor = MaterialTheme.colorScheme.onSurface
     ) {
         Text(
@@ -658,7 +630,7 @@ private fun InfoActionTile(
 ) {
     Surface(
         shape = RoundedCornerShape(24.dp),
-        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.70f),
+        color = AppCardDefaults.containerColor(),
         contentColor = MaterialTheme.colorScheme.onSurface,
         modifier = modifier
             .clip(RoundedCornerShape(24.dp))
@@ -702,7 +674,7 @@ private fun WideActionTile(
 ) {
     Surface(
         shape = RoundedCornerShape(24.dp),
-        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.70f),
+        color = AppCardDefaults.containerColor(),
         contentColor = MaterialTheme.colorScheme.onSurface,
         modifier = Modifier
             .fillMaxWidth()
@@ -754,7 +726,7 @@ private fun ProjectLinkRow(
 ) {
     Surface(
         shape = RoundedCornerShape(24.dp),
-        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.64f),
+        color = AppCardDefaults.containerColor(),
         contentColor = MaterialTheme.colorScheme.onSurface,
         modifier = Modifier
             .fillMaxWidth()

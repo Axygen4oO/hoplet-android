@@ -66,7 +66,7 @@ object HashCheckHelper {
         var currentSlot: Int? = null
         val timeoutMs = (hashes.size * 100_000L).coerceAtLeast(90_000L)
         var cleanedUp = false
-        val startedAutoWebView = !TunnelManager.running.value
+        val startedAutoWebView = !TunnelManager.enabled.value
 
         fun cleanup() {
             if (cleanedUp) return
@@ -75,7 +75,7 @@ object HashCheckHelper {
                 runCatching { process.destroyForcibly() }
             }
             ManlCaptchaWebViewManager.cancelCaptcha()
-            if (startedAutoWebView && !TunnelManager.running.value) {
+            if (startedAutoWebView && !TunnelManager.enabled.value) {
                 CaptchaWebViewManager.onTunnelStop()
             }
         }

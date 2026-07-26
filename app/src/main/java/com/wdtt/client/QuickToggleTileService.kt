@@ -2,7 +2,6 @@ package com.wdtt.client
 
 import android.content.ComponentName
 import android.content.Context
-import android.content.Intent
 import android.os.Build
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
@@ -16,28 +15,32 @@ class QuickToggleTileService : TileService() {
 
     override fun onClick() {
         super.onClick()
-        val willRun = !TunnelManager.running.value
-        TunnelControl.toggle(applicationContext)
-        updateTile(willRun)
+        if (TunnelManager.enabled.value) {
+            TunnelControl.stop(applicationContext)
+            updateTile(false)
+            return
+        }
+
+        openVpnPermissionActivity()
     }
 
     private fun updateTileState() {
-        updateTile(TunnelManager.running.value)
+        updateTile(TunnelManager.enabled.value)
     }
 
-    private fun updateTile(running: Boolean) {
+    private fun updateTile(enabled: Boolean) {
         val tile = qsTile ?: return
-        if (running) {
+        if (enabled) {
             tile.state = Tile.STATE_ACTIVE
-            tile.label = "qWDTT: Вкл"
+            tile.label = "Hoplet: Вкл"
             if (Build.VERSION.SDK_INT >= 29) {
-                tile.subtitle = "Активен"
+                tile.subtitle = "Включен"
             }
         } else {
             tile.state = Tile.STATE_INACTIVE
-            tile.label = "qWDTT: Выкл"
+            tile.label = "Hoplet: Выкл"
             if (Build.VERSION.SDK_INT >= 29) {
-                tile.subtitle = "Отключен"
+                tile.subtitle = "Выключен"
             }
         }
         tile.updateTile()
@@ -55,6 +58,24 @@ class QuickToggleTileService : TileService() {
                     e.printStackTrace()
                 }
             }
+        }
+    }
+
+    private fun openVpnPermissionActivity() {
+        val launchIntent = VpnPermissionActivity.createLaunchIntent(
+            applicationContext,
+            VpnPermissionActivity.SOURCE_TILE,
+        )
+        if (Build.VERSION.SDK_INT >= 34) {
+            val pendingIntent = VpnPermissionActivity.createPendingIntent(
+                applicationContext,
+                VpnPermissionActivity.SOURCE_TILE,
+                1001,
+            )
+            startActivityAndCollapse(pendingIntent)
+        } else {
+            @Suppress("DEPRECATION")
+            startActivityAndCollapse(launchIntent)
         }
     }
 }

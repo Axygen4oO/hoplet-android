@@ -29,6 +29,8 @@ class SettingsStore(context: Context) {
         /** Потоков в одной группе Go-клиента (workersPerGroup). */
         const val WORKERS_PER_VK_GROUP = 9
         const val MAX_VK_HASHES = 4
+        const val VK_HASH_SOURCE_SERVER = "SERVER"
+        const val VK_HASH_SOURCE_LOCAL = "LOCAL"
 
         /** Макс. потоков: 27 на каждый хеш (1→27, 2→54, 3→81, 4→108). */
         fun maxAnonymousWorkers(hashCount: Int): Int {
@@ -45,6 +47,10 @@ class SettingsStore(context: Context) {
         private val Context.dataStore by preferencesDataStore("settings")
         private val PEER = stringPreferencesKey("peer")
         private val VK_HASHES = stringPreferencesKey("vk_hashes")
+        private val LOCAL_VK_HASHES = stringPreferencesKey("local_vk_hashes")
+        private val SERVER_VK_HASHES_CACHE = stringPreferencesKey("server_vk_hashes_cache")
+        private val VK_HASH_SOURCE = stringPreferencesKey("vk_hash_source")
+        private val VK_HASH_SOURCE_SPLIT_MIGRATED = booleanPreferencesKey("vk_hash_source_split_migrated")
         private val GLOBAL_VK_HASHES = stringPreferencesKey("global_vk_hashes")
         private val SECONDARY_VK_HASH = stringPreferencesKey("secondary_vk_hash")
         private val WORKERS_PER_HASH = intPreferencesKey("workers_per_hash")
@@ -168,6 +174,23 @@ class SettingsStore(context: Context) {
         /** Нормализованный путь VK для Go-клиента. */
         fun normalizeVkAnonPath(path: String?): String {
             return if (path.equals("legacy", ignoreCase = true)) "legacy" else "vkcalls"
+        }
+
+        fun normalizeVkHashSource(source: String?): String {
+            return if (source.equals(VK_HASH_SOURCE_LOCAL, ignoreCase = true)) {
+                VK_HASH_SOURCE_LOCAL
+            } else {
+                VK_HASH_SOURCE_SERVER
+            }
+        }
+
+        fun normalizeVkHashes(raw: String?): String {
+            if (raw.isNullOrBlank()) return ""
+            return raw.split(Regex("[,\\s\\n]+"))
+                .map { stripVkUrlStatic(it) }
+                .filter { it.isNotBlank() }
+                .distinct()
+                .joinToString(",")
         }
 
         fun normalizeObfsMode(mode: String?): String {
@@ -322,6 +345,9 @@ class SettingsStore(context: Context) {
 
     val peer: Flow<String> = dataStore.data.map { it[PEER] ?: "" }
     val vkHashes: Flow<String> = dataStore.data.map { it[VK_HASHES] ?: "" }
+    val localVkHashes: Flow<String> = dataStore.data.map { normalizeVkHashes(it[LOCAL_VK_HASHES] ?: "") }
+    val serverVkHashesCache: Flow<String> = dataStore.data.map { normalizeVkHashes(it[SERVER_VK_HASHES_CACHE] ?: "") }
+    val vkHashSource: Flow<String> = dataStore.data.map { normalizeVkHashSource(it[VK_HASH_SOURCE]) }
     val globalVkHashes: Flow<String> = appContext.dataStore.data.map { it[GLOBAL_VK_HASHES] ?: "" }
     val secondaryVkHash: Flow<String> = appContext.dataStore.data.map { it[SECONDARY_VK_HASH] ?: "" }
     val workersPerHash: Flow<Int> = dataStore.data.map { it[WORKERS_PER_HASH] ?: 16 }
@@ -427,7 +453,7 @@ class SettingsStore(context: Context) {
     val supportNoticeShownVersionCode: Flow<Int> = dataStore.data.map { it[SUPPORT_NOTICE_SHOWN_VERSION_CODE] ?: 0 }
 
     // ═══ Поведение ═══
-    val autoSwitchToLogs: Flow<Boolean> = dataStore.data.map { it[AUTO_SWITCH_TO_LOGS] ?: true }
+    val autoSwitchToLogs: Flow<Boolean> = dataStore.data.map { it[AUTO_SWITCH_TO_LOGS] ?: false }
     val stopOnWifi: Flow<Boolean> = dataStore.data.map { it[STOP_ON_WIFI] ?: false }
     val sortProfilesByPing: Flow<Boolean> = dataStore.data.map { it[SORT_PROFILES_BY_PING] ?: false }
 
@@ -554,17 +580,7 @@ class SettingsStore(context: Context) {
         noDns: Boolean = false
     ) {
         dataStore.edit { prefs ->
-            val cleanVkHashes = vkHashes.split(Regex("[,\\s\\n]+"))
-                .map { stripVkUrlStatic(it) }
-                .filter { it.isNotBlank() }
-                .distinct()
-                .joinToString(",")
-                
-            val storedVkHashes = (prefs[VK_HASHES] ?: "").split(Regex("[,\\s\\n]+"))
-                .map { stripVkUrlStatic(it) }
-                .filter { it.isNotBlank() }
-                .distinct()
-                .joinToString(",")
+            val cleanVkHashes = normalizeVkHashes(vkHashes)
 
             prefs[PEER] = peer
             prefs[VK_HASHES] = cleanVkHashes
@@ -594,6 +610,30 @@ class SettingsStore(context: Context) {
     suspend fun saveUserAgent(ua: String) {
         dataStore.edit { prefs ->
             prefs[USER_AGENT] = ua
+        }
+    }
+
+    suspend fun saveActiveVkHashes(hashes: String) {
+        dataStore.edit { prefs ->
+            prefs[VK_HASHES] = normalizeVkHashes(hashes)
+        }
+    }
+
+    suspend fun saveLocalVkHashes(hashes: String) {
+        dataStore.edit { prefs ->
+            prefs[LOCAL_VK_HASHES] = normalizeVkHashes(hashes)
+        }
+    }
+
+    suspend fun saveServerVkHashesCache(hashes: String) {
+        dataStore.edit { prefs ->
+            prefs[SERVER_VK_HASHES_CACHE] = normalizeVkHashes(hashes)
+        }
+    }
+
+    suspend fun saveVkHashSource(source: String) {
+        dataStore.edit { prefs ->
+            prefs[VK_HASH_SOURCE] = normalizeVkHashSource(source)
         }
     }
 
@@ -827,6 +867,13 @@ class SettingsStore(context: Context) {
     private suspend fun runVersionMigrations() {
         val currentCode = BuildConfig.VERSION_CODE
         dataStore.edit { prefs ->
+            if (prefs[VK_HASH_SOURCE_SPLIT_MIGRATED] != true) {
+                val legacyHashes = normalizeVkHashes(prefs[VK_HASHES] ?: "")
+                if (legacyHashes.isNotEmpty() && prefs[LOCAL_VK_HASHES].isNullOrBlank()) {
+                    prefs[LOCAL_VK_HASHES] = legacyHashes
+                }
+                prefs[VK_HASH_SOURCE_SPLIT_MIGRATED] = true
+            }
             val lastSeen = prefs[LAST_SEEN_VERSION_CODE] ?: 0
             if (currentCode <= lastSeen) {
                 return@edit

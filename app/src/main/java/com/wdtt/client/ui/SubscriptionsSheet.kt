@@ -12,9 +12,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.RssFeed
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -24,7 +21,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -62,9 +58,9 @@ fun AddSubscriptionDialog(
 ) {
     var urlInput by remember { mutableStateOf("") }
 
-    AlertDialog(
+    HopletAlertDialog(
         onDismissRequest = { if (!saving) onDismiss() },
-        title = { Text("Новая подписка", fontWeight = FontWeight.Bold) },
+        title = { HopletSectionTitle("Новая подписка") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 OutlinedTextField(
@@ -74,17 +70,18 @@ fun AddSubscriptionDialog(
                     placeholder = { Text("https://example.com/sub.json") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
-                    enabled = !saving
+                    enabled = !saving,
+                    shape = HopletModalDefaults.fieldShape,
+                    colors = hopletOutlinedTextFieldColors()
                 )
-                Text(
+                HopletDialogBodyText(
+                    text =
                     "Название берётся из subscriptionName в JSON. Обязательны subscriptionName и profiles[].",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
         },
         confirmButton = {
-            Button(
+            HopletPrimaryButton(
                 onClick = { onConfirm(urlInput) },
                 enabled = !saving && urlInput.isNotBlank()
             ) {
@@ -96,7 +93,7 @@ fun AddSubscriptionDialog(
             }
         },
         dismissButton = {
-            TextButton(onClick = { if (!saving) onDismiss() }, enabled = !saving) {
+            HopletTextActionButton(onClick = { if (!saving) onDismiss() }, enabled = !saving) {
                 Text("Отмена")
             }
         }
@@ -109,20 +106,20 @@ fun DeleteSubscriptionDialog(
     onDismiss: () -> Unit,
     onConfirm: () -> Unit
 ) {
-    AlertDialog(
+    HopletAlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Удалить подписку?") },
-        text = { Text("«${sub.name}» и папка с профилями будут удалены.") },
+        title = { HopletSectionTitle("Удалить подписку?") },
+        text = { HopletDialogBodyText("«${sub.name}» и папка с профилями будут удалены.") },
         confirmButton = {
-            Button(
+            HopletPrimaryButton(
                 onClick = onConfirm,
-                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                destructive = true
             ) {
                 Text("Удалить")
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Отмена") }
+            HopletTextActionButton(onClick = onDismiss) { Text("Отмена") }
         }
     )
 }

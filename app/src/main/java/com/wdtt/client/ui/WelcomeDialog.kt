@@ -12,9 +12,9 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.RoundedCornerShape
 
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ArrowForwardIos
@@ -22,12 +22,8 @@ import androidx.compose.material.icons.outlined.Campaign
 import androidx.compose.material.icons.outlined.HeadsetMic
 import androidx.compose.material.icons.outlined.Language
 
-import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 
 import androidx.compose.runtime.Composable
@@ -40,7 +36,6 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 
 import com.wdtt.client.AppLinks
@@ -62,23 +57,19 @@ private data class WelcomeItem(
 private fun WelcomeCard(
     item: WelcomeItem,
 ) {
-    Card(
+    AppSectionCard(
         modifier = Modifier
             .fillMaxWidth()
             .clickable { item.onClick() },
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceContainer
-        ),
-        elevation = CardDefaults.cardElevation(
-            defaultElevation = 2.dp
-        )
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(0.dp),
+        color = HopletModalDefaults.softContainerColor(),
+        shadowElevation = 0.dp,
+        tonalElevation = 0.dp
     ) {
-
         Row(
             modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
+                .fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
         ) {
 
@@ -179,25 +170,24 @@ fun WelcomeDialog(
             }
         )
     )
-    Dialog(
+    HopletDialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(
-            usePlatformDefaultWidth = false
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false
         )
     ) {
-
-        Surface(
+        HopletModalSurface(
             modifier = Modifier
                 .fillMaxWidth(0.94f)
-                .fillMaxHeight(0.90f),
-            shape = RoundedCornerShape(24.dp),
-            color = MaterialTheme.colorScheme.surface
+                .fillMaxHeight(0.90f)
         ) {
-
             Column(
                 modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 720.dp)
                     .verticalScroll(rememberScrollState())
-                    .padding(horizontal = 20.dp, vertical = 24.dp),
+                    .padding(bottom = 4.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
@@ -247,10 +237,9 @@ fun WelcomeDialog(
                 Spacer(
                     modifier = Modifier.height(6.dp)
                 )
-                Button(
+                HopletPrimaryButton(
                     onClick = onDismiss,
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(18.dp)
+                    modifier = Modifier.fillMaxWidth()
                 ) {
                     Text("Начать работу")
                 }

@@ -36,10 +36,10 @@ object NotificationHelper {
         }
         val channel = NotificationChannel(
             TUNNEL_CHANNEL_ID,
-            "qWDTT Туннель",
+            "Hoplet Tunnel",
             NotificationManager.IMPORTANCE_DEFAULT,
         ).apply {
-            description = "Статус VPN-туннеля и переподключение"
+            description = "Статус TUN-туннеля и переподключение"
             setShowBadge(true)
             lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
             setSound(null, null)
