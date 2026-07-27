@@ -2,8 +2,8 @@ package main
 
 import (
 	"bytes"
-	"crypto/cipher"
 	"context"
+	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -15,10 +15,9 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime/multipart"
 	"net"
 	"net/http"
-	neturl "net/url"
-	"mime/multipart"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -61,22 +60,23 @@ var dns = "8.8.8.8"
 // ==================== База данных и Бот ====================
 
 type ClientDevice struct {
-	DeviceID  string `json:"device_id"`
-	IP        string `json:"ip"`
-	PrivKey   string `json:"priv_key"`
-	PubKey    string `json:"pub_key"`
-	DownBytes int64  `json:"down_bytes"` // скачано устройством
-	UpBytes   int64  `json:"up_bytes"`   // отдано устройством
+	DeviceID   string `json:"device_id"`
+	DeviceName string `json:"device_name,omitempty"`
+	IP         string `json:"ip"`
+	PrivKey    string `json:"priv_key"`
+	PubKey     string `json:"pub_key"`
+	DownBytes  int64  `json:"down_bytes"`
+	UpBytes    int64  `json:"up_bytes"`
 }
 
 type PasswordEntry struct {
 	Label         string   `json:"label,omitempty"` // понятное имя в боте
 	DeviceID      string   `json:"device_id"`       // Для обратной совместимости, если нужно
-	DeviceIDs     []string `json:"device_ids"`  // Список привязанных deviceID
-	MaxDevices    int      `json:"max_devices"` // Максимальное кол-во устройств (0 или 1 = 1 устройство)
-	ExpiresAt     int64    `json:"expires_at"`  // unix timestamp
-	DownBytes     int64    `json:"down_bytes"`  // скачано клиентом
-	UpBytes       int64    `json:"up_bytes"`    // отдано клиентом
+	DeviceIDs     []string `json:"device_ids"`      // Список привязанных deviceID
+	MaxDevices    int      `json:"max_devices"`     // Максимальное кол-во устройств (0 или 1 = 1 устройство)
+	ExpiresAt     int64    `json:"expires_at"`      // unix timestamp
+	DownBytes     int64    `json:"down_bytes"`      // скачано клиентом
+	UpBytes       int64    `json:"up_bytes"`        // отдано клиентом
 	VkHash        string   `json:"vk_hash,omitempty"`
 	Ports         string   `json:"ports,omitempty"` // "dtls,wg,tun"
 	IsDeactivated bool     `json:"is_deactivated,omitempty"`
@@ -133,27 +133,57 @@ var (
 	activeDevicesMu sync.Mutex
 )
 
+type UserAccount struct {
+	Email        string `json:"email"`
+	PasswordHash string `json:"password_hash"`
+
+	CreatedAt int64 `json:"created_at"`
+
+	Role string `json:"role,omitempty"`
+
+	SubscriptionStatus string `json:"subscription_status"`
+
+	SubscriptionPlan string `json:"subscription_plan"`
+
+	SubscriptionExpires int64 `json:"subscription_expires"`
+
+	DeviceLimit int `json:"device_limit"`
+
+	SubscriptionID string `json:"subscription_id"`
+}
+
 type Database struct {
-	MainPassword string                    `json:"main_password"`
-	AdminID      string                    `json:"admin_id"`
-	BotToken     string                    `json:"bot_token"`
-	Passwords    map[string]*PasswordEntry `json:"passwords"`
-	Devices      map[string]*ClientDevice  `json:"devices"`
+	MainPassword string `json:"main_password"`
+	JWTSecret    string `json:"jwt_secret"`
+	AdminID      string `json:"admin_id"`
+	BotToken     string `json:"bot_token"`
+
+	Passwords map[string]*PasswordEntry `json:"passwords"`
+	Devices   map[string]*ClientDevice  `json:"devices"`
+
+	Users    map[string]*UserAccount `json:"users"`
+	Orders   map[string]*Order       `json:"orders"`
+	VKHashes []string                `json:"vk_hashes"`
 }
 
 var (
-	db           *Database
-	dbMutex      sync.Mutex
-	dbFile       string
-	globalWgDev  *device.Device
+	db          *Database
+	dbMutex     sync.Mutex
+	dbFile      string
+	globalWgDev *device.Device
 )
+var yookassaShopID string
+var yookassaSecretKey string
+var botTokenGlobal string
+var botAdminIDGlobal int64
+var expiredSubscriptions []string
 
 var serverWrapKeys = newWrapKeyStore()
 
 const (
 	passChars             = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789"
 	generatedPasswordLen  = 16
-	maxGeneratedPasswords = 10
+	maxGeneratedPasswords = 99999
 )
 
 func generatePassword() string {
@@ -218,7 +248,6 @@ func stripVkUrl(url string) string {
 	}
 	return strings.TrimSpace(url)
 }
-
 
 type wrapKeyEntry struct {
 	id  string
@@ -298,9 +327,18 @@ func (s *wrapKeyStore) SetPasswords(mainPassword string, generated []string) err
 	old := s.entries
 	s.entries = next
 	s.mu.Unlock()
+
+	log.Printf(
+		"[WRAP] Loaded keys: %d (generated=%d, main=%t)",
+		len(next),
+		len(generated),
+		mainPassword != "",
+	)
+
 	for _, entry := range old {
 		zeroBytes(entry.key)
 	}
+
 	return nil
 }
 
@@ -356,9 +394,14 @@ func (s *wrapKeyStore) Unwrap(raw, dst []byte) ([]byte, int, error) {
 	if len(s.entries) == 0 {
 		return nil, 0, errors.New("wrap: no active keys")
 	}
+	log.Printf("[WRAP] Active keys: %d", len(s.entries))
+
 	for _, entry := range s.entries {
+		log.Printf("[WRAP] Trying key: %s", entry.id)
+
 		m, err := obfsUnwrapPacket(entry.key, raw, dst)
 		if err == nil {
+			log.Printf("[WRAP] SUCCESS with key: %s", entry.id)
 			return append([]byte(nil), entry.key...), m, nil
 		}
 	}
@@ -366,12 +409,19 @@ func (s *wrapKeyStore) Unwrap(raw, dst []byte) ([]byte, int, error) {
 }
 
 func refreshWrapKeysFromDBLocked() error {
+
+	log.Printf("[WRAP] Refreshing keys, passwords in DB: %d", len(db.Passwords))
+
 	passwords := make([]string, 0, len(db.Passwords))
+
 	for password, entry := range db.Passwords {
 		if !isPasswordExpired(entry) {
 			passwords = append(passwords, password)
 		}
 	}
+
+	log.Printf("[WRAP] Active passwords after filter: %d", len(passwords))
+
 	return serverWrapKeys.SetPasswords(db.MainPassword, passwords)
 }
 
@@ -428,20 +478,39 @@ func initDB(dir, mainPass, adminID, botToken string) {
 	db = &Database{
 		Passwords: make(map[string]*PasswordEntry),
 		Devices:   make(map[string]*ClientDevice),
+		Users:     make(map[string]*UserAccount),
+		Orders:    make(map[string]*Order),
 	}
+
 	data, err := os.ReadFile(dbFile)
 	if err == nil {
 		json.Unmarshal(data, db)
 	}
+
 	if db.Passwords == nil {
 		db.Passwords = make(map[string]*PasswordEntry)
 	}
+
 	if db.Devices == nil {
 		db.Devices = make(map[string]*ClientDevice)
 	}
+
+	if db.Users == nil {
+		db.Users = make(map[string]*UserAccount)
+	}
+
+	if db.Orders == nil {
+		db.Orders = make(map[string]*Order)
+	}
+
+	if db.VKHashes == nil {
+		db.VKHashes = []string{}
+	}
+
 	db.MainPassword = mainPass
 	db.AdminID = adminID
 	db.BotToken = botToken
+
 	saveDB()
 	if err := refreshWrapKeysFromDBLocked(); err != nil {
 		log.Fatalf("[WRAP] init keys: %v", err)
@@ -490,10 +559,16 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 	if adminID == 0 {
 		return
 	}
+	botTokenGlobal = token
+	botAdminIDGlobal = adminID
 
 	// Устанавливаем команды для синей кнопки Menu
 	go func() {
-		cmds := `{"commands":[{"command":"new","description":"Создать временный пароль"},{"command":"list","description":"Управление доступами"}]}`
+		cmds := `{"commands":[
+        {"command":"new","description":"Создать подписку"},
+        {"command":"list","description":"Список подписок"},
+        {"command":"panel","description":"Панель управления"}
+]}`
 		resp, err := http.Post(fmt.Sprintf("https://api.telegram.org/bot%s/setMyCommands", token), "application/json", strings.NewReader(cmds))
 		if err == nil {
 			resp.Body.Close()
@@ -504,14 +579,14 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 	client := &http.Client{Timeout: 65 * time.Second}
 
 	// Состояние ожидания ввода
-	var waitingForDays bool
-	var waitingForPorts bool
-	var waitingForHash bool
-	var targetPassword string
+	//var waitingForDays bool
+	//var tgState.WaitingForPorts bool
+	//var tgState.WaitingForHash bool
+	//var tgState.TargetPassword string
 
-	var tempDays int
-	var tempMaxDevs int
-	var tempPorts string // "dtls,wg,tun"
+	//var tgState.TempDays int
+	//var tgState.TempMaxDevs int
+	//var tgState.TempPorts string // "dtls,wg,tun"
 
 	for {
 		url := fmt.Sprintf("https://api.telegram.org/bot%s/getUpdates?timeout=60&offset=%d", token, offset)
@@ -545,6 +620,7 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 		}
 
 		err = json.NewDecoder(resp.Body).Decode(&res)
+
 		resp.Body.Close()
 		if err != nil {
 			time.Sleep(2 * time.Second)
@@ -557,6 +633,16 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 			// ═══ Callback кнопки ═══
 			if u.CallbackQuery != nil && u.CallbackQuery.Message.Chat.ID == adminID {
 				data := u.CallbackQuery.Data
+				log.Println("CALLBACK:", data)
+				if handleCallback(
+					token,
+					adminID,
+					data,
+					u.CallbackQuery.Message.MessageID,
+					wgDev,
+				) {
+					continue
+				}
 				answerCallback(token, u.CallbackQuery.ID)
 
 				if strings.HasPrefix(data, "viewpass_") {
@@ -613,22 +699,49 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 					hasDevices := false
 
 					// Legacy
+					// Legacy
 					if entry.DeviceID != "" && len(entry.DeviceIDs) == 0 {
 						hasDevices = true
 						dev, devExists := db.Devices[entry.DeviceID]
 						if devExists {
-							txt += fmt.Sprintf("• ID: `%s`\n  IP: `%s`\n  📊 ↑%.1f MB / ↓%.1f MB\n", entry.DeviceID, dev.IP, float64(dev.UpBytes)/(1024*1024), float64(dev.DownBytes)/(1024*1024))
+							name := dev.DeviceName
+							if name == "" {
+								name = entry.DeviceID
+							}
+
+							txt += fmt.Sprintf(
+								"• 📱 %s\n  ID: `%s`\n  IP: `%s`\n  📊 ↑%.1f MB / ↓%.1f MB\n",
+								name,
+								entry.DeviceID,
+								dev.IP,
+								float64(dev.UpBytes)/(1024*1024),
+								float64(dev.DownBytes)/(1024*1024),
+							)
 						} else {
 							txt += fmt.Sprintf("• ID: `%s` (удалено)\n", entry.DeviceID)
 						}
 					}
 
 					// Array
+					// Array
 					for i, id := range entry.DeviceIDs {
 						hasDevices = true
 						dev, devExists := db.Devices[id]
 						if devExists {
-							txt += fmt.Sprintf("• [%d] ID: `%s`\n  IP: `%s`\n  📊 ↑%.1f MB / ↓%.1f MB\n", i+1, id, dev.IP, float64(dev.UpBytes)/(1024*1024), float64(dev.DownBytes)/(1024*1024))
+							name := dev.DeviceName
+							if name == "" {
+								name = id
+							}
+
+							txt += fmt.Sprintf(
+								"• [%d] 📱 %s\n  ID: `%s`\n  IP: `%s`\n  📊 ↑%.1f MB / ↓%.1f MB\n",
+								i+1,
+								name,
+								id,
+								dev.IP,
+								float64(dev.UpBytes)/(1024*1024),
+								float64(dev.DownBytes)/(1024*1024),
+							)
 						} else {
 							txt += fmt.Sprintf("• [%d] ID: `%s` (удалено)\n", i+1, id)
 						}
@@ -639,16 +752,6 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 						"text":          "📂 Получить .conf файл",
 						"callback_data": "getfile_" + pass,
 					})
-					if !hasDevices {
-						txt += "_Ожидает первого подключения..._\n"
-					} else {
-						kb = append(kb, map[string]interface{}{
-							"text":          "🗑 Отвязать ВСЕ устройства",
-							"callback_data": "unbind_" + pass,
-						})
-					}
-
-					dbMutex.Unlock()
 					if entry.IsDeactivated {
 						kb = append(kb, map[string]interface{}{
 							"text":          "✅ Активировать",
@@ -660,10 +763,27 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 							"callback_data": "deact_" + pass,
 						})
 					}
+					if !hasDevices {
+						txt += "_Ожидает первого подключения..._\n"
+					} else {
+						kb = append(kb, map[string]interface{}{
+							"text":          "🗑 Отвязать ВСЕ устройства",
+							"callback_data": "unbind_" + pass,
+						})
+					}
+
+					dbMutex.Unlock()
+
 					kb = append(kb, map[string]interface{}{
-						"text":          "❌ Удалить пароль",
-						"callback_data": "delpass_" + pass,
+						"text":          "📅 Управление сроком",
+						"callback_data": "expiremenu_" + pass,
 					})
+
+					kb = append(kb, map[string]interface{}{
+						"text":          "🗑 Удалить подписку",
+						"callback_data": "confirm_delsub_" + pass,
+					})
+
 					kb = append(kb, map[string]interface{}{
 						"text":          "◀️ Назад к списку",
 						"callback_data": "backlist",
@@ -671,8 +791,17 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 					var keyboard [][]map[string]interface{}
 					for _, btn := range kb {
 						keyboard = append(keyboard, []map[string]interface{}{btn})
+
 					}
-					sendTelegram(token, adminID, txt, map[string]interface{}{"inline_keyboard": keyboard})
+					editTelegram(
+						token,
+						adminID,
+						u.CallbackQuery.Message.MessageID,
+						txt,
+						map[string]interface{}{
+							"inline_keyboard": keyboard,
+						},
+					)
 
 				} else if strings.HasPrefix(data, "deact_") {
 					pass := strings.TrimPrefix(data, "deact_")
@@ -698,7 +827,22 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 						saveDB()
 					}
 					dbMutex.Unlock()
-					sendTelegram(token, adminID, fmt.Sprintf("⏸ Пароль `%s` деактивирован", pass), nil)
+					editTelegram(
+						token,
+						adminID,
+						u.CallbackQuery.Message.MessageID,
+						fmt.Sprintf("⏸ Пароль `%s` деактивирован\n\nНажмите кнопку подписки в списке для обновления информации.", pass),
+						map[string]interface{}{
+							"inline_keyboard": [][]map[string]interface{}{
+								{
+									{
+										"text":          "◀️ Назад к списку",
+										"callback_data": "backlist",
+									},
+								},
+							},
+						},
+					)
 
 				} else if strings.HasPrefix(data, "react_") {
 					pass := strings.TrimPrefix(data, "react_")
@@ -709,10 +853,25 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 						saveDB()
 					}
 					dbMutex.Unlock()
-					sendTelegram(token, adminID, fmt.Sprintf("✅ Пароль `%s` активирован", pass), nil)
+					editTelegram(
+						token,
+						adminID,
+						u.CallbackQuery.Message.MessageID,
+						fmt.Sprintf("✅ Пароль `%s` активирован\n\nНажмите кнопку подписки в списке для обновления информации.", pass),
+						map[string]interface{}{
+							"inline_keyboard": [][]map[string]interface{}{
+								{
+									{
+										"text":          "◀️ Назад к списку",
+										"callback_data": "backlist",
+									},
+								},
+							},
+						},
+					)
 
 				} else if data == "mainlink" {
-					targetPassword = "main"
+					tgState.TargetPassword = "main"
 					var keyboard [][]map[string]interface{}
 					keyboard = append(keyboard, []map[string]interface{}{
 						{"text": "Да", "callback_data": "ports_def"},
@@ -721,35 +880,45 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 					sendTelegram(token, adminID, "⚙️ Использовать стандартные порты для главного пароля (56000, 56001, 9000)?", map[string]interface{}{"inline_keyboard": keyboard})
 
 				} else if data == "ports_def" {
-					tempPorts = "56000,56001,9000"
-					waitingForHash = true
-					sendTelegram(token, adminID, "🔑 Укажите VK хеш (или несколько через запятую):", nil)
+					tgState.TempPorts = "56000,56001,9000"
+					tgState.WaitingForPorts = true
 
+					cmd := strings.Join(db.VKHashes, ",")
+					handleTelegramInput(token, adminID, cmd, wgDev)
 				} else if data == "ports_custom" {
-					waitingForPorts = true
+					tgState.WaitingForPorts = true
 					sendTelegram(token, adminID, "⚙️ Укажите через запятую 3 порта (DTLS,WG,TUN):\nНапример: 56000,56001,9000", nil)
 
 				} else if strings.HasPrefix(data, "getfile_") {
 					pass := strings.TrimPrefix(data, "getfile_")
+
 					dbMutex.Lock()
 					entry, exists := db.Passwords[pass]
-					if exists && entry != nil {
+
+					if !exists || entry == nil {
+						dbMutex.Unlock()
+						sendTelegram(token, adminID, "❌ Пароль не найден", nil)
+					} else {
 						srvIP := getPublicIP()
+
 						configJSON := fmt.Sprintf(`{
-  "name": "qWDTT - %s",
+  "name": "%s",
   "peer": "%s",
   "vkHashes": "%s",
   "workersPerHash": 16,
   "listenPort": 9000,
   "password": "%s"
-}`, srvIP, srvIP, entry.VkHash, pass)
+}`,
+							passwordEntryLabel(entry, pass, 0),
+							srvIP,
+							entry.VkHash,
+							pass,
+						)
+
 						dbMutex.Unlock()
 
 						fileName := fmt.Sprintf("qwdtt_%s.conf", pass)
 						sendTelegramFile(token, adminID, fileName, []byte(configJSON))
-					} else {
-						dbMutex.Unlock()
-						sendTelegram(token, adminID, "❌ Пароль не найден", nil)
 					}
 
 				} else if strings.HasPrefix(data, "unbind_") {
@@ -781,6 +950,191 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 					dbMutex.Unlock()
 					sendTelegram(token, adminID, fmt.Sprintf("✅ Все устройства отвязаны от пароля `%s`", pass), nil)
 
+				} else if strings.HasPrefix(data, "extend7_") {
+					pass := strings.TrimPrefix(data, "extend7_")
+					extendPassword(pass, 7)
+					sendTelegram(token, adminID,
+						fmt.Sprintf("✅ Подписка `%s` продлена на 7 дней", pass),
+						nil,
+					)
+
+				} else if strings.HasPrefix(data, "extend30_") {
+					pass := strings.TrimPrefix(data, "extend30_")
+					extendPassword(pass, 30)
+					sendTelegram(token, adminID,
+						fmt.Sprintf("✅ Подписка `%s` продлена на 30 дней", pass),
+						nil,
+					)
+
+				} else if strings.HasPrefix(data, "extend90_") {
+					pass := strings.TrimPrefix(data, "extend90_")
+					extendPassword(pass, 90)
+					sendTelegram(token, adminID,
+						fmt.Sprintf("✅ Подписка `%s` продлена на 90 дней", pass),
+						nil,
+					)
+
+				} else if strings.HasPrefix(data, "expiremenu_") {
+					pass := strings.TrimPrefix(data, "expiremenu_")
+
+					dbMutex.Lock()
+					entry, exists := db.Passwords[pass]
+
+					var txt string
+					if exists && entry != nil {
+						if entry.ExpiresAt > 0 {
+							expireTime := time.Unix(entry.ExpiresAt, 0)
+							remaining := int(time.Until(expireTime).Hours() / 24)
+							if remaining < 0 {
+								remaining = 0
+							}
+
+							txt = fmt.Sprintf(
+								"📅 *Управление сроком*\n\nТекущий срок: %s\nОсталось: %d дней",
+								expireTime.Format("02.01.2006"),
+								remaining,
+							)
+						} else {
+							txt = "📅 *Управление сроком*\n\nПодписка бессрочная."
+						}
+					} else {
+						txt = "❌ Подписка не найдена."
+					}
+					dbMutex.Unlock()
+
+					editTelegram(
+						token,
+						adminID,
+						u.CallbackQuery.Message.MessageID,
+						txt,
+						map[string]interface{}{
+							"inline_keyboard": [][]map[string]interface{}{
+								{
+									{
+										"text":          "➕ Продлить",
+										"callback_data": "extend_" + pass,
+									},
+								},
+								{
+									{
+										"text":          "✏️ Установить остаток дней",
+										"callback_data": "setdays_" + pass,
+									},
+								},
+								{
+									{
+										"text":          "◀️ Назад",
+										"callback_data": "viewpass_" + pass,
+									},
+								},
+							},
+						},
+					)
+
+				} else if strings.HasPrefix(data, "extend_") {
+					pass := strings.TrimPrefix(data, "extend_")
+
+					tgState.TargetPassword = pass
+					tgState.WaitingExtendDays = true
+
+					sendTelegram(
+						token,
+						adminID,
+						"📅 На сколько дней продлить подписку?\n\nВведите число дней:",
+						nil,
+					)
+
+				} else if strings.HasPrefix(data, "setdays_") {
+					pass := strings.TrimPrefix(data, "setdays_")
+
+					tgState.TargetPassword = pass
+					tgState.WaitingSetDays = true
+
+					sendTelegram(
+						token,
+						adminID,
+						"✏️ Введите, сколько дней должно остаться у подписки:",
+						nil,
+					)
+
+				} else if strings.HasPrefix(data, "confirm_delsub_") {
+					pass := strings.TrimPrefix(data, "confirm_delsub_")
+
+					editTelegram(
+						token,
+						adminID,
+						u.CallbackQuery.Message.MessageID,
+						"⚠️ *Удалить подписку?*\n\nБудут удалены:\n• подписка\n• пароль\n• все устройства\n• доступ WireGuard\n\nЭто действие необратимо.",
+						map[string]interface{}{
+							"inline_keyboard": [][]map[string]interface{}{
+								{
+									{
+										"text":          "🗑 Да, удалить",
+										"callback_data": "delsub_" + pass,
+									},
+								},
+								{
+									{
+										"text":          "❌ Отмена",
+										"callback_data": "viewpass_" + pass,
+									},
+								},
+							},
+						},
+					)
+
+				} else if strings.HasPrefix(data, "delsub_") {
+					pass := strings.TrimPrefix(data, "delsub_")
+
+					dbMutex.Lock()
+
+					// Удаляем подписку у пользователя
+					for _, user := range db.Users {
+						if user.SubscriptionID == pass {
+							user.SubscriptionStatus = "inactive"
+							user.SubscriptionPlan = ""
+							user.SubscriptionExpires = 0
+							user.DeviceLimit = 0
+							user.SubscriptionID = ""
+							break
+						}
+					}
+
+					// Удаляем пароль и все устройства
+					entry, exists := db.Passwords[pass]
+					if exists && entry != nil {
+
+						if entry.DeviceID != "" {
+							if dev, ok := db.Devices[entry.DeviceID]; ok {
+								pubHex, _ := b64ToHex(dev.PubKey)
+								wgDev.IpcSet(fmt.Sprintf("public_key=%s\nremove=true\n", pubHex))
+								delete(db.Devices, entry.DeviceID)
+							}
+						}
+
+						for _, id := range entry.DeviceIDs {
+							if dev, ok := db.Devices[id]; ok {
+								pubHex, _ := b64ToHex(dev.PubKey)
+								wgDev.IpcSet(fmt.Sprintf("public_key=%s\nremove=true\n", pubHex))
+								delete(db.Devices, id)
+							}
+						}
+
+						delete(db.Passwords, pass)
+						serverWrapKeys.RemovePassword(pass)
+					}
+
+					saveDB()
+					dbMutex.Unlock()
+
+					sendPasswordList(
+						token,
+						adminID,
+						u.CallbackQuery.Message.MessageID,
+						true,
+						wgDev,
+					)
+
 				} else if strings.HasPrefix(data, "delpass_") {
 					pass := strings.TrimPrefix(data, "delpass_")
 					dbMutex.Lock()
@@ -807,7 +1161,14 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 					serverWrapKeys.RemovePassword(pass)
 					saveDB()
 					dbMutex.Unlock()
-					sendTelegram(token, adminID, fmt.Sprintf("✅ Пароль `%s` и его устройства удалены", pass), nil)
+
+					sendPasswordList(
+						token,
+						adminID,
+						u.CallbackQuery.Message.MessageID,
+						true,
+						wgDev,
+					)
 
 				} else if strings.HasPrefix(data, "deldev_") {
 					devID := strings.TrimPrefix(data, "deldev_")
@@ -838,7 +1199,13 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 					sendTelegram(token, adminID, fmt.Sprintf("✅ Устройство `%s` удалено", devID), nil)
 
 				} else if data == "backlist" {
-					sendPasswordList(token, adminID, wgDev)
+					sendPasswordList(
+						token,
+						adminID,
+						u.CallbackQuery.Message.MessageID,
+						true,
+						wgDev,
+					)
 				}
 			}
 
@@ -849,219 +1216,75 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 			}
 
 			cmd := strings.TrimSpace(msg.Text)
+			if handleCommand(token, adminID, cmd, wgDev) {
+				continue
+			}
+			if handleTelegramInput(token, adminID, cmd, wgDev) {
+				continue
+			}
+			if tgState.WaitingExtendDays {
+				days, err := strconv.Atoi(cmd)
+				if err != nil || days <= 0 {
+					sendTelegram(token, adminID, "❌ Введите положительное число дней.", nil)
+					continue
+				}
 
+				tgState.WaitingExtendDays = false
+
+				dbMutex.Lock()
+				if entry, ok := db.Passwords[tgState.TargetPassword]; ok && entry != nil {
+
+					now := time.Now().Unix()
+
+					if entry.ExpiresAt < now {
+						entry.ExpiresAt = now
+					}
+
+					entry.ExpiresAt += int64(days * 24 * 3600)
+
+					saveDB()
+				}
+				dbMutex.Unlock()
+
+				sendTelegram(
+					token,
+					adminID,
+					fmt.Sprintf("✅ Подписка продлена на %d дней.", days),
+					nil,
+				)
+
+				tgState.TargetPassword = ""
+				continue
+			}
+
+			if tgState.WaitingSetDays {
+				days, err := strconv.Atoi(cmd)
+				if err != nil || days < 0 {
+					sendTelegram(token, adminID, "❌ Введите число дней.", nil)
+					continue
+				}
+
+				tgState.WaitingSetDays = false
+
+				dbMutex.Lock()
+				if entry, ok := db.Passwords[tgState.TargetPassword]; ok && entry != nil {
+					entry.ExpiresAt = time.Now().Add(time.Duration(days) * 24 * time.Hour).Unix()
+					saveDB()
+				}
+				dbMutex.Unlock()
+
+				sendTelegram(
+					token,
+					adminID,
+					fmt.Sprintf("✅ Остаток установлен: %d дней.", days),
+					nil,
+				)
+
+				tgState.TargetPassword = ""
+				continue
+			}
 			// Обработка ввода количества дней
-			if waitingForDays {
-				waitingForDays = false
-				parts := strings.Fields(cmd)
-				if len(parts) == 0 {
-					sendTelegram(token, adminID, "❌ Неверное значение. Укажите число от 1 до 365, или отправьте /new заново.", nil)
-					continue
-				}
-				days, parseErr := strconv.Atoi(parts[0])
-				if parseErr != nil || days < 1 || days > 365 {
-					sendTelegram(token, adminID, "❌ Неверное значение. Укажите число от 1 до 365, или отправьте /new заново.", nil)
-					continue
-				}
 
-				maxDevs := 1
-				if len(parts) > 1 {
-					if devs, err := strconv.Atoi(parts[1]); err == nil && devs >= 1 {
-						maxDevs = devs
-					}
-				}
-
-				tempDays = days
-				tempMaxDevs = maxDevs
-				
-				var keyboard [][]map[string]interface{}
-				keyboard = append(keyboard, []map[string]interface{}{
-					{"text": "Да", "callback_data": "ports_def"},
-					{"text": "Нет", "callback_data": "ports_custom"},
-				})
-				sendTelegram(token, adminID, "⚙️ Использовать стандартные порты (56000, 56001, 9000)?", map[string]interface{}{"inline_keyboard": keyboard})
-				continue
-			}
-
-			if waitingForPorts {
-				parts := strings.Split(cmd, ",")
-				if len(parts) != 3 {
-					sendTelegram(token, adminID, "❌ Неверный формат. Укажите 3 порта через запятую (например: 56000,56001,9000):", nil)
-					continue
-				}
-				p1 := strings.TrimSpace(parts[0])
-				p2 := strings.TrimSpace(parts[1])
-				p3 := strings.TrimSpace(parts[2])
-				
-				if _, err := strconv.Atoi(p1); err != nil {
-					sendTelegram(token, adminID, "❌ Неверный порт. Повторите ввод:", nil)
-					continue
-				}
-				if _, err := strconv.Atoi(p2); err != nil {
-					sendTelegram(token, adminID, "❌ Неверный порт. Повторите ввод:", nil)
-					continue
-				}
-				if _, err := strconv.Atoi(p3); err != nil {
-					sendTelegram(token, adminID, "❌ Неверный порт. Повторите ввод:", nil)
-					continue
-				}
-				
-				waitingForPorts = false
-				tempPorts = fmt.Sprintf("%s,%s,%s", p1, p2, p3)
-				waitingForHash = true
-				sendTelegram(token, adminID, "🔑 Укажите VK хеш (или несколько через запятую):", nil)
-				continue
-			}
-
-			if waitingForHash {
-				hash := strings.ReplaceAll(cmd, " ", "")
-				if strings.Contains(hash, "http") || strings.Contains(hash, "/") {
-					sendTelegram(token, adminID, "❌ Пожалуйста, отправьте только хеш (или несколько хешей через запятую). Ссылки не поддерживаются.", nil)
-					continue
-				}
-				if hash == "" {
-					sendTelegram(token, adminID, "❌ Хеш не должен быть пустым.", nil)
-					continue
-				}
-				waitingForHash = false
-
-				if targetPassword == "main" {
-					targetPassword = ""
-					srvIP := getPublicIP()
-					pts := strings.Split(tempPorts, ",")
-					link := fmt.Sprintf("wdtt://%s:%s:%s:%s:%s:%s", srvIP, pts[0], pts[1], pts[2], db.MainPassword, hash)
-
-					nameEsc := neturl.QueryEscape(fmt.Sprintf("qWDTT - Main (%s)", srvIP))
-					peerEsc := neturl.QueryEscape(srvIP)
-					hashesEsc := neturl.QueryEscape(hash)
-					passEsc := neturl.QueryEscape(db.MainPassword)
-					qwdttLink := fmt.Sprintf("qwdtt://config?name=%s&peer=%s&hashes=%s&workers=16&port=9000&pass=%s", nameEsc, peerEsc, hashesEsc, passEsc)
-
-					msgText := fmt.Sprintf("🔗 *Ссылка для главного пароля:*\n`%s`\n\n🔗 *Быстрая ссылка qWDTT:* `%s`", link, qwdttLink)
-					sendTelegram(token, adminID, msgText, nil)
-
-					configJSON := fmt.Sprintf(`{
-  "name": "qWDTT - Main (%s)",
-  "peer": "%s",
-  "vkHashes": "%s",
-  "workersPerHash": 16,
-  "listenPort": 9000,
-  "password": "%s"
-}`, srvIP, srvIP, hash, db.MainPassword)
-					fileName := fmt.Sprintf("qwdtt_main_%s.conf", srvIP)
-					sendTelegramFile(token, adminID, fileName, []byte(configJSON))
-					continue
-				}
-
-				dbMutex.Lock()
-				if cleanupExpiredPasswordsLocked(wgDev) > 0 {
-					saveDB()
-				}
-				if len(db.Passwords) >= maxGeneratedPasswords {
-					dbMutex.Unlock()
-					sendTelegram(token, adminID, fmt.Sprintf("❌ Лимит паролей: максимум %d активных. Удалите ненужный пароль через /list.", maxGeneratedPasswords), nil)
-					continue
-				}
-				newPass := ""
-				for i := 0; i < 10; i++ {
-					candidate := generatePassword()
-					if _, exists := db.Passwords[candidate]; !exists {
-						newPass = candidate
-						break
-					}
-				}
-				if newPass == "" {
-					dbMutex.Unlock()
-					sendTelegram(token, adminID, "❌ Не удалось создать уникальный пароль. Повторите /new.", nil)
-					continue
-				}
-				if err := serverWrapKeys.AddPassword(newPass); err != nil {
-					dbMutex.Unlock()
-					sendTelegram(token, adminID, "❌ Не удалось создать WRAP-ключ для пароля. Повторите /new.", nil)
-					continue
-				}
-				expiresAt := time.Now().Add(time.Duration(tempDays) * 24 * time.Hour).Unix()
-				newLabel := nextPasswordLabel()
-				db.Passwords[newPass] = &PasswordEntry{
-					Label:      newLabel,
-					ExpiresAt:  expiresAt,
-					MaxDevices: tempMaxDevs,
-					VkHash:     hash,
-					Ports:      tempPorts,
-				}
-				saveDB()
-				dbMutex.Unlock()
-
-				expDate := time.Unix(expiresAt, 0).Format("02.01.2006")
-				srvIP := getPublicIP()
-				pts := strings.Split(tempPorts, ",")
-				link := fmt.Sprintf("wdtt://%s:%s:%s:%s:%s:%s", srvIP, pts[0], pts[1], pts[2], newPass, hash)
-
-				nameEsc := neturl.QueryEscape(newLabel)
-				peerEsc := neturl.QueryEscape(srvIP)
-				hashesEsc := neturl.QueryEscape(hash)
-				passEsc := neturl.QueryEscape(newPass)
-				qwdttLink := fmt.Sprintf("qwdtt://config?name=%s&peer=%s&hashes=%s&workers=16&port=9000&pass=%s", nameEsc, peerEsc, hashesEsc, passEsc)
-
-				msgText := fmt.Sprintf("👤 Имя: *%s*\n🔑 Новый пароль:\n`%s`\n\n⏰ Действует %d дн. (до %s)\n📱 Лимит: %d устройств\nОжидает первого подключения\n\n🔗 *Быстрая ссылка qWDTT:* `%s`\n\n🔗 *Legacy ссылка:* `%s`", newLabel, newPass, tempDays, expDate, tempMaxDevs, qwdttLink, link)
-				sendTelegram(token, adminID, msgText, nil)
-
-				configJSON := fmt.Sprintf(`{
-  "name": "%s",
-  "peer": "%s",
-  "vkHashes": "%s",
-  "workersPerHash": 16,
-  "listenPort": 9000,
-  "password": "%s"
-}`, newLabel, srvIP, hash, newPass)
-				fileName := fmt.Sprintf("qwdtt_%s.conf", newPass)
-				sendTelegramFile(token, adminID, fileName, []byte(configJSON))
-				continue
-			}
-
-			if cmd == "/start" || cmd == "/help" {
-				sendTelegram(token, adminID, "🤖 *qWDTT VPN Manager*\n\n/new — Создать пароль\n/list — Список паролей", nil)
-
-			} else if strings.HasPrefix(cmd, "/new ") || cmd == "/new" {
-				args := strings.Fields(strings.TrimPrefix(cmd, "/new"))
-				if len(args) >= 1 {
-					days, parseErr := strconv.Atoi(args[0])
-					if parseErr == nil && days >= 1 && days <= 365 {
-						maxDevs := 1
-						if len(args) >= 2 {
-							if devs, err := strconv.Atoi(args[1]); err == nil && devs >= 1 {
-								maxDevs = devs
-							}
-						}
-
-						tempDays = days
-						tempMaxDevs = maxDevs
-
-						var keyboard [][]map[string]interface{}
-						keyboard = append(keyboard, []map[string]interface{}{
-							{"text": "Да", "callback_data": "ports_def"},
-							{"text": "Нет", "callback_data": "ports_custom"},
-						})
-						sendTelegram(token, adminID, "⚙️ Использовать стандартные порты (56000, 56001, 9000)?", map[string]interface{}{"inline_keyboard": keyboard})
-						continue
-					}
-				}
-				dbMutex.Lock()
-				if cleanupExpiredPasswordsLocked(wgDev) > 0 {
-					saveDB()
-				}
-				if len(db.Passwords) >= maxGeneratedPasswords {
-					dbMutex.Unlock()
-					sendTelegram(token, adminID, fmt.Sprintf("❌ Лимит паролей: максимум %d активных. Удалите ненужный пароль через /list.", maxGeneratedPasswords), nil)
-					continue
-				}
-				dbMutex.Unlock()
-				waitingForDays = true
-				sendTelegram(token, adminID, "📅 Введите срок действия пароля в днях (1–365) и (опционально) лимит устройств через пробел:\n\n_Примеры:_\n`30` — месяц, 1 устройство\n`30 3` — месяц, до 3 устройств", nil)
-
-			} else if cmd == "/list" {
-				sendPasswordList(token, adminID, wgDev)
-			}
 		}
 	}
 }
@@ -1091,13 +1314,33 @@ func upsertPeerInWG(wgDev *device.Device, dev *ClientDevice) {
 func cleanupExpiredPasswordsLocked(wgDev *device.Device) int {
 	removed := 0
 	for p, entry := range db.Passwords {
-		if isPasswordExpired(entry) {
-			if entry != nil && entry.DeviceID != "" {
-				removePeerFromWG(wgDev, db.Devices[entry.DeviceID])
-				delete(db.Devices, entry.DeviceID)
+		if isPasswordExpired(entry) && !entry.IsDeactivated {
+
+			if entry.DeviceID != "" {
+				removePeerFromWG(
+					wgDev,
+					db.Devices[entry.DeviceID],
+				)
 			}
-			delete(db.Passwords, p)
-			serverWrapKeys.RemovePassword(p)
+
+			for _, id := range entry.DeviceIDs {
+				removePeerFromWG(
+					wgDev,
+					db.Devices[id],
+				)
+			}
+
+			entry.IsDeactivated = true
+
+			log.Printf(
+				"[SUB] Подписка %s истекла и деактивирована",
+				p,
+			)
+			expiredSubscriptions = append(
+				expiredSubscriptions,
+				passwordEntryLabel(entry, p, 0),
+			)
+
 			removed++
 		}
 	}
@@ -1114,7 +1357,10 @@ func cleanupExpiredPasswords(wgDev *device.Device) int {
 	return removed
 }
 
-func expiredPasswordJanitor(ctx context.Context, wgDev *device.Device) {
+func expiredPasswordJanitor(
+	ctx context.Context,
+	wgDev *device.Device,
+) {
 	ticker := time.NewTicker(1 * time.Hour)
 	defer ticker.Stop()
 	for {
@@ -1123,7 +1369,31 @@ func expiredPasswordJanitor(ctx context.Context, wgDev *device.Device) {
 			return
 		case <-ticker.C:
 			if removed := cleanupExpiredPasswords(wgDev); removed > 0 {
-				log.Printf("[DB] Удалено истёкших паролей: %d", removed)
+				log.Printf(
+					"[DB] Деактивировано истёкших подписок: %d",
+					removed,
+				)
+				if botTokenGlobal != "" {
+
+					msg := fmt.Sprintf(
+						"⏰ *Истекли подписки (%d):*\n\n",
+						removed,
+					)
+
+					for _, name := range expiredSubscriptions {
+						msg += "• " + name + "\n"
+					}
+
+					sendTelegram(
+						botTokenGlobal,
+						botAdminIDGlobal,
+						msg,
+						nil,
+					)
+
+					expiredSubscriptions = nil
+				}
+
 			}
 		}
 	}
@@ -1142,7 +1412,13 @@ func syncPersistedPeersToWG(wgDev *device.Device) {
 	}
 }
 
-func sendPasswordList(token string, adminID int64, wgDev *device.Device) {
+func sendPasswordList(
+	token string,
+	adminID int64,
+	messageID int,
+	edit bool,
+	wgDev *device.Device,
+) {
 	dbMutex.Lock()
 	defer dbMutex.Unlock()
 
@@ -1194,12 +1470,44 @@ func sendPasswordList(token string, adminID int64, wgDev *device.Device) {
 	var replyMarkup interface{}
 	if len(inlineKb) > 0 {
 		var keyboard [][]map[string]interface{}
+
 		for _, btn := range inlineKb {
-			keyboard = append(keyboard, []map[string]interface{}{btn})
+			keyboard = append(
+				keyboard,
+				[]map[string]interface{}{btn},
+			)
 		}
-		replyMarkup = map[string]interface{}{"inline_keyboard": keyboard}
+
+		keyboard = append(
+			keyboard,
+			[]map[string]interface{}{
+				{
+					"text":          "◀️ Назад",
+					"callback_data": "panel_subs",
+				},
+			},
+		)
+
+		replyMarkup = map[string]interface{}{
+			"inline_keyboard": keyboard,
+		}
 	}
-	sendTelegram(token, adminID, txt, replyMarkup)
+	if edit {
+		editTelegram(
+			token,
+			adminID,
+			messageID,
+			txt,
+			replyMarkup,
+		)
+	} else {
+		sendTelegram(
+			token,
+			adminID,
+			txt,
+			replyMarkup,
+		)
+	}
 }
 
 func answerCallback(token, callbackID string) {
@@ -1228,6 +1536,53 @@ func sendTelegram(token string, chatID int64, text string, replyMarkup interface
 	}
 	body, _ := json.Marshal(payload)
 	http.Post(url, "application/json", bytes.NewBuffer(body))
+}
+
+func editTelegram(
+	token string,
+	chatID int64,
+	messageID int,
+	text string,
+	replyMarkup interface{},
+) {
+	url := fmt.Sprintf(
+		"https://api.telegram.org/bot%s/editMessageText",
+		token,
+	)
+
+	payload := map[string]interface{}{
+		"chat_id":    chatID,
+		"message_id": messageID,
+		"text":       text,
+		"parse_mode": "Markdown",
+	}
+
+	if replyMarkup != nil {
+		payload["reply_markup"] = replyMarkup
+	}
+
+	body, _ := json.Marshal(payload)
+
+	resp, err := http.Post(
+		url,
+		"application/json",
+		bytes.NewBuffer(body),
+	)
+
+	if err != nil {
+		log.Println("[EDIT ERROR]", err)
+		return
+	}
+
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+
+	log.Printf(
+		"[EDIT RESPONSE] status=%d body=%s",
+		resp.StatusCode,
+		string(respBody),
+	)
 }
 
 func sendTelegramFile(token string, chatID int64, fileName string, fileContent []byte) {
@@ -1904,7 +2259,20 @@ func main() {
 	adminID := flag.String("admin", "", "Telegram Admin ID")
 	botToken := flag.String("bot-token", "", "Telegram Bot Token")
 	dnsFlag := flag.String("dns", "8.8.8.8", "DNS серверы для клиентов")
+	ykShopID := flag.String(
+		"yookassa-shop-id",
+		"",
+		"YooKassa Shop ID",
+	)
+
+	ykSecretKey := flag.String(
+		"yookassa-secret-key",
+		"",
+		"YooKassa Secret Key",
+	)
 	flag.Parse()
+	yookassaShopID = *ykShopID
+	yookassaSecretKey = *ykSecretKey
 	dns = *dnsFlag
 
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
@@ -1940,6 +2308,9 @@ func main() {
 	}()
 
 	initDB(*configDir, *mainPass, *adminID, *botToken)
+	StartOrderCleanup()
+	LoadSiteConfig()
+	log.Printf("[DEBUG] siteConfig.VkHash = %q", siteConfig.VkHash)
 
 	keys, err := loadOrGenerateKeys(*configDir)
 	if err != nil {
@@ -1952,6 +2323,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("[WG] Запуск: %v", err)
 	}
+
 	globalWgDev = wgDev
 	if removed := cleanupExpiredPasswords(wgDev); removed > 0 {
 		log.Printf("[DB] Удалено истёкших паролей при старте: %d", removed)
@@ -1963,19 +2335,122 @@ func main() {
 	}()
 
 	go statsLoop(ctx, *configDir)
-	go expiredPasswordJanitor(ctx, wgDev)
+	go expiredPasswordJanitor(
+		ctx,
+		wgDev,
+	)
 	go botLoop(*botToken, *adminID, wgDev)
 
 	// Запуск HTTP Control API
 	go func() {
+
 		mux := http.NewServeMux()
+
 		mux.HandleFunc("/api/profile/status", handleAPIProfileStatus)
 		mux.HandleFunc("/api/profile/unbind", handleAPIProfileUnbind)
 
-		log.Printf("[API] Запуск HTTP API на %s (TCP)...", *listen)
-		if err := http.ListenAndServe(*listen, mux); err != nil {
-			log.Printf("[API] [ERR] Ошибка запуска HTTP API: %v", err)
+		mux.HandleFunc("/api/auth/register", registerHandler)
+		mux.HandleFunc("/api/auth/login", loginHandler)
+
+		mux.HandleFunc("/api/user", userHandler)
+		mux.HandleFunc("/api/subscription", subscriptionHandler)
+		mux.HandleFunc("/api/subscription/url", subscriptionURLHandler)
+		mux.HandleFunc("/api/devices", devicesHandler)
+		mux.HandleFunc("/api/device/name", deviceNameHandler)
+		mux.HandleFunc("/api/subscription/link", linkSubscriptionHandler)
+		mux.HandleFunc("/api/device/unbind", unbindDeviceHandler)
+		mux.HandleFunc("/api/apk", apkHandler)
+		mux.HandleFunc("/api/orders/create", createOrderHandler)
+		mux.HandleFunc("/api/orders/calculate", calculatePriceHandler)
+		mux.HandleFunc("/api/orders/retry", retryOrderHandler)
+		mux.HandleFunc("/api/orders/cancel", cancelOrderHandler)
+		mux.HandleFunc("/api/orders", ordersHandler)
+		mux.HandleFunc("/api/vkhashes", func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method {
+			case http.MethodGet:
+				vkHashesHandler(w, r)
+			case http.MethodPost:
+				updateVKHashesHandler(w, r)
+			default:
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			}
+		})
+		mux.HandleFunc("/api/payment/webhook", paymentWebhookHandler)
+		mux.HandleFunc("/api/admin/login", adminLoginHandler)
+		mux.HandleFunc("/api/admin/stats", adminStatsHandler)
+		mux.HandleFunc("/api/admin/change-password", changePasswordHandler)
+
+		mux.HandleFunc("/api/admin/recent-users", recentUsersHandler)
+		mux.HandleFunc("/api/admin/recent-orders", recentOrdersHandler)
+		mux.HandleFunc("/api/admin/revenue-chart", revenueChartHandler)
+		mux.HandleFunc("/api/admin/system-health", systemHealthHandler)
+		mux.HandleFunc("/api/admin/server", serverInfoHandler)
+		mux.HandleFunc("/api/admin/server/status", adminServerStatusHandler)
+		mux.HandleFunc("/api/admin/server/services", adminServerServicesHandler)
+		mux.HandleFunc("/api/admin/server/services/start", adminServerServiceStartHandler)
+		mux.HandleFunc("/api/admin/server/services/stop", adminServerServiceStopHandler)
+		mux.HandleFunc("/api/admin/server/services/restart", adminServerServiceRestartHandler)
+		mux.HandleFunc("/api/admin/server/diagnostics", adminServerDiagnosticsHandler)
+		mux.HandleFunc("/api/admin/server/diagnostics/run", adminServerDiagnosticsRunHandler)
+		mux.HandleFunc("/api/admin/server/integrity", adminServerIntegrityHandler)
+		mux.HandleFunc("/api/admin/server/integrity/run", adminServerIntegrityRunHandler)
+		mux.HandleFunc("/api/admin/server/configuration", adminServerConfigurationHandler)
+		mux.HandleFunc("/api/admin/server/configuration/reset", adminServerConfigurationResetHandler)
+		mux.HandleFunc("/api/admin/server/events", adminServerEventsHandler)
+		mux.HandleFunc("/api/admin/server/restart", adminServerRestartHandler)
+		mux.HandleFunc("/api/admin/server/reload", adminServerReloadHandler)
+		mux.HandleFunc("/api/admin/server/clear-cache", adminServerClearCacheHandler)
+		mux.HandleFunc("/api/admin/server/reload-wireguard", adminServerReloadWireGuardHandler)
+		mux.HandleFunc("/api/admin/server/restart-bot", adminServerRestartBotHandler)
+		mux.HandleFunc("/api/admin/server/restart-api", adminServerRestartAPIHandler)
+		mux.HandleFunc("/api/admin/users", adminUsersHandler)
+		mux.HandleFunc("/api/admin/user", adminUserHandler)
+		mux.HandleFunc("/api/admin/user/update", adminUserUpdateHandler)
+		mux.HandleFunc("/api/admin/user/delete", adminUserDeleteHandler)
+		mux.HandleFunc("/api/admin/user/block", adminUserBlockHandler)
+		mux.HandleFunc("/api/admin/user/unblock", adminUserUnblockHandler)
+		mux.HandleFunc("/api/admin/user/password", adminUserPasswordHandler)
+		mux.HandleFunc("/api/admin/user/role", adminUserChangeRoleHandler)
+		mux.HandleFunc("/api/admin/user/reset-devices", adminUserResetDevicesHandler)
+		mux.HandleFunc("/api/admin/user/reset-traffic", adminUserResetTrafficHandler)
+		mux.HandleFunc("/api/admin/user/reset-vkhash", adminUserResetVKHashHandler)
+		mux.HandleFunc("/api/admin/user/extend", adminUserExtendHandler)
+		mux.HandleFunc("/api/admin/users/extend-all", adminUsersExtendAllHandler)
+		mux.HandleFunc("/api/admin/user/change-plan", adminUserChangePlanHandler)
+		mux.HandleFunc("/api/admin/devices", adminDevicesHandler)
+
+		mux.HandleFunc("/api/admin/device/unbind", adminDeviceUnbindHandler)
+		mux.HandleFunc("/api/admin/device/delete", adminDeviceDeleteHandler)
+		mux.HandleFunc("/api/admin/device/rename", adminDeviceRenameHandler)
+		mux.HandleFunc("/api/admin/device/reset-traffic", adminDeviceResetTrafficHandler)
+		mux.HandleFunc("/api/admin/subscriptions", adminSubscriptionsHandler)
+		mux.HandleFunc("/api/admin/subscription", adminSubscriptionHandler)
+		mux.HandleFunc("/api/admin/subscription/create", adminSubscriptionCreateHandler)
+		mux.HandleFunc("/api/admin/subscription/extend", adminSubscriptionExtendHandler)
+		mux.HandleFunc("/api/admin/subscription/change-plan", adminSubscriptionChangePlanHandler)
+		mux.HandleFunc("/api/admin/subscription/block", adminSubscriptionBlockHandler)
+		mux.HandleFunc("/api/admin/subscription/unblock", adminSubscriptionUnblockHandler)
+
+		handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+
+			mux.ServeHTTP(w, r)
+		})
+
+		log.Printf("[API] HTTP API started on %s", *listen)
+
+		if err := http.ListenAndServe(*listen, handler); err != nil {
+			log.Printf("[API] %v", err)
 		}
+
 	}()
 
 	addr, _ := net.ResolveUDPAddr("udp", *listen)
@@ -2098,14 +2573,24 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 
 			dev, exists := db.Devices[deviceID]
 			if !exists {
-				dev = &ClientDevice{DeviceID: deviceID, IP: getNextIP()}
+				dev = &ClientDevice{
+					DeviceID: deviceID,
+					IP:       getNextIP(),
+				}
+				db.Devices[deviceID] = dev
+			}
+
+			if dev.PrivKey == "" || dev.PubKey == "" || dev.IP == "" {
+				if dev.IP == "" {
+					dev.IP = getNextIP()
+				}
+
 				privB64, pubB64, keyErr := generateKeyPair()
-				if keyErr == nil && dev.IP != "" {
+				if keyErr == nil {
 					dev.PrivKey = privB64
 					dev.PubKey = pubB64
-					db.Devices[deviceID] = dev
 					saveDB()
-					log.Printf("[WG] Новое устройство %s (IP: %s)", deviceID, dev.IP)
+					log.Printf("[WG] Инициализировано устройство %s (IP: %s)", deviceID, dev.IP)
 				} else {
 					dev = nil
 				}
@@ -2286,6 +2771,7 @@ type ObfsConfig struct {
 	PayloadType uint8
 	PaddingMax  int
 }
+
 var aeadCache sync.Map
 
 func getAEAD(key []byte) (cipher.AEAD, error) {
@@ -2305,26 +2791,19 @@ func getAEAD(key []byte) (cipher.AEAD, error) {
 }
 
 type ObfsState struct {
-	mu         sync.Mutex
-	seq        uint16
-	timestamp  uint32
-	lastPacket time.Time
-	count      uint64
+	mu      sync.Mutex
+	initSeq uint16
+	initTs  uint32
+	count   uint64
 }
 
-func NewObfsConfig(mode string) *ObfsConfig {
+func NewObfsConfig() *ObfsConfig {
 	var buf [4]byte
 	rand.Read(buf[:])
-	pt := uint8(111)
-	pad := 24
-	if strings.EqualFold(strings.TrimSpace(mode), "video") {
-		pt = 96
-		pad = 60
-	}
 	return &ObfsConfig{
 		SSRC:        binary.BigEndian.Uint32(buf[:]),
-		PayloadType: pt,
-		PaddingMax:  pad,
+		PayloadType: 111,
+		PaddingMax:  24,
 	}
 }
 
@@ -2332,63 +2811,10 @@ func NewObfsState() *ObfsState {
 	var buf [6]byte
 	rand.Read(buf[:])
 	return &ObfsState{
-		seq:       binary.BigEndian.Uint16(buf[0:2]),
-		timestamp: binary.BigEndian.Uint32(buf[2:6]),
-		count:     0,
+		initSeq: binary.BigEndian.Uint16(buf[0:2]),
+		initTs:  binary.BigEndian.Uint32(buf[2:6]),
+		count:   0,
 	}
-}
-
-func rtpTimestampStep(elapsed time.Duration, jitter byte) uint32 {
-	samples := int(elapsed * 48000 / time.Second)
-	if samples < 120 {
-		samples = 120
-	} else if samples > 2880 {
-		samples = 2880
-	}
-	samples = ((samples + 60) / 120) * 120
-	switch jitter % 3 {
-	case 0:
-		samples -= 120
-	case 2:
-		samples += 120
-	}
-	if samples < 120 {
-		samples = 120
-	} else if samples > 2880 {
-		samples = 2880
-	}
-	return uint32(samples)
-}
-
-func rtpSequenceStep(selector byte) uint16 {
-	if selector&0x7F == 0 {
-		return 2 + uint16(selector>>7)
-	}
-	return 1
-}
-
-func useRTPPadding(selector byte) bool {
-	return selector&0x03 == 0
-}
-
-func useRTPMarker(selector byte) bool {
-	return selector&0x3F == 0
-}
-
-func (s *ObfsState) nextHeader(now time.Time, jitter, sequenceSelector byte) (uint16, uint32) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.count > 0 {
-		s.timestamp += rtpTimestampStep(now.Sub(s.lastPacket), jitter)
-	}
-
-	seq := s.seq
-	ts := s.timestamp
-	s.seq += rtpSequenceStep(sequenceSelector)
-	s.lastPacket = now
-	s.count++
-	return seq, ts
 }
 
 func obfsBuildNonce(ssrc uint32, seq uint16, ts uint32) []byte {
@@ -2406,32 +2832,27 @@ func obfsWrapPacket(key, payload []byte, cfg *ObfsConfig, state *ObfsState) ([]b
 	if len(payload) == 0 {
 		return nil, errors.New("obfs: empty payload")
 	}
+	state.mu.Lock()
+	c := state.count
+	state.count++
+	state.mu.Unlock()
 
-	var rndBuf [5]byte
-	rand.Read(rndBuf[:])
-
-	seq, ts := state.nextHeader(time.Now(), rndBuf[2], rndBuf[4])
+	seq := state.initSeq + uint16(c)
+	ts := state.initTs + uint32(c)*960 + uint32(c>>16)
 
 	nonce := obfsBuildNonce(cfg.SSRC, seq, ts)
 	padRand := 0
-	if cfg.PaddingMax > 0 && useRTPPadding(rndBuf[0]) {
-		padRand = int(rndBuf[3]) % cfg.PaddingMax
+	if cfg.PaddingMax > 0 {
+		var rndBuf [1]byte
+		rand.Read(rndBuf[:])
+		padRand = int(rndBuf[0]) % cfg.PaddingMax
 	}
-	padTotal := 0
-	if padRand > 0 || (cfg.PaddingMax > 0 && useRTPPadding(rndBuf[0])) {
-		padTotal = padRand + 1
-	}
+	padTotal := padRand + 1
 	outLen := 12 + len(payload) + chacha20poly1305.Overhead + padTotal
 	out := make([]byte, outLen)
 
-	out[0] = 0x80
-	if padTotal > 0 {
-		out[0] |= 0x20
-	}
+	out[0] = 0x80 | 0x20
 	out[1] = cfg.PayloadType & 0x7F
-	if useRTPMarker(rndBuf[1]) {
-		out[1] |= 0x80
-	}
 	binary.BigEndian.PutUint16(out[2:4], seq)
 	binary.BigEndian.PutUint32(out[4:8], ts)
 	binary.BigEndian.PutUint32(out[8:12], cfg.SSRC)
@@ -2445,9 +2866,7 @@ func obfsWrapPacket(key, payload []byte, cfg *ObfsConfig, state *ObfsState) ([]b
 	if padRand > 0 {
 		rand.Read(out[padStart : padStart+padRand])
 	}
-	if padTotal > 0 {
-		out[outLen-1] = byte(padTotal)
-	}
+	out[outLen-1] = byte(padTotal)
 	return out, nil
 }
 
@@ -2499,7 +2918,7 @@ func obfsIsRTPPacket(wire []byte) bool {
 		return false
 	}
 	pt := wire[1] & 0x7F
-	return pt == 111 || pt == 96
+	return pt == 111
 }
 
 func listenWrapped(addr *net.UDPAddr, keys *wrapKeyStore) (dtlsnet.PacketListener, error) {
@@ -2560,13 +2979,7 @@ func (c *wrapPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
 			return 0, addr, uErr
 		}
 		c.key = append([]byte(nil), key...) // Клонируем ключ в независимую память!
-		c.obfsCfg = NewObfsConfig("audio")
-		if len(raw) > 1 {
-			c.obfsCfg.PayloadType = raw[1] & 0x7F
-			if c.obfsCfg.PayloadType == 96 {
-				c.obfsCfg.PaddingMax = 60
-			}
-		}
+		c.obfsCfg = NewObfsConfig()
 		c.obfsWrite = NewObfsState()
 		atomic.StoreInt32(&c.selected, 1)
 		if atomic.CompareAndSwapInt32(&c.authLog, 0, 1) {
@@ -2582,13 +2995,7 @@ func (c *wrapPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
 		key, m2, uErr2 := c.keys.Unwrap(raw, p)
 		if uErr2 == nil {
 			c.key = append([]byte(nil), key...) // На лету обновляем ключ сессии!
-			c.obfsCfg = NewObfsConfig("audio")
-			if len(raw) > 1 {
-				c.obfsCfg.PayloadType = raw[1] & 0x7F
-				if c.obfsCfg.PayloadType == 96 {
-					c.obfsCfg.PaddingMax = 60
-				}
-			}
+			c.obfsCfg = NewObfsConfig()
 			c.obfsWrite = NewObfsState()
 			log.Printf("[WRAP] Обновлен ключ на лету для %s (пароль изменился/обновился)", addr.String())
 			return m2, addr, nil
@@ -2603,7 +3010,7 @@ func (c *wrapPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 		return 0, errors.New("wrap: key not selected")
 	}
 	if c.obfsCfg == nil || c.obfsWrite == nil {
-		c.obfsCfg = NewObfsConfig("audio")
+		c.obfsCfg = NewObfsConfig()
 		c.obfsWrite = NewObfsState()
 	}
 	wrapped, wErr := obfsWrapPacket(c.key, p, c.obfsCfg, c.obfsWrite)
@@ -2621,3 +3028,23 @@ func (c *wrapPacketConn) LocalAddr() net.Addr                { return c.inner.Lo
 func (c *wrapPacketConn) SetDeadline(t time.Time) error      { return c.inner.SetDeadline(t) }
 func (c *wrapPacketConn) SetReadDeadline(t time.Time) error  { return c.inner.SetReadDeadline(t) }
 func (c *wrapPacketConn) SetWriteDeadline(t time.Time) error { return c.inner.SetWriteDeadline(t) }
+func extendPassword(pass string, days int) {
+	dbMutex.Lock()
+	defer dbMutex.Unlock()
+
+	entry, exists := db.Passwords[pass]
+	if !exists || entry == nil {
+		return
+	}
+
+	now := time.Now().Unix()
+
+	if entry.ExpiresAt < now {
+		entry.ExpiresAt = now
+	}
+
+	entry.ExpiresAt += int64(days * 24 * 60 * 60)
+	entry.IsDeactivated = false
+
+	saveDB()
+}

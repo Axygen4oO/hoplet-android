@@ -44,14 +44,12 @@ object TunnelControl {
             val hashes = VkHashSourceResolver.resolveForConnection(
                 context = appContext,
                 settingsStore = store,
-                peer = basePeer,
+                peer = peerWithPort,
             ).hashes
 
             if (peerWithPort.isBlank() || hashes.isBlank() || password.isBlank()) {
                 return@launch
             }
-
-            store.saveActiveVkHashes(hashes)
 
             val startIntent = Intent(appContext, TunnelService::class.java).apply {
                 action = "START_FORCED"

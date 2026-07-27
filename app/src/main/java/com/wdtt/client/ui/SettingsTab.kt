@@ -69,7 +69,6 @@ import com.wdtt.client.PeerAddress
 import com.wdtt.client.ConnectionLifecycle
 import com.wdtt.client.ConnectionProgressManager
 import com.wdtt.client.HopletTheme
-import com.wdtt.client.ResolvedVkHashes
 import com.wdtt.client.SettingsStore
 import com.wdtt.client.TunnelManager
 import com.wdtt.client.TunnelService
@@ -464,7 +463,9 @@ fun SettingsTabContent(
         return if (vkHashSource == SettingsStore.VK_HASH_SOURCE_LOCAL) {
             SettingsStore.normalizeVkHashes(localOverride ?: combinedLocalHashes)
         } else {
-            SettingsStore.normalizeVkHashes(activeHashesRaw)
+            SettingsStore.normalizeVkHashes(
+                localOverride ?: serverVkHashesCache.ifBlank { activeHashesRaw }
+            )
         }
     }
 
@@ -617,20 +618,18 @@ fun SettingsTabContent(
         saveJob?.cancel()
         scope.launch {
             val effectiveVkAnonPath = SettingsStore.resolveVkAnonPath(context)
-            val resolvedHashes = when (vkHashSource) {
-                SettingsStore.VK_HASH_SOURCE_LOCAL -> ResolvedVkHashes(
-                    source = vkHashSource,
-                    hashes = SettingsStore.normalizeVkHashes(combinedLocalHashes),
-                )
-                else -> VkHashSourceResolver.resolveForConnection(
-                    context = context,
-                    settingsStore = settingsStore,
-                    peer = host,
-                )
-            }
+            val resolvedHashes = VkHashSourceResolver.resolveForConnection(
+                context = context,
+                settingsStore = settingsStore,
+                peer = peerForTunnel,
+            )
             val finalHashes = resolvedHashes.hashes
             if (finalHashes.isBlank()) {
                 val message = if (resolvedHashes.source == SettingsStore.VK_HASH_SOURCE_SERVER) {
+                    android.util.Log.e(
+                        "VKHASH",
+                        "UI connect aborted: resolved server VK hashes are blank, peer=$peerForTunnel, source=${resolvedHashes.source}"
+                    )
                     "Не удалось получить серверные VK hash"
                 } else {
                     "Локальные VK hash не заданы"

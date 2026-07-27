@@ -84,10 +84,15 @@ class TunnelService : Service() {
                             intent.getStringExtra("obfs_mode")?.takeIf { it.isNotEmpty() }
                                 ?: store.obfsMode.first()
                         )
+                        val resolvedHashes = VkHashSourceResolver.resolveForConnection(
+                            context = appContext,
+                            settingsStore = store,
+                            peer = basePeer,
+                        )
                         
                         val params = TunnelParams(
                             peer = peerWithPort,
-                            vkHashes = intent.getStringExtra("vk_hashes")?.takeIf { it.isNotEmpty() } ?: store.vkHashes.first(),
+                            vkHashes = resolvedHashes.hashes,
                             secondaryVkHash = intent.getStringExtra("secondary_vk_hash")?.takeIf { it.isNotEmpty() } ?: store.secondaryVkHash.first(),
                             workersPerHash = intent.getIntExtra("workers_per_hash", 0).takeIf { it > 0 } ?: store.workersPerHash.first(),
                             port = intent.getIntExtra("port", 0).takeIf { it > 0 } ?: store.listenPort.first(),
@@ -103,11 +108,15 @@ class TunnelService : Service() {
                             detailedLogs = store.detailedLogs.first()
                         )
                         launch(Dispatchers.Main) {
-                            if (intent.action == "START_FORCED") {
-                                TunnelManager.showBlockerWarning.value = false
-                                startTunnel(params, forceStart = true)
+                            if (params.peer.isNotEmpty() && params.vkHashes.isNotEmpty() && params.connectionPassword.isNotEmpty()) {
+                                if (intent.action == "START_FORCED") {
+                                    TunnelManager.showBlockerWarning.value = false
+                                    startTunnel(params, forceStart = true)
+                                } else {
+                                    startTunnel(params, forceStart = false)
+                                }
                             } else {
-                                startTunnel(params, forceStart = false)
+                                stopTunnel()
                             }
                         }
                     } catch (e: Exception) {
@@ -150,9 +159,14 @@ class TunnelService : Service() {
                 val manualPortsEnabled = store.manualPortsEnabled.first()
                 val serverDtlsPort = if (manualPortsEnabled) store.serverDtlsPort.first() else 56000
                 val peerWithPort = if (basePeer.isBlank()) basePeer else PeerAddress.ensurePort(basePeer, serverDtlsPort)
+                val resolvedHashes = VkHashSourceResolver.resolveForConnection(
+                    context = appContext,
+                    settingsStore = store,
+                    peer = basePeer,
+                )
                 val params = TunnelParams(
                     peer = peerWithPort,
-                    vkHashes = store.vkHashes.first(),
+                    vkHashes = resolvedHashes.hashes,
                     secondaryVkHash = store.secondaryVkHash.first(),
                     workersPerHash = store.workersPerHash.first(),
                     port = store.listenPort.first(),
