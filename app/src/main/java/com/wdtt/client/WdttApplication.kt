@@ -3,6 +3,10 @@ package com.wdtt.client
 import android.app.Application
 import android.content.Context
 import com.wireguard.android.backend.GoBackend
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 class WdttApplication : Application() {
     @Volatile
@@ -16,6 +20,9 @@ class WdttApplication : Application() {
         NotificationHelper.ensureTunnelChannel(this)
         DeployManager.init(this)
         AppShortcuts.refreshAsync(this)
+        CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+            reconcileAppUpdateState(this@WdttApplication)
+        }
     }
 
     fun getBackend(context: Context): GoBackend {

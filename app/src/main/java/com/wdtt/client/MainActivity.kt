@@ -410,16 +410,20 @@ fun MainScreen(
             ?: 12L * 60L * 60L * 1000L
 
         suspend fun runUpdateCheck(reason: String) {
-            val checkedAt = System.currentTimeMillis()
-            val release = fetchLatestReleaseInfo(currentVersion, false)
+            val outcome = performAppUpdateCheck(currentVersion, false)
+            val checkedAt = outcome.checkedAt
+            val release = outcome.release
             settingsStore.saveUpdateState(
                 lastCheckAt = checkedAt,
                 latestVersion = release?.versionTag ?: "",
-                error = if (release == null) "Не удалось проверить" else ""
+                error = outcome.errorMessage
             )
 
             if (release == null) {
-                Log.w("WDTT", "[WARN] Update check: no release info, local=$currentVersion reason=$reason")
+                Log.w(
+                    "WDTT",
+                    "[WARN] Update check: no release info, local=$currentVersion reason=$reason error=${outcome.errorMessage}"
+                )
                 return
             }
 
@@ -427,12 +431,18 @@ fun MainScreen(
             val postponeVer = settingsStore.updatePostponeVersion.first()
             val postponeUntil = settingsStore.updatePostponeUntil.first()
             val isPostponed = postponeVer == release.versionTag && checkedAt < postponeUntil
+            val currentDownload = settingsStore.updateDownloadState.first()
+            val isAlreadyDownloadingSameRelease =
+                currentDownload.matchesVersion(release.versionTag) &&
+                    (currentDownload.phase == AppUpdatePhase.DOWNLOADING ||
+                        currentDownload.phase == AppUpdatePhase.WAITING_FOR_NETWORK ||
+                        currentDownload.phase == AppUpdatePhase.VERIFYING)
             Log.i(
                 "WDTT",
-                "Update check: local=$currentVersion remote=${release.versionTag} newer=$hasUpdate postponed=$isPostponed reason=$reason"
+                "Update check: local=$currentVersion remote=${release.versionTag} newer=$hasUpdate postponed=$isPostponed active=${currentDownload.phase} reason=$reason"
             )
 
-            if (hasUpdate && !isPostponed) {
+            if (hasUpdate && !isPostponed && !isAlreadyDownloadingSameRelease) {
                 settingsStore.saveUpdateDialogShown(release.versionTag, checkedAt)
                 pendingRelease = release
             }
@@ -444,7 +454,7 @@ fun MainScreen(
             val now = System.currentTimeMillis()
             val lastCheck = settingsStore.updateLastCheckAt.first()
             val nextCheckAt = lastCheck + intervalMillis
-            val waitMs = (nextCheckAt - now).coerceAtLeast(intervalMillis)
+            val waitMs = (nextCheckAt - now).coerceAtLeast(0L)
             delay(waitMs)
             if (isActive) {
                 runUpdateCheck("periodic")
@@ -564,6 +574,7 @@ fun MainScreen(
     pendingRelease?.let { release ->
         AppUpdateDialog(
             release = release,
+            onDismiss = { pendingRelease = null },
             onPostpone = {
                 pendingRelease = null
                 Toast.makeText(context, "Обновление отложено на 24 часа.", Toast.LENGTH_SHORT).show()
@@ -580,7 +591,16 @@ fun MainScreen(
                     )
                 }
             },
-            onUpdate = {
+            onDownloadStarted = {
+                scope.launch {
+                    settingsStore.saveUpdateDialogAction(
+                        version = release.versionTag,
+                        action = UPDATE_DIALOG_ACTION_UPDATE,
+                        actedAt = System.currentTimeMillis()
+                    )
+                }
+            },
+            onOpenReleasePage = {
                 pendingRelease = null
                 scope.launch {
                     settingsStore.saveUpdateDialogAction(

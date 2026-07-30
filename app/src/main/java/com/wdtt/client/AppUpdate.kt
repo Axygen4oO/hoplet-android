@@ -1,21 +1,24 @@
 package com.wdtt.client
 
+import android.content.ActivityNotFoundException
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.os.Build
+import android.provider.Settings
 import android.util.Log
+import androidx.core.content.FileProvider
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
-import java.net.HttpURLConnection
-import java.net.URL
 import java.io.File
-import java.io.FileOutputStream
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.flow
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.currentCoroutineContext
-import android.content.Context
-import android.content.Intent
-import androidx.core.content.FileProvider
+import java.net.ConnectException
+import java.net.HttpURLConnection
+import java.net.SocketTimeoutException
+import java.net.URL
+import java.net.UnknownHostException
+import javax.net.ssl.SSLException
 
 const val UPDATE_CHECK_NEVER = -1
 const val DEFAULT_UPDATE_CHECK_INTERVAL_HOURS = 12
@@ -47,6 +50,10 @@ data class AppReleaseInfo(
     val downloadUrl: String? = null,
     val releaseNotes: String = "",
     val isPrerelease: Boolean = false,
+    val downloadFileName: String? = null,
+    val downloadSizeBytes: Long = 0L,
+    val expectedSha256: String? = null,
+    val sha256AssetUrl: String? = null,
 )
 
 data class ReleaseChangelogItem(
@@ -62,10 +69,20 @@ enum class RemoteVersionSource {
     Tag
 }
 
+data class UpdateCheckOutcome(
+    val checkedAt: Long,
+    val release: AppReleaseInfo?,
+    val errorMessage: String,
+)
+
+@Volatile
+private var lastUpdateRequestErrorMessage: String = ""
+
 suspend fun fetchLatestReleaseInfo(
     localVersion: String? = null,
     includePrerelease: Boolean = false,
 ): AppReleaseInfo? = withContext(Dispatchers.IO) {
+    clearLastUpdateRequestError()
     val latestRelease = fetchReleaseFromLatestEndpoint(includePrerelease)
         ?: fetchLatestReleaseFromList(includePrerelease)
         ?: fetchReleaseFromLatestWebRedirect(includePrerelease)
@@ -79,10 +96,40 @@ suspend fun fetchLatestReleaseInfo(
     }
 }
 
+suspend fun performAppUpdateCheck(
+    localVersion: String? = null,
+    includePrerelease: Boolean = false,
+): UpdateCheckOutcome = withContext(Dispatchers.IO) {
+    val checkedAt = System.currentTimeMillis()
+    val release = fetchLatestReleaseInfo(localVersion, includePrerelease)
+    val outcome = UpdateCheckOutcome(
+        checkedAt = checkedAt,
+        release = release,
+        errorMessage = if (release == null) {
+            lastUpdateRequestErrorMessage.ifBlank { "Не удалось проверить обновления" }
+        } else {
+            ""
+        }
+    )
+    if (outcome.release != null) {
+        Log.i(
+            UPDATE_LOG_TAG,
+            "Update check completed: local=${localVersion.orEmpty().ifBlank { "unknown" }}, remote=${outcome.release.versionTag}, prerelease=$includePrerelease"
+        )
+    } else {
+        Log.w(
+            UPDATE_LOG_TAG,
+            "Update check failed: local=${localVersion.orEmpty().ifBlank { "unknown" }}, prerelease=$includePrerelease, error=${outcome.errorMessage}"
+        )
+    }
+    outcome
+}
+
 suspend fun fetchReleaseChangelog(
     includePrerelease: Boolean = false,
     limit: Int = 12,
 ): List<ReleaseChangelogItem> = withContext(Dispatchers.IO) {
+    clearLastUpdateRequestError()
     val response = fetchGitHubApi(GITHUB_RELEASES_URL) ?: return@withContext emptyList()
     val releases = try {
         JSONArray(response)
@@ -111,6 +158,7 @@ suspend fun fetchReleaseChangelog(
 }
 
 suspend fun fetchReleaseNotesForVersion(versionTag: String): String = withContext(Dispatchers.IO) {
+    clearLastUpdateRequestError()
     val normalized = normalizeVersionTag(versionTag)
     val response = fetchGitHubApi(GITHUB_RELEASES_URL) ?: return@withContext bundledReleaseNotes(versionTag)
     val releases = try {
@@ -129,7 +177,7 @@ suspend fun fetchReleaseNotesForVersion(versionTag: String): String = withContex
 
 fun bundledReleaseNotes(versionTag: String): String {
     return when (normalizeVersionTag(versionTag)) {
-        "1.3.2" -> """
+        "v1.3.2" -> """
             • 🚀 Добавлена схема подключения с отображением всех этапов соединения
               🔄 Реализовано автоматическое переподключение при потере соединения
               ⚙️ Добавлен выбор источника VK Hash (SERVER / LOCAL)
@@ -331,9 +379,11 @@ private fun fetchHttpText(
 
         if (responseCode in 200..299) {
             if (isGitHubApi) githubApiCooldownUntilMs = 0L
+            clearLastUpdateRequestError()
             response
         } else {
             if (isGitHubApi) noteGitHubApiCooldown(conn, responseCode, response)
+            setLastUpdateRequestError(describeHttpError(responseCode, response))
             Log.w(
                 UPDATE_LOG_TAG,
                 "[WARN] Update check: $sourceLabel returned $responseCode ${response.take(300)}"
@@ -341,6 +391,7 @@ private fun fetchHttpText(
             null
         }
     } catch (e: Exception) {
+        setLastUpdateRequestError(describeRequestException(e))
         Log.w(UPDATE_LOG_TAG, "[WARN] Update check: $sourceLabel request failed", e)
         null
     } finally {
@@ -376,62 +427,50 @@ private fun JSONObject.toAppReleaseInfo(): AppReleaseInfo? {
     val releaseUrl = optString("html_url").trim()
     if (versionTag.isBlank() || releaseUrl.isBlank()) return null
 
-    var downloadUrl: String? = null
+    var selectedAsset: JSONObject? = null
     val assets = optJSONArray("assets")
 
     if (assets != null) {
-
-        // Сначала ищем universal APK
         for (i in 0 until assets.length()) {
             val asset = assets.optJSONObject(i) ?: continue
-
-            if (asset.optString("name")
-                    .equals("app-universal-release.apk", ignoreCase = true)
-            ) {
-                downloadUrl = asset.optString("browser_download_url")
+            if (asset.optString("name").equals("app-universal-release.apk", ignoreCase = true)) {
+                selectedAsset = asset
                 break
             }
         }
 
-        // Если universal не найден — берем первый APK
-        if (downloadUrl == null) {
+        if (selectedAsset == null) {
             for (i in 0 until assets.length()) {
                 val asset = assets.optJSONObject(i) ?: continue
-                Log.d(
-                    UPDATE_LOG_TAG,
-                    "Asset: ${asset.optString("name")} -> ${asset.optString("browser_download_url")}"
-                )
-
-                if (asset.optString("name")
-                        .endsWith(".apk", ignoreCase = true)
-                ) {
-                    downloadUrl = asset.optString("browser_download_url")
+                if (asset.optString("name").endsWith(".apk", ignoreCase = true)) {
+                    selectedAsset = asset
                     break
                 }
-                Log.d(
-                    UPDATE_LOG_TAG,
-                    "Selected downloadUrl = $downloadUrl"
-                )
             }
         }
     }
-    
+
+    val downloadUrl = selectedAsset?.optString("browser_download_url")?.trim().orEmpty().ifBlank { null }
+    val downloadFileName = selectedAsset?.optString("name")?.trim().orEmpty().ifBlank { null }
+    val releaseNotes = optString("body").trim()
+    val expectedSha256 = selectedAsset?.let(::extractSha256FromAssetDigest)
+        ?: extractSha256FromText(releaseNotes, downloadFileName)
+
     return AppReleaseInfo(
         versionTag,
         releaseUrl,
         RemoteVersionSource.Release,
         downloadUrl,
-        releaseNotes = optString("body").trim(),
+        releaseNotes = releaseNotes,
         isPrerelease = optBoolean("prerelease"),
+        downloadFileName = downloadFileName,
+        downloadSizeBytes = selectedAsset?.optLong("size")?.takeIf { it > 0L } ?: 0L,
+        expectedSha256 = expectedSha256,
+        sha256AssetUrl = assets?.findSha256AssetUrl(downloadFileName),
     )
 }
 
-private fun versionParts(version: String): List<Int> {
-    val normalized = VERSION_NUMBER_REGEX.find(version.trim())?.value ?: return emptyList()
-    return normalized.split(".").mapNotNull { it.toIntOrNull() }
-}
-
-private fun normalizeVersionTag(version: String): String {
+internal fun normalizeVersionTag(version: String): String {
     val trimmed = version.trim()
     if (trimmed.isBlank()) return ""
     return if (trimmed.startsWith("v", ignoreCase = true)) trimmed else "v$trimmed"
@@ -449,84 +488,160 @@ private fun extractTagFromReleaseUrl(releaseUrl: String): String? {
         ?.let(::normalizeVersionTag)
 }
 
-sealed class DownloadState {
-    object Idle : DownloadState()
-    data class Downloading(val progress: Float) : DownloadState()
-    data class Finished(val file: File) : DownloadState()
-    data class Error(val message: String) : DownloadState()
+sealed interface InstallApkResult {
+    object Started : InstallApkResult
+    object PermissionRequired : InstallApkResult
+    data class Failed(val message: String) : InstallApkResult
 }
 
-fun downloadUpdate(context: Context, downloadUrl: String, versionTag: String): Flow<DownloadState> = flow {
-    emit(DownloadState.Downloading(0f))
-    var conn: HttpURLConnection? = null
-    try {
-        val updatesDir = File(context.cacheDir, "updates")
-        if (!updatesDir.exists()) updatesDir.mkdirs()
-        
-        // Clean up old updates
-        updatesDir.listFiles()?.forEach { it.delete() }
-        
-        val apkFile = File(updatesDir, "Hoplet_$versionTag.apk")
-        
-        conn = URL(downloadUrl).openConnection() as HttpURLConnection
-        conn.requestMethod = "GET"
-        conn.connectTimeout = 15_000
-        conn.readTimeout = 15_000
-        conn.setRequestProperty("User-Agent", "qWDTTAndroid/${BuildConfig.VERSION_NAME}")
-        conn.instanceFollowRedirects = true
-        
-        val responseCode = conn.responseCode
-        if (responseCode !in 200..299) {
-            emit(DownloadState.Error("HTTP $responseCode"))
-            return@flow
-        }
-        
-        val totalBytes = conn.contentLength.toLong()
-        val inputStream = conn.inputStream
-        val outputStream = FileOutputStream(apkFile)
-        
-        val buffer = ByteArray(8192)
-        var bytesRead: Int
-        var downloadedBytes = 0L
-        var lastEmitTime = 0L
-        
-        inputStream.use { input ->
-            outputStream.use { output ->
-                while (input.read(buffer).also { bytesRead = it } != -1) {
-                    if (!currentCoroutineContext().isActive) {
-                        apkFile.delete()
-                        emit(DownloadState.Error("Cancelled"))
-                        return@flow
-                    }
-                    output.write(buffer, 0, bytesRead)
-                    downloadedBytes += bytesRead
-                    
-                    val now = System.currentTimeMillis()
-                    if (totalBytes > 0 && now - lastEmitTime > 100) {
-                        lastEmitTime = now
-                        emit(DownloadState.Downloading(downloadedBytes.toFloat() / totalBytes.toFloat()))
-                    }
-                }
-            }
-        }
-        
-        emit(DownloadState.Finished(apkFile))
-    } catch (e: Exception) {
-        emit(DownloadState.Error(e.message ?: "Unknown error"))
-    } finally {
-        conn?.disconnect()
+fun installApk(context: Context, apkFile: File): InstallApkResult {
+    if (!apkFile.exists()) {
+        return InstallApkResult.Failed("Файл обновления не найден")
     }
-}
 
-fun installApk(context: Context, apkFile: File) {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+        !context.packageManager.canRequestPackageInstalls()
+    ) {
+        Log.i(UPDATE_LOG_TAG, "APK install requires unknown-sources permission for ${apkFile.name}")
+        return if (openUnknownSourcesSettings(context)) {
+            InstallApkResult.PermissionRequired
+        } else {
+            InstallApkResult.Failed("Разрешите установку APK для этого приложения")
+        }
+    }
+
     try {
         val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", apkFile)
-        val intent = Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(uri, "application/vnd.android.package-archive")
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION
+        val installIntent = Intent(Intent.ACTION_INSTALL_PACKAGE).apply {
+            data = uri
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            putExtra(Intent.EXTRA_NOT_UNKNOWN_SOURCE, true)
+            putExtra(Intent.EXTRA_RETURN_RESULT, false)
         }
-        context.startActivity(intent)
+        context.startActivity(installIntent)
+        Log.i(UPDATE_LOG_TAG, "Started APK installer for ${apkFile.name}")
+        return InstallApkResult.Started
+    } catch (_: ActivityNotFoundException) {
+        return try {
+            val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", apkFile)
+            val fallbackIntent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, "application/vnd.android.package-archive")
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            context.startActivity(fallbackIntent)
+            Log.i(UPDATE_LOG_TAG, "Started fallback APK installer for ${apkFile.name}")
+            InstallApkResult.Started
+        } catch (e: Exception) {
+            Log.e(UPDATE_LOG_TAG, "Failed to install APK using fallback", e)
+            InstallApkResult.Failed("Не удалось открыть установщик APK")
+        }
     } catch (e: Exception) {
         Log.e(UPDATE_LOG_TAG, "Failed to install APK", e)
+        return InstallApkResult.Failed("Не удалось запустить установку обновления")
     }
 }
+
+private fun JSONArray.findSha256AssetUrl(downloadFileName: String?): String? {
+    val normalizedFileName = downloadFileName?.lowercase().orEmpty()
+    val baseName = normalizedFileName.removeSuffix(".apk")
+    for (i in 0 until length()) {
+        val asset = optJSONObject(i) ?: continue
+        val name = asset.optString("name").trim().lowercase()
+        if (name.isBlank()) continue
+        val looksLikeShaAsset = name.endsWith(".sha256") ||
+            name.endsWith(".sha256sum") ||
+            name.endsWith(".sha256.txt") ||
+            (name.contains("sha256") && baseName.isNotBlank() && name.contains(baseName))
+        if (looksLikeShaAsset) {
+            return asset.optString("browser_download_url").trim().ifBlank { null }
+        }
+    }
+    return null
+}
+
+private fun extractSha256FromAssetDigest(asset: JSONObject): String? {
+    val digest = asset.optString("digest").trim()
+    if (digest.isBlank()) return null
+    return normalizeSha256(digest.substringAfter("sha256:", digest))
+}
+
+internal fun extractSha256FromText(text: String, downloadFileName: String? = null): String? {
+    if (text.isBlank()) return null
+    val fileName = downloadFileName?.lowercase()
+    val fileStem = fileName?.removeSuffix(".apk")
+    val lines = text.lineSequence().toList()
+
+    for (line in lines) {
+        val normalizedLine = line.lowercase()
+        val mentionsTargetFile = fileName != null && normalizedLine.contains(fileName)
+        val mentionsTargetStem = fileStem != null && fileStem.isNotBlank() && normalizedLine.contains(fileStem)
+        if (mentionsTargetFile || mentionsTargetStem) {
+            normalizeSha256(SHA256_REGEX.find(line)?.value)?.let { return it }
+        }
+    }
+
+    for (line in lines) {
+        if (line.contains("sha256", ignoreCase = true)) {
+            normalizeSha256(SHA256_REGEX.find(line)?.value)?.let { return it }
+        }
+    }
+
+    return normalizeSha256(SHA256_REGEX.find(text)?.value)
+}
+
+private fun normalizeSha256(value: String?): String? {
+    val cleaned = value?.trim()?.lowercase() ?: return null
+    return cleaned.takeIf { SHA256_REGEX.matches(it) }
+}
+
+private fun clearLastUpdateRequestError() {
+    lastUpdateRequestErrorMessage = ""
+}
+
+private fun setLastUpdateRequestError(message: String) {
+    lastUpdateRequestErrorMessage = message
+}
+
+private fun describeHttpError(code: Int, responseBody: String): String = when (code) {
+    401, 403 -> {
+        if (responseBody.contains("rate limit", ignoreCase = true)) {
+            "GitHub временно ограничил запросы, попробуйте позже"
+        } else {
+            "Доступ к серверу обновлений временно ограничен"
+        }
+    }
+    404 -> "Файл обновления или релиз не найден"
+    408 -> "Сервер обновлений не ответил вовремя"
+    429 -> "Слишком много запросов к серверу обновлений"
+    in 500..599 -> "Сервер обновлений временно недоступен (HTTP $code)"
+    else -> "Ошибка сервера обновлений (HTTP $code)"
+}
+
+private fun describeRequestException(error: Exception): String = when (error) {
+    is UnknownHostException -> "Нет подключения к интернету"
+    is SocketTimeoutException -> "Истекло время ожидания ответа"
+    is ConnectException -> "Не удалось подключиться к серверу обновлений"
+    is SSLException -> "Ошибка защищенного соединения с сервером обновлений"
+    else -> error.message?.takeIf { it.isNotBlank() } ?: "Не удалось выполнить запрос на обновление"
+}
+
+private fun openUnknownSourcesSettings(context: Context): Boolean {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return true
+    return try {
+        val intent = Intent(
+            Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+            Uri.parse("package:${context.packageName}")
+        ).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        context.startActivity(intent)
+        true
+    } catch (e: Exception) {
+        Log.e(UPDATE_LOG_TAG, "Failed to open unknown-sources settings", e)
+        false
+    }
+}
+
+private val SHA256_REGEX = Regex("\\b[a-fA-F0-9]{64}\\b")

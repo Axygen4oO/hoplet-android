@@ -1804,39 +1804,32 @@ fun SettingsTabContent(
 
                     val currentVersion = remember { "v${com.wdtt.client.BuildConfig.VERSION_NAME.removePrefix("v")}" }
                     var isCheckingUpdates by remember { mutableStateOf(false) }
-                        var latestRelease by remember {
-                            mutableStateOf<com.wdtt.client.AppReleaseInfo?>(null)
-                        }
-                        var downloadState by remember {
-                            mutableStateOf<com.wdtt.client.DownloadState>(com.wdtt.client.DownloadState.Idle)
-                        }
-
-                        var isDownloading by remember {
-                            mutableStateOf(false)
-                        }
-                        var lastDownloadRelease by remember {
-                            mutableStateOf<com.wdtt.client.AppReleaseInfo?>(null)
-                        }
+                    var latestRelease by remember {
+                        mutableStateOf<com.wdtt.client.AppReleaseInfo?>(null)
+                    }
                     val updateLatestVersion by settingsStore.updateLatestVersion.collectAsStateWithLifecycle(initialValue = "")
                     val updateLastError by settingsStore.updateLastError.collectAsStateWithLifecycle(initialValue = "")
-                        LaunchedEffect(updateLatestVersion) {
-                            if (
-                                latestRelease == null &&
-                                updateLatestVersion.isNotBlank() &&
-                                isNewerVersion(currentVersion, updateLatestVersion, false)
-                            ) {
-                                scope.launch {
-                                    try {
-                                        latestRelease =
-                                            com.wdtt.client.fetchLatestReleaseInfo(
-                                                currentVersion,
-                                                false
-                                            )
-                                    } catch (_: Exception) {
-                                    }
+                    val updateDownloadState by settingsStore.updateDownloadState.collectAsStateWithLifecycle(
+                        initialValue = com.wdtt.client.AppUpdateDownloadSnapshot()
+                    )
+                    LaunchedEffect(updateLatestVersion) {
+                        if (
+                            latestRelease == null &&
+                            updateLatestVersion.isNotBlank() &&
+                            isNewerVersion(currentVersion, updateLatestVersion, false)
+                        ) {
+                            scope.launch {
+                                try {
+                                    latestRelease =
+                                        com.wdtt.client.fetchLatestReleaseInfo(
+                                            currentVersion,
+                                            false
+                                        )
+                                } catch (_: Exception) {
                                 }
                             }
                         }
+                    }
 
                         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         OutlinedButton(
@@ -1925,27 +1918,22 @@ fun SettingsTabContent(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
+                            val releaseForAction = updateDownloadState.toReleaseInfo() ?: latestRelease
                             val updateStatusText = remember(
                                 isCheckingUpdates,
                                 latestRelease,
                                 updateLatestVersion,
-                                updateLastError
+                                updateLastError,
+                                updateDownloadState
                             ) {
                                 when {
-                                    isCheckingUpdates ->
-                                        "Проверка обновлений..."
-
-                                    latestRelease != null ->
-                                        "⬇ Доступна ${latestRelease!!.versionTag}"
-
-                                    updateLatestVersion.isNotBlank() ->
-                                        "✓ Установлена последняя версия"
-
-                                    updateLastError.isNotBlank() ->
-                                        "Ошибка проверки"
-
-                                    else ->
-                                        "Не проверено"
+                                    isCheckingUpdates -> "Проверка обновлений..."
+                                    updateDownloadState.phase != com.wdtt.client.AppUpdatePhase.IDLE ->
+                                        com.wdtt.client.formatAppUpdateStatus(updateDownloadState)
+                                    latestRelease != null -> "⬇ Доступна ${latestRelease!!.versionTag}"
+                                    updateLatestVersion.isNotBlank() -> "✓ Последняя версия: $updateLatestVersion"
+                                    updateLastError.isNotBlank() -> updateLastError
+                                    else -> "Не проверено"
                                 }
                             }
 
@@ -1959,12 +1947,30 @@ fun SettingsTabContent(
                                     text = updateStatusText,
                                     style = MaterialTheme.typography.bodySmall,
                                     color =
-                                        if (latestRelease != null) {
+                                        if (latestRelease != null ||
+                                            updateDownloadState.phase == com.wdtt.client.AppUpdatePhase.READY_TO_INSTALL
+                                        ) {
                                             MaterialTheme.colorScheme.primary
+                                        } else if (updateDownloadState.phase == com.wdtt.client.AppUpdatePhase.ERROR) {
+                                            MaterialTheme.colorScheme.error
                                         } else {
                                             MaterialTheme.colorScheme.onSurfaceVariant
                                         }
                                 )
+                                val updateDetails = remember(updateDownloadState) {
+                                    com.wdtt.client.formatAppUpdateDetails(updateDownloadState)
+                                }
+                                AnimatedVisibility(
+                                    visible = updateDetails.isNotBlank(),
+                                    enter = fadeIn() + expandVertically(),
+                                    exit = fadeOut() + shrinkVertically()
+                                ) {
+                                    Text(
+                                        text = updateDetails,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
                             }
 
                             Row(
@@ -1978,10 +1984,11 @@ fun SettingsTabContent(
                                             isCheckingUpdates = true
 
                                             try {
-                                                val release = com.wdtt.client.fetchLatestReleaseInfo(
+                                                val outcome = com.wdtt.client.performAppUpdateCheck(
                                                     currentVersion,
                                                     false
                                                 )
+                                                val release = outcome.release
 
                                                 if (release != null) {
 
@@ -1992,8 +1999,8 @@ fun SettingsTabContent(
                                                         if (hasUpdate) release else null
 
                                                     settingsStore.saveUpdateState(
-                                                        lastCheckAt = System.currentTimeMillis(),
-                                                        latestVersion = if (hasUpdate) release.versionTag else currentVersion,
+                                                        lastCheckAt = outcome.checkedAt,
+                                                        latestVersion = release.versionTag,
                                                         error = ""
                                                     )
 
@@ -2009,17 +2016,16 @@ fun SettingsTabContent(
                                                 } else {
 
                                                     latestRelease = null
-                                                    lastDownloadRelease = null
 
                                                     settingsStore.saveUpdateState(
-                                                        lastCheckAt = System.currentTimeMillis(),
+                                                        lastCheckAt = outcome.checkedAt,
                                                         latestVersion = "",
-                                                        error = "Ошибка"
+                                                        error = outcome.errorMessage
                                                     )
 
                                                     Toast.makeText(
                                                         context,
-                                                        "Не удалось проверить обновления",
+                                                        outcome.errorMessage.ifBlank { "Не удалось проверить обновления" },
                                                         Toast.LENGTH_SHORT
                                                     ).show()
                                                 }
@@ -2061,7 +2067,8 @@ fun SettingsTabContent(
                                 }
 
                                 AnimatedVisibility(
-                                    visible = latestRelease != null,
+                                    visible = releaseForAction != null ||
+                                        updateDownloadState.phase != com.wdtt.client.AppUpdatePhase.IDLE,
                                     enter = fadeIn() + expandHorizontally(),
                                     exit = fadeOut() + shrinkHorizontally()
                                 ) {
@@ -2072,29 +2079,40 @@ fun SettingsTabContent(
                                     ) {
 
                                         AnimatedVisibility(
-                                            visible = downloadState is com.wdtt.client.DownloadState.Downloading,
+                                            visible = updateDownloadState.phase == com.wdtt.client.AppUpdatePhase.DOWNLOADING ||
+                                                updateDownloadState.phase == com.wdtt.client.AppUpdatePhase.WAITING_FOR_NETWORK ||
+                                                updateDownloadState.phase == com.wdtt.client.AppUpdatePhase.VERIFYING,
                                             enter = fadeIn(),
                                             exit = fadeOut()
                                         ) {
 
-                                            val progress =
-                                                (downloadState as com.wdtt.client.DownloadState.Downloading)
-                                                    .progress
-                                                    .coerceIn(0f, 1f)
-
                                             Column(
                                                 horizontalAlignment = Alignment.CenterHorizontally
                                             ) {
-
-                                                LinearProgressIndicator(
-                                                    progress = { progress },
-                                                    modifier = Modifier.width(120.dp)
-                                                )
+                                                if (updateDownloadState.phase == com.wdtt.client.AppUpdatePhase.DOWNLOADING &&
+                                                    updateDownloadState.totalBytes > 0L
+                                                ) {
+                                                    LinearProgressIndicator(
+                                                        progress = { updateDownloadState.progressFraction },
+                                                        modifier = Modifier.width(120.dp)
+                                                    )
+                                                } else {
+                                                    LinearProgressIndicator(
+                                                        modifier = Modifier.width(120.dp)
+                                                    )
+                                                }
 
                                                 Spacer(Modifier.height(4.dp))
 
                                                 Text(
-                                                    "${(progress * 100).toInt()}%",
+                                                    when {
+                                                        updateDownloadState.phase == com.wdtt.client.AppUpdatePhase.DOWNLOADING &&
+                                                            updateDownloadState.totalBytes > 0L ->
+                                                            "${updateDownloadState.progressPercent}%"
+                                                        updateDownloadState.phase == com.wdtt.client.AppUpdatePhase.WAITING_FOR_NETWORK ->
+                                                            "Сеть..."
+                                                        else -> "Проверка..."
+                                                    },
                                                     style = MaterialTheme.typography.labelSmall
                                                 )
                                             }
@@ -2102,81 +2120,41 @@ fun SettingsTabContent(
 
                                         OutlinedButton(
                                             onClick = {
-
-                                                val release = latestRelease
-                                                    ?: lastDownloadRelease
+                                                val release = releaseForAction
                                                     ?: return@OutlinedButton
-
-                                                val url = release.downloadUrl ?: release.releaseUrl
-
-                                                scope.launch {
-
-                                                    if (release.downloadUrl == null) {
-                                                        context.startActivity(
-                                                            Intent(
-                                                                Intent.ACTION_VIEW,
-                                                                Uri.parse(release.releaseUrl)
-                                                            )
-                                                        )
-                                                        return@launch
+                                                when (updateDownloadState.phase) {
+                                                    com.wdtt.client.AppUpdatePhase.DOWNLOADING,
+                                                    com.wdtt.client.AppUpdatePhase.WAITING_FOR_NETWORK -> {
+                                                        com.wdtt.client.pauseAppUpdateDownload(context)
                                                     }
 
-                                                    isDownloading = true
-                                                    lastDownloadRelease = release
+                                                    com.wdtt.client.AppUpdatePhase.PAUSED -> {
+                                                        com.wdtt.client.resumeAppUpdateDownload(context)
+                                                    }
 
-                                                    com.wdtt.client.downloadUpdate(
-                                                        context,
-                                                        url,
-                                                        release.versionTag
-                                                    ).collect { state ->
+                                                    com.wdtt.client.AppUpdatePhase.ERROR -> {
+                                                        com.wdtt.client.retryAppUpdateDownload(context)
+                                                    }
 
-                                                        downloadState = state
+                                                    com.wdtt.client.AppUpdatePhase.READY_TO_INSTALL -> {
+                                                        com.wdtt.client.requestInstallDownloadedUpdate(context)
+                                                    }
 
-                                                        when (state) {
-
-                                                            is com.wdtt.client.DownloadState.Finished -> {
-
-                                                                isDownloading = false
-                                                                downloadState = com.wdtt.client.DownloadState.Idle
-
-                                                                latestRelease?.let { release ->
-                                                                    scope.launch {
-                                                                        settingsStore.saveUpdateState(
-                                                                            lastCheckAt = System.currentTimeMillis(),
-                                                                            latestVersion = release.versionTag,
-                                                                            error = ""
-                                                                        )
-                                                                    }
-                                                                }
-
-                                                                latestRelease = null
-                                                                lastDownloadRelease = null
-
-                                                                com.wdtt.client.installApk(
-                                                                    context,
-                                                                    state.file
+                                                    else -> {
+                                                        if (release.downloadUrl == null) {
+                                                            context.startActivity(
+                                                                Intent(
+                                                                    Intent.ACTION_VIEW,
+                                                                    Uri.parse(release.releaseUrl)
                                                                 )
-                                                            }
-
-                                                            is com.wdtt.client.DownloadState.Error -> {
-
-                                                                isDownloading = false
-                                                                downloadState =
-                                                                    com.wdtt.client.DownloadState.Idle
-
-                                                                Toast.makeText(
-                                                                    context,
-                                                                    state.message,
-                                                                    Toast.LENGTH_LONG
-                                                                ).show()
-                                                            }
-
-                                                            else -> {}
+                                                            )
+                                                        } else {
+                                                            com.wdtt.client.startAppUpdateDownload(context, release)
                                                         }
                                                     }
                                                 }
                                             },
-                                            enabled = !isDownloading,
+                                            enabled = updateDownloadState.phase != com.wdtt.client.AppUpdatePhase.VERIFYING,
                                             shape = RoundedCornerShape(8.dp),
                                             contentPadding = PaddingValues(
                                                 horizontal = 8.dp,
@@ -2186,13 +2164,55 @@ fun SettingsTabContent(
 
                                             Text(
                                                 when {
-                                                    isDownloading -> "Загрузка..."
-                                                    lastDownloadRelease != null &&
-                                                            downloadState is com.wdtt.client.DownloadState.Idle -> "Повторить"
+                                                    updateDownloadState.phase == com.wdtt.client.AppUpdatePhase.DOWNLOADING ||
+                                                        updateDownloadState.phase == com.wdtt.client.AppUpdatePhase.WAITING_FOR_NETWORK -> "Пауза"
+                                                    updateDownloadState.phase == com.wdtt.client.AppUpdatePhase.PAUSED -> "Продолжить"
+                                                    updateDownloadState.phase == com.wdtt.client.AppUpdatePhase.ERROR -> "Повторить"
+                                                    updateDownloadState.phase == com.wdtt.client.AppUpdatePhase.READY_TO_INSTALL -> "Установить"
+                                                    updateDownloadState.phase == com.wdtt.client.AppUpdatePhase.VERIFYING -> "Проверяем..."
+                                                    releaseForAction?.downloadUrl == null -> "Открыть"
                                                     else -> "Скачать"
                                                 },
                                                 style = MaterialTheme.typography.labelMedium
                                             )
+                                        }
+
+                                        AnimatedVisibility(
+                                            visible = updateDownloadState.phase != com.wdtt.client.AppUpdatePhase.IDLE &&
+                                                updateDownloadState.phase != com.wdtt.client.AppUpdatePhase.VERIFYING,
+                                            enter = fadeIn(),
+                                            exit = fadeOut()
+                                        ) {
+                                            OutlinedButton(
+                                                onClick = {
+                                                    when (updateDownloadState.phase) {
+                                                        com.wdtt.client.AppUpdatePhase.DOWNLOADING,
+                                                        com.wdtt.client.AppUpdatePhase.WAITING_FOR_NETWORK -> {
+                                                            com.wdtt.client.cancelAppUpdateDownload(context)
+                                                        }
+
+                                                        else -> {
+                                                            com.wdtt.client.clearAppUpdateDownload(context)
+                                                        }
+                                                    }
+                                                },
+                                                shape = RoundedCornerShape(8.dp),
+                                                contentPadding = PaddingValues(
+                                                    horizontal = 8.dp,
+                                                    vertical = 4.dp
+                                                )
+                                            ) {
+                                                Text(
+                                                    if (updateDownloadState.phase == com.wdtt.client.AppUpdatePhase.DOWNLOADING ||
+                                                        updateDownloadState.phase == com.wdtt.client.AppUpdatePhase.WAITING_FOR_NETWORK
+                                                    ) {
+                                                        "Отменить"
+                                                    } else {
+                                                        "Очистить"
+                                                    },
+                                                    style = MaterialTheme.typography.labelMedium
+                                                )
+                                            }
                                         }
                                     }
                                 }

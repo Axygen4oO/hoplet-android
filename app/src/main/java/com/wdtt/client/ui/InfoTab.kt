@@ -87,8 +87,8 @@ import com.wdtt.client.SettingsStore
 import com.wdtt.client.UPDATE_DIALOG_ACTION_POSTPONED
 import com.wdtt.client.UPDATE_DIALOG_ACTION_UPDATE
 import com.wdtt.client.WDTTColors
-import com.wdtt.client.fetchLatestReleaseInfo
 import com.wdtt.client.isNewerVersion
+import com.wdtt.client.performAppUpdateCheck
 import kotlinx.coroutines.launch
 import kotlin.math.PI
 import kotlin.math.cos
@@ -283,21 +283,21 @@ fun InfoTab() {
                     if (isCheckingUpdates) return@WideActionTile
                     isCheckingUpdates = true
                     scope.launch {
-                        val checkedAt = System.currentTimeMillis()
-                        val release = fetchLatestReleaseInfo(currentVersion, false)
-                        val latest = release?.versionTag
+                        val outcome = performAppUpdateCheck(currentVersion, false)
+                        val checkedAt = outcome.checkedAt
+                        val release = outcome.release
                         settingsStore.saveUpdateState(
                             lastCheckAt = checkedAt,
-                            latestVersion = latest ?: "",
-                            error = if (release == null) "Не удалось проверить" else ""
+                            latestVersion = release?.versionTag ?: "",
+                            error = outcome.errorMessage
                         )
                         isCheckingUpdates = false
 
                         if (release == null) {
                             val message = if (updateLatestVersion.isNotBlank()) {
-                                "Не удалось проверить. Последняя известная версия: $updateLatestVersion"
+                                "${outcome.errorMessage.ifBlank { "Не удалось проверить обновления" }}. Последняя известная версия: $updateLatestVersion"
                             } else {
-                                "Не удалось проверить обновления"
+                                outcome.errorMessage.ifBlank { "Не удалось проверить обновления" }
                             }
                             Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
                             return@launch
@@ -329,6 +329,7 @@ fun InfoTab() {
         pendingManualRelease?.let { release ->
             AppUpdateDialog(
                 release = release,
+                onDismiss = { pendingManualRelease = null },
                 onPostpone = {
                     pendingManualRelease = null
                     Toast.makeText(context, "Обновление отложено на 24 часа.", Toast.LENGTH_SHORT).show()
@@ -345,7 +346,16 @@ fun InfoTab() {
                         )
                     }
                 },
-                onUpdate = {
+                onDownloadStarted = {
+                    scope.launch {
+                        settingsStore.saveUpdateDialogAction(
+                            version = release.versionTag,
+                            action = UPDATE_DIALOG_ACTION_UPDATE,
+                            actedAt = System.currentTimeMillis()
+                        )
+                    }
+                },
+                onOpenReleasePage = {
                     pendingManualRelease = null
                     scope.launch {
                         settingsStore.saveUpdateDialogAction(

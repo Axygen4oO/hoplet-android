@@ -83,6 +83,8 @@ class SettingsStore(context: Context) {
         private val DEPLOY_DNS1 = stringPreferencesKey("deploy_dns1")
         private val DEPLOY_DNS2 = stringPreferencesKey("deploy_dns2")
         private val EXCLUDED_APPS = stringPreferencesKey("excluded_apps")
+        private val BLACKLISTED_APPS = stringPreferencesKey("blacklisted_apps")
+        private val WHITELISTED_APPS = stringPreferencesKey("whitelisted_apps")
         
         private val DETAILED_LOGS = booleanPreferencesKey("detailed_logs")
         
@@ -117,6 +119,7 @@ class SettingsStore(context: Context) {
         // ═══ VPN Exclusions Mode ═══
         private val IS_WHITELIST = booleanPreferencesKey("is_whitelist")
         private val SPLIT_TUNNEL_WHITELIST_MIGRATED = booleanPreferencesKey("split_tunnel_whitelist_migrated")
+        private val SPLIT_TUNNEL_MODE_LISTS_MIGRATED = booleanPreferencesKey("split_tunnel_mode_lists_migrated")
 
         // ═══ Theme Mode ═══
         private val THEME_MODE = stringPreferencesKey("theme_mode") // "system", "light", "dark"
@@ -137,6 +140,7 @@ class SettingsStore(context: Context) {
         private val UPDATE_DIALOG_LAST_ACTION_VERSION = stringPreferencesKey("update_dialog_last_action_version")
         private val UPDATE_DIALOG_LAST_ACTION = stringPreferencesKey("update_dialog_last_action")
         private val UPDATE_DIALOG_LAST_ACTION_AT = longPreferencesKey("update_dialog_last_action_at")
+        private val UPDATE_DOWNLOAD_STATE = stringPreferencesKey("update_download_state")
         private val CHANGELOG_SHOWN_VERSION_CODE = intPreferencesKey("changelog_shown_version_code")
         private val SUPPORT_NOTICE_SHOWN_VERSION_CODE = intPreferencesKey("support_notice_shown_version_code")
 
@@ -377,7 +381,11 @@ class SettingsStore(context: Context) {
     val deployDns1: Flow<String> = dataStore.data.map { it[DEPLOY_DNS1] ?: "1.1.1.1" }
     val deployDns2: Flow<String> = dataStore.data.map { it[DEPLOY_DNS2] ?: "1.0.0.1" }
     
-    val excludedApps: Flow<String> = dataStore.data.map { it[EXCLUDED_APPS] ?: "" }
+    val excludedApps: Flow<String> = dataStore.data.map { prefs ->
+        packagesForMode(prefs, prefs[IS_WHITELIST] == true)
+    }
+    val blacklistApps: Flow<String> = dataStore.data.map { prefs -> packagesForMode(prefs, false) }
+    val whitelistApps: Flow<String> = dataStore.data.map { prefs -> packagesForMode(prefs, true) }
     
     val detailedLogs: Flow<Boolean> = dataStore.data.map { it[DETAILED_LOGS] ?: false }
     
@@ -448,6 +456,9 @@ class SettingsStore(context: Context) {
     val updateDialogLastActionVersion: Flow<String> = dataStore.data.map { it[UPDATE_DIALOG_LAST_ACTION_VERSION] ?: "" }
     val updateDialogLastAction: Flow<String> = dataStore.data.map { it[UPDATE_DIALOG_LAST_ACTION] ?: "" }
     val updateDialogLastActionAt: Flow<Long> = dataStore.data.map { it[UPDATE_DIALOG_LAST_ACTION_AT] ?: 0L }
+    val updateDownloadState: Flow<AppUpdateDownloadSnapshot> = dataStore.data.map {
+        decodeAppUpdateSnapshot(it[UPDATE_DOWNLOAD_STATE])
+    }
 
     val changelogShownVersionCode: Flow<Int> = dataStore.data.map { it[CHANGELOG_SHOWN_VERSION_CODE] ?: 0 }
     val supportNoticeShownVersionCode: Flow<Int> = dataStore.data.map { it[SUPPORT_NOTICE_SHOWN_VERSION_CODE] ?: 0 }
@@ -569,6 +580,18 @@ class SettingsStore(context: Context) {
         }
     }
 
+    suspend fun saveUpdateDownloadState(snapshot: AppUpdateDownloadSnapshot) {
+        dataStore.edit { prefs ->
+            prefs[UPDATE_DOWNLOAD_STATE] = encodeAppUpdateSnapshot(snapshot)
+        }
+    }
+
+    suspend fun clearUpdateDownloadState() {
+        dataStore.edit { prefs ->
+            prefs.remove(UPDATE_DOWNLOAD_STATE)
+        }
+    }
+
     suspend fun save(
         peer: String,
         vkHashes: String,
@@ -683,8 +706,12 @@ class SettingsStore(context: Context) {
 
     suspend fun saveExcludedApps(packages: String) {
         dataStore.edit { prefs ->
-            prefs[EXCLUDED_APPS] = packages
+            val isWhitelist = prefs[IS_WHITELIST] == true
+            val normalizedPackages = normalizePackageList(packages)
+            prefs.putPackagesForMode(normalizedPackages, isWhitelist)
+            prefs[EXCLUDED_APPS] = normalizedPackages
             prefs[SPLIT_TUNNEL_WHITELIST_MIGRATED] = true
+            prefs[SPLIT_TUNNEL_MODE_LISTS_MIGRATED] = true
         }
     }
     
@@ -805,29 +832,44 @@ class SettingsStore(context: Context) {
     suspend fun saveIsWhitelist(enabled: Boolean) {
         dataStore.edit { prefs ->
             prefs[IS_WHITELIST] = enabled
+            prefs[EXCLUDED_APPS] = packagesForMode(prefs, enabled)
             prefs[SPLIT_TUNNEL_WHITELIST_MIGRATED] = true
+            prefs[SPLIT_TUNNEL_MODE_LISTS_MIGRATED] = true
         }
     }
 
-    // Атомарное сохранение обоих параметров для исключения гонки при перезагрузке
-    suspend fun saveExceptionsMode(packages: String, isWhitelist: Boolean) {
+    // Атомарное переключение режима с подгрузкой набора для выбранного списка.
+    suspend fun saveExceptionsMode(isWhitelist: Boolean) {
         dataStore.edit { prefs ->
-            prefs[EXCLUDED_APPS] = packages
             prefs[IS_WHITELIST] = isWhitelist
+            prefs[EXCLUDED_APPS] = packagesForMode(prefs, isWhitelist)
             prefs[SPLIT_TUNNEL_WHITELIST_MIGRATED] = true
+            prefs[SPLIT_TUNNEL_MODE_LISTS_MIGRATED] = true
+        }
+    }
+
+    suspend fun saveExcludedAppsForMode(packages: String, isWhitelist: Boolean) {
+        dataStore.edit { prefs ->
+            val normalizedPackages = normalizePackageList(packages)
+            prefs.putPackagesForMode(normalizedPackages, isWhitelist)
+            if ((prefs[IS_WHITELIST] == true) == isWhitelist) {
+                prefs[EXCLUDED_APPS] = normalizedPackages
+            }
+            prefs[SPLIT_TUNNEL_WHITELIST_MIGRATED] = true
+            prefs[SPLIT_TUNNEL_MODE_LISTS_MIGRATED] = true
         }
     }
 
     suspend fun migrateLegacyWhitelistMode() {
         val currentPrefs = dataStore.data.first()
-        if (currentPrefs[SPLIT_TUNNEL_WHITELIST_MIGRATED] == true) return
+        val whitelistMigrated = currentPrefs[SPLIT_TUNNEL_WHITELIST_MIGRATED] == true
+        val modeListsMigrated = currentPrefs[SPLIT_TUNNEL_MODE_LISTS_MIGRATED] == true
+        if (whitelistMigrated && modeListsMigrated) return
 
-        val hasLegacyWhitelist = currentPrefs[IS_WHITELIST] == true
+        val hasLegacyWhitelist = !whitelistMigrated && currentPrefs[IS_WHITELIST] == true
         val installedApps = if (hasLegacyWhitelist) installedSplitTunnelPackages() else emptySet()
         dataStore.edit { prefs ->
-            if (prefs[SPLIT_TUNNEL_WHITELIST_MIGRATED] == true) return@edit
-
-            if (prefs[IS_WHITELIST] == true) {
+            if (prefs[SPLIT_TUNNEL_WHITELIST_MIGRATED] != true && prefs[IS_WHITELIST] == true) {
                 val legacyExcluded = prefs[EXCLUDED_APPS]
                     ?.split(",")
                     ?.filter { it.isNotEmpty() }
@@ -836,7 +878,23 @@ class SettingsStore(context: Context) {
                 prefs[EXCLUDED_APPS] = (installedApps - legacyExcluded).sorted().joinToString(",")
             }
 
+            if (prefs[SPLIT_TUNNEL_MODE_LISTS_MIGRATED] != true) {
+                val isWhitelist = prefs[IS_WHITELIST] == true
+                val legacyPackages = normalizePackageList(prefs[EXCLUDED_APPS] ?: "")
+                if (isWhitelist) {
+                    if (prefs[WHITELISTED_APPS] == null) {
+                        prefs[WHITELISTED_APPS] = legacyPackages
+                    }
+                } else {
+                    if (prefs[BLACKLISTED_APPS] == null) {
+                        prefs[BLACKLISTED_APPS] = legacyPackages
+                    }
+                }
+                prefs[SPLIT_TUNNEL_MODE_LISTS_MIGRATED] = true
+            }
+
             prefs[SPLIT_TUNNEL_WHITELIST_MIGRATED] = true
+            prefs[EXCLUDED_APPS] = packagesForMode(prefs, prefs[IS_WHITELIST] == true)
         }
     }
 
@@ -852,6 +910,33 @@ class SettingsStore(context: Context) {
                 }
                 .toSet()
         }.getOrDefault(emptySet())
+    }
+
+    private fun packagesForMode(
+        prefs: Preferences,
+        isWhitelist: Boolean
+    ): String {
+        return normalizePackageList(
+            prefs[if (isWhitelist) WHITELISTED_APPS else BLACKLISTED_APPS]
+        )
+    }
+
+    private fun MutablePreferences.putPackagesForMode(
+        packages: String,
+        isWhitelist: Boolean
+    ) {
+        this[if (isWhitelist) WHITELISTED_APPS else BLACKLISTED_APPS] = normalizePackageList(packages)
+    }
+
+    private fun normalizePackageList(packages: String?): String {
+        return packages
+            ?.split(",")
+            ?.map { it.trim() }
+            ?.filter { it.isNotEmpty() }
+            ?.distinct()
+            ?.sorted()
+            ?.joinToString(",")
+            .orEmpty()
     }
 
     private suspend fun migrateSecretsToKeystore() {

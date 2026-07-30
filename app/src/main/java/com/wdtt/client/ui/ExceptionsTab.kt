@@ -37,6 +37,7 @@ import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LocalMinimumInteractiveComponentSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
@@ -46,6 +47,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.derivedStateOf
@@ -64,6 +66,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.graphics.drawable.toBitmap
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.wdtt.client.HopletTheme
@@ -93,11 +96,16 @@ fun ExceptionsTab() {
     val settingsStore = remember { SettingsStore(context) }
     val semanticColors = HopletTheme.colors
 
-    val savedExcluded by settingsStore.excludedApps.collectAsStateWithLifecycle(initialValue = "")
+    val savedBlacklist by settingsStore.blacklistApps.collectAsStateWithLifecycle(initialValue = "")
+    val savedWhitelist by settingsStore.whitelistApps.collectAsStateWithLifecycle(initialValue = "")
     val isWhitelist by settingsStore.isWhitelist.collectAsStateWithLifecycle(initialValue = false)
-    val selectedPackages = remember(savedExcluded) {
-        savedExcluded.split(",").filter { it.isNotEmpty() }.toSet()
+    val blacklistPackages = remember(savedBlacklist) {
+        savedBlacklist.split(",").filter { it.isNotEmpty() }.toSet()
     }
+    val whitelistPackages = remember(savedWhitelist) {
+        savedWhitelist.split(",").filter { it.isNotEmpty() }.toSet()
+    }
+    val selectedPackages = if (isWhitelist) whitelistPackages else blacklistPackages
 
     var appsList by remember { mutableStateOf(AppCache.cachedList ?: emptyList()) }
     var isLoading by remember { mutableStateOf(AppCache.cachedList == null) }
@@ -185,7 +193,7 @@ fun ExceptionsTab() {
             onSwitchToBlacklist = {
                 if (isWhitelist) {
                     scope.launch {
-                        settingsStore.saveExceptionsMode("", false)
+                        settingsStore.saveExceptionsMode(false)
                         delay(300)
                         TunnelManager.reloadWireGuard()
                     }
@@ -194,7 +202,7 @@ fun ExceptionsTab() {
             onSwitchToWhitelist = {
                 if (!isWhitelist) {
                     scope.launch {
-                        settingsStore.saveExceptionsMode("", true)
+                        settingsStore.saveExceptionsMode(true)
                         delay(300)
                         TunnelManager.reloadWireGuard()
                     }
@@ -263,7 +271,10 @@ fun ExceptionsTab() {
                                     selectedPackages + app.packageName
                                 }
                                 scope.launch {
-                                    settingsStore.saveExcludedApps(newList.joinToString(","))
+                                    settingsStore.saveExcludedAppsForMode(
+                                        packages = newList.joinToString(","),
+                                        isWhitelist = isWhitelist
+                                    )
                                     TunnelManager.reloadWireGuard()
                                 }
                             }
@@ -554,53 +565,66 @@ private fun BypassSwitchRow(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 14.dp, vertical = 12.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
+                .height(76.dp)
+                .padding(horizontal = 16.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Row(
-                modifier = Modifier.weight(1f),
-                verticalAlignment = Alignment.CenterVertically
+            Surface(
+                modifier = Modifier.size(46.dp),
+                shape = RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
             ) {
-                Surface(
-                    modifier = Modifier.size(34.dp),
-                    shape = RoundedCornerShape(12.dp),
-                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Icon(
-                            imageVector = Icons.Rounded.Apps,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp),
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                    }
-                }
-                Spacer(modifier = Modifier.width(12.dp))
-                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text(
-                        text = "Показывать системные",
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.Medium,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                    Text(
-                        text = "Добавляет в список предустановленные приложения.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        imageVector = Icons.Rounded.Apps,
+                        contentDescription = null,
+                        modifier = Modifier.size(24.dp),
+                        tint = MaterialTheme.colorScheme.primary
                     )
                 }
             }
-            Switch(
-                checked = checked,
-                onCheckedChange = onCheckedChange,
-                colors = SwitchDefaults.colors(
-                    checkedThumbColor = MaterialTheme.colorScheme.onPrimary,
-                    checkedTrackColor = MaterialTheme.colorScheme.primary,
-                    uncheckedThumbColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                    uncheckedTrackColor = MaterialTheme.colorScheme.surface
+
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(start = 12.dp, end = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Text(
+                    text = "Показывать системные",
+                    style = MaterialTheme.typography.bodyMedium.copy(
+                        fontSize = 16.sp,
+                        lineHeight = 20.sp
+                    ),
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
-            )
+                Text(
+                    text = "Добавляет в список предустановленные приложения.",
+                    style = MaterialTheme.typography.bodySmall.copy(
+                        fontSize = 12.sp,
+                        lineHeight = 16.sp
+                    ),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides 0.dp) {
+                Switch(
+                    checked = checked,
+                    onCheckedChange = onCheckedChange,
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = MaterialTheme.colorScheme.onPrimary,
+                        checkedTrackColor = MaterialTheme.colorScheme.primary,
+                        uncheckedThumbColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                        uncheckedTrackColor = MaterialTheme.colorScheme.surface
+                    )
+                )
+            }
         }
     }
 }
