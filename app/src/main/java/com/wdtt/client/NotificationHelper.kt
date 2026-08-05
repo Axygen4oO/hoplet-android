@@ -13,6 +13,7 @@ import androidx.core.content.ContextCompat
 
 object NotificationHelper {
     const val TUNNEL_CHANNEL_ID = "wdtt_tunnel_v5"
+    const val SERVER_NOTIFICATIONS_CHANNEL_ID = "wdtt_server_notifications_v1"
 
     fun hasPostNotificationsPermission(context: Context): Boolean {
         if (Build.VERSION.SDK_INT < 33) return true
@@ -44,6 +45,25 @@ object NotificationHelper {
             lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
             setSound(null, null)
             enableVibration(false)
+        }
+        manager.createNotificationChannel(channel)
+    }
+
+    fun ensureServerNotificationsChannel(context: Context) {
+        if (Build.VERSION.SDK_INT < 26) return
+        val manager = context.getSystemService(NotificationManager::class.java) ?: return
+        val existing = manager.getNotificationChannel(SERVER_NOTIFICATIONS_CHANNEL_ID)
+        if (existing != null && existing.importance >= NotificationManager.IMPORTANCE_DEFAULT) {
+            return
+        }
+        val channel = NotificationChannel(
+            SERVER_NOTIFICATIONS_CHANNEL_ID,
+            "Server Notifications",
+            NotificationManager.IMPORTANCE_DEFAULT,
+        ).apply {
+            description = "Уведомления от сервера проекта"
+            setShowBadge(true)
+            lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
         }
         manager.createNotificationChannel(channel)
     }

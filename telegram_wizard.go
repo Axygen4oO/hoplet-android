@@ -15,6 +15,9 @@ func handleTelegramInput(
 	cmd string,
 	wgDev *device.Device,
 ) bool {
+	if handleNotificationInput(token, adminID, cmd) {
+		return true
+	}
 
 	if tgState.WaitingForLabel {
 		log.Printf("DEBUG: WaitingForLabel=true, cmd='%s'", cmd)

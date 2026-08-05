@@ -177,15 +177,19 @@ class MainActivity : ComponentActivity() {
         super.onStart()
         activeActivities++
         currentActivity = this
+        ServerNotificationManager.start(applicationContext)
         ManlCaptchaWebViewManager.checkAndShowPendingCaptcha(this)
         VkAuthWebViewManager.checkAndShowPendingAuth(this)
     }
 
     override fun onStop() {
         super.onStop()
-        activeActivities--
+        activeActivities = (activeActivities - 1).coerceAtLeast(0)
         if (currentActivity == this) {
             currentActivity = null
+        }
+        if (activeActivities == 0) {
+            ServerNotificationManager.stop()
         }
     }
 

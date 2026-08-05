@@ -14,8 +14,12 @@ func handleCallback(
 	adminID int64,
 	data string,
 	messageID int,
+	messageText string,
 	wgDev *device.Device,
 ) bool {
+	if handleNotificationCallback(token, adminID, data, messageID, messageText) {
+		return true
+	}
 
 	switch data {
 

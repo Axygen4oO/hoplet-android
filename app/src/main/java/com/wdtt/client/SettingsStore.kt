@@ -141,6 +141,7 @@ class SettingsStore(context: Context) {
         private val UPDATE_DIALOG_LAST_ACTION = stringPreferencesKey("update_dialog_last_action")
         private val UPDATE_DIALOG_LAST_ACTION_AT = longPreferencesKey("update_dialog_last_action_at")
         private val UPDATE_DOWNLOAD_STATE = stringPreferencesKey("update_download_state")
+        private val LAST_SERVER_NOTIFICATION_ID = longPreferencesKey("last_server_notification_id")
         private val CHANGELOG_SHOWN_VERSION_CODE = intPreferencesKey("changelog_shown_version_code")
         private val SUPPORT_NOTICE_SHOWN_VERSION_CODE = intPreferencesKey("support_notice_shown_version_code")
 
@@ -459,6 +460,7 @@ class SettingsStore(context: Context) {
     val updateDownloadState: Flow<AppUpdateDownloadSnapshot> = dataStore.data.map {
         decodeAppUpdateSnapshot(it[UPDATE_DOWNLOAD_STATE])
     }
+    val lastServerNotificationId: Flow<Long> = dataStore.data.map { it[LAST_SERVER_NOTIFICATION_ID] ?: 0L }
 
     val changelogShownVersionCode: Flow<Int> = dataStore.data.map { it[CHANGELOG_SHOWN_VERSION_CODE] ?: 0 }
     val supportNoticeShownVersionCode: Flow<Int> = dataStore.data.map { it[SUPPORT_NOTICE_SHOWN_VERSION_CODE] ?: 0 }
@@ -589,6 +591,16 @@ class SettingsStore(context: Context) {
     suspend fun clearUpdateDownloadState() {
         dataStore.edit { prefs ->
             prefs.remove(UPDATE_DOWNLOAD_STATE)
+        }
+    }
+
+    suspend fun getLastServerNotificationId(): Long {
+        return dataStore.data.first()[LAST_SERVER_NOTIFICATION_ID] ?: 0L
+    }
+
+    suspend fun saveLastServerNotificationId(id: Long) {
+        dataStore.edit { prefs ->
+            prefs[LAST_SERVER_NOTIFICATION_ID] = id
         }
     }
 

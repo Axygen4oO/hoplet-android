@@ -172,10 +172,11 @@ type Database struct {
 	Passwords map[string]*PasswordEntry `json:"passwords"`
 	Devices   map[string]*ClientDevice  `json:"devices"`
 
-	Users          map[string]*UserAccount   `json:"users"`
-	Orders         map[string]*Order         `json:"orders"`
-	SupportTickets map[string]*SupportTicket `json:"support_tickets"`
-	VKHashes       []string                  `json:"vk_hashes"`
+	Users            map[string]*UserAccount   `json:"users"`
+	Orders           map[string]*Order         `json:"orders"`
+	SupportTickets   map[string]*SupportTicket `json:"support_tickets"`
+	VKHashes         []string                  `json:"vk_hashes"`
+	LastNotification AppNotification           `json:"last_notification"`
 }
 
 type dbSaveState struct {
@@ -739,16 +740,17 @@ func cloneDatabaseLocked() *Database {
 	}
 
 	snapshot := &Database{
-		MainPassword:   db.MainPassword,
-		JWTSecret:      db.JWTSecret,
-		AdminID:        db.AdminID,
-		BotToken:       db.BotToken,
-		Passwords:      make(map[string]*PasswordEntry, len(db.Passwords)),
-		Devices:        make(map[string]*ClientDevice, len(db.Devices)),
-		Users:          make(map[string]*UserAccount, len(db.Users)),
-		Orders:         make(map[string]*Order, len(db.Orders)),
-		SupportTickets: make(map[string]*SupportTicket, len(db.SupportTickets)),
-		VKHashes:       append([]string(nil), db.VKHashes...),
+		MainPassword:     db.MainPassword,
+		JWTSecret:        db.JWTSecret,
+		AdminID:          db.AdminID,
+		BotToken:         db.BotToken,
+		Passwords:        make(map[string]*PasswordEntry, len(db.Passwords)),
+		Devices:          make(map[string]*ClientDevice, len(db.Devices)),
+		Users:            make(map[string]*UserAccount, len(db.Users)),
+		Orders:           make(map[string]*Order, len(db.Orders)),
+		SupportTickets:   make(map[string]*SupportTicket, len(db.SupportTickets)),
+		VKHashes:         append([]string(nil), db.VKHashes...),
+		LastNotification: db.LastNotification,
 	}
 
 	for password, entry := range db.Passwords {
@@ -947,16 +949,17 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 				if u.CallbackQuery.Message.Chat.ID == adminID {
 					data := u.CallbackQuery.Data
 					log.Println("CALLBACK:", data)
+					answerCallback(token, u.CallbackQuery.ID)
 					if handleCallback(
 						token,
 						adminID,
 						data,
 						u.CallbackQuery.Message.MessageID,
+						u.CallbackQuery.Message.Text,
 						wgDev,
 					) {
 						continue
 					}
-					answerCallback(token, u.CallbackQuery.ID)
 
 					if strings.HasPrefix(data, "viewpass_") {
 						// Просмотр деталей пароля
@@ -1554,6 +1557,10 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 			cmd := strings.TrimSpace(msg.Text)
 
 			if msg.Chat.ID != adminID {
+				if cmd == "/notify" {
+					denyNotificationCommandForNonAdmin(token, actor.ChatID)
+					continue
+				}
 				if handleCabinetMessage(token, actor, cmd) {
 					continue
 				}
@@ -2817,6 +2824,7 @@ func main() {
 		mux.HandleFunc("/api/orders/retry", retryOrderHandler)
 		mux.HandleFunc("/api/orders/cancel", cancelOrderHandler)
 		mux.HandleFunc("/api/orders", ordersHandler)
+		mux.HandleFunc("/api/notifications/latest", latestNotificationHandler)
 		mux.HandleFunc("/api/payments/telegram/confirm", telegramPaymentConfirmHandler)
 		mux.HandleFunc("/api/vkhashes", func(w http.ResponseWriter, r *http.Request) {
 			switch r.Method {

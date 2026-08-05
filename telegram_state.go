@@ -18,6 +18,11 @@ type TelegramState struct {
 
 	WizardDays    int
 	WizardDevices int
+
+	NotificationStage                      string
+	NotificationTitle                      string
+	NotificationPreview                    string
+	NotificationIgnoreNextDuplicateMessage bool
 }
 
 var tgState TelegramState

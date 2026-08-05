@@ -10,6 +10,15 @@ func handleCommand(
 ) bool {
 
 	switch cmd {
+	case "/notify":
+		startNotificationCompose(token, adminID)
+		return true
+
+	case "/cancel":
+		if hasActiveNotificationCompose() {
+			cancelNotificationCompose(token, adminID)
+			return true
+		}
 
 	case "/start", "/help":
 		showMainPanel(
