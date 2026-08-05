@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
@@ -34,19 +35,80 @@ private data class ServerNotification(
 
 object ServerNotificationManager {
     private const val TAG = "ServerNotify"
-    private const val POLL_INTERVAL_MS = 300000L
     private const val CONNECT_TIMEOUT_MS = 5000
     private const val READ_TIMEOUT_MS = 5000
     private const val NOTIFICATION_ID = 41051
 
+    internal enum class PollingOwner {
+        APP_FOREGROUND,
+        TUNNEL_SERVICE,
+    }
+
+    internal object PollingConfig {
+        const val FAST_INTERVAL_MS = 5_000L
+        const val NORMAL_INTERVAL_MS = 30_000L
+        const val SLOW_INTERVAL_MS = 2 * 60_000L
+        const val FAST_PHASE_DURATION_MS = 60_000L
+        const val NORMAL_PHASE_DURATION_MS = 5 * 60_000L
+    }
+
+    internal class AdaptivePollingCadence(
+        startedAtElapsedMs: Long,
+    ) {
+        private var phaseStartedAtElapsedMs = startedAtElapsedMs
+
+        fun currentIntervalMs(nowElapsedMs: Long): Long {
+            val elapsedSincePhaseStartMs = (nowElapsedMs - phaseStartedAtElapsedMs).coerceAtLeast(0L)
+            return when {
+                elapsedSincePhaseStartMs < PollingConfig.FAST_PHASE_DURATION_MS ->
+                    PollingConfig.FAST_INTERVAL_MS
+                elapsedSincePhaseStartMs < PollingConfig.NORMAL_PHASE_DURATION_MS ->
+                    PollingConfig.NORMAL_INTERVAL_MS
+                else ->
+                    PollingConfig.SLOW_INTERVAL_MS
+            }
+        }
+
+        fun restartFastPhase(nowElapsedMs: Long) {
+            phaseStartedAtElapsedMs = nowElapsedMs
+        }
+    }
+
+    internal class PollingSessionTracker {
+        private val activeOwners = linkedSetOf<PollingOwner>()
+
+        fun activate(owner: PollingOwner) {
+            activeOwners.add(owner)
+        }
+
+        fun deactivate(owner: PollingOwner) {
+            activeOwners.remove(owner)
+        }
+
+        fun hasActiveOwners(): Boolean = activeOwners.isNotEmpty()
+
+        fun activeOwnerCount(): Int = activeOwners.size
+    }
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val lock = Any()
+    private val sessionTracker = PollingSessionTracker()
     @Volatile
     private var pollJob: Job? = null
 
     fun start(context: Context) {
+        start(context, PollingOwner.APP_FOREGROUND)
+    }
+
+    internal fun startForTunnel(context: Context) {
+        start(context, PollingOwner.TUNNEL_SERVICE)
+    }
+
+    private fun start(context: Context, owner: PollingOwner) {
         synchronized(lock) {
+            sessionTracker.activate(owner)
             if (pollJob?.isActive == true) return
+            if (!sessionTracker.hasActiveOwners()) return
             val appContext = context.applicationContext
             pollJob = scope.launch {
                 pollLoop(appContext)
@@ -55,7 +117,20 @@ object ServerNotificationManager {
     }
 
     fun stop() {
+        stop(PollingOwner.APP_FOREGROUND)
+    }
+
+    internal fun stopForTunnel() {
+        stop(PollingOwner.TUNNEL_SERVICE)
+    }
+
+    private fun stop(owner: PollingOwner) {
         val jobToCancel = synchronized(lock) {
+            sessionTracker.deactivate(owner)
+            if (sessionTracker.hasActiveOwners()) {
+                return@synchronized null
+            }
+
             val existing = pollJob
             pollJob = null
             existing
@@ -65,27 +140,34 @@ object ServerNotificationManager {
 
     private suspend fun pollLoop(context: Context) {
         val settingsStore = SettingsStore(context)
+        val cadence = AdaptivePollingCadence(SystemClock.elapsedRealtime())
         while (currentCoroutineContext().isActive) {
-            runCatching {
+            val shouldRestartFastPhase = runCatching {
                 checkOnce(context, settingsStore)
             }.onFailure { error ->
                 Log.w(TAG, "Notification polling failed: ${error.message}", error)
+            }.getOrDefault(false)
+
+            if (shouldRestartFastPhase) {
+                cadence.restartFastPhase(SystemClock.elapsedRealtime())
             }
-            delay(POLL_INTERVAL_MS)
+
+            delay(cadence.currentIntervalMs(SystemClock.elapsedRealtime()))
         }
     }
 
-    private suspend fun checkOnce(context: Context, settingsStore: SettingsStore) {
-        val serverEndpoint = resolveServerEndpoint(settingsStore) ?: return
+    private suspend fun checkOnce(context: Context, settingsStore: SettingsStore): Boolean {
+        val serverEndpoint = resolveServerEndpoint(settingsStore) ?: return false
         val lastNotificationId = settingsStore.getLastServerNotificationId()
-        val notification = fetchLatestNotification(serverEndpoint, lastNotificationId) ?: return
-        if (notification.id <= lastNotificationId) return
+        val notification = fetchLatestNotification(serverEndpoint, lastNotificationId) ?: return false
+        if (notification.id <= lastNotificationId) return false
 
         if (!showNotification(context, notification)) {
-            return
+            return false
         }
 
         settingsStore.saveLastServerNotificationId(notification.id)
+        return true
     }
 
     private suspend fun resolveServerEndpoint(settingsStore: SettingsStore): String? {

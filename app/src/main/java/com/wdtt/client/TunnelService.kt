@@ -203,6 +203,7 @@ class TunnelService : Service() {
         updateNotification("Подключение...")
         acquireWakeLock()
         acquireWifiLock()
+        ServerNotificationManager.startForTunnel(applicationContext)
 
         // Подготавливаем CaptchaWebViewManager (не создаёт WebView — просто сохраняет контекст)
         // Вызываем всегда — дёшево, а WebView создаётся на лету при каждом запросе капчи
@@ -220,6 +221,7 @@ class TunnelService : Service() {
 
     private fun stopTunnel() {
         updateJob?.cancel()
+        ServerNotificationManager.stopForTunnel()
 
         // Уничтожаем текущий WebView (если капча решается) и чистим контекст
         CaptchaWebViewManager.onTunnelStop()
@@ -420,6 +422,7 @@ class TunnelService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         networkMonitor.stop()
+        ServerNotificationManager.stopForTunnel()
         stopTunnel()
     }
 
