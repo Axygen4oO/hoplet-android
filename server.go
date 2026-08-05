@@ -67,6 +67,7 @@ type ClientDevice struct {
 	PubKey     string `json:"pub_key"`
 	DownBytes  int64  `json:"down_bytes"`
 	UpBytes    int64  `json:"up_bytes"`
+	LastSeenAt int64  `json:"last_seen_at,omitempty"`
 }
 
 type PasswordEntry struct {
@@ -141,6 +142,11 @@ type UserAccount struct {
 
 	Role string `json:"role,omitempty"`
 
+	TelegramID int64 `json:"telegram_id,omitempty"`
+
+	TelegramAuthToken     string `json:"telegram_auth_token,omitempty"`
+	TelegramAuthExpiresAt int64  `json:"telegram_auth_expires_at,omitempty"`
+
 	SubscriptionStatus string `json:"subscription_status"`
 
 	SubscriptionPlan string `json:"subscription_plan"`
@@ -150,6 +156,11 @@ type UserAccount struct {
 	DeviceLimit int `json:"device_limit"`
 
 	SubscriptionID string `json:"subscription_id"`
+
+	Notify7Days bool   `json:"notify_7_days,omitempty"`
+	Notify3Days bool   `json:"notify_3_days,omitempty"`
+	NotifyNews  bool   `json:"notify_news,omitempty"`
+	Language    string `json:"language,omitempty"`
 }
 
 type Database struct {
@@ -161,9 +172,20 @@ type Database struct {
 	Passwords map[string]*PasswordEntry `json:"passwords"`
 	Devices   map[string]*ClientDevice  `json:"devices"`
 
-	Users    map[string]*UserAccount `json:"users"`
-	Orders   map[string]*Order       `json:"orders"`
-	VKHashes []string                `json:"vk_hashes"`
+	Users          map[string]*UserAccount   `json:"users"`
+	Orders         map[string]*Order         `json:"orders"`
+	SupportTickets map[string]*SupportTicket `json:"support_tickets"`
+	VKHashes       []string                  `json:"vk_hashes"`
+}
+
+type dbSaveState struct {
+	mu              sync.Mutex
+	cond            *sync.Cond
+	started         bool
+	pending         *Database
+	pendingVersion  uint64
+	inFlightVersion uint64
+	writtenVersion  uint64
 }
 
 var (
@@ -171,14 +193,89 @@ var (
 	dbMutex     sync.Mutex
 	dbFile      string
 	globalWgDev *device.Device
+	asyncDBSave = newDBSaveState()
 )
 var yookassaShopID string
 var yookassaSecretKey string
+var telegramPaymentsProviderToken string
 var botTokenGlobal string
 var botAdminIDGlobal int64
 var expiredSubscriptions []string
 
 var serverWrapKeys = newWrapKeyStore()
+
+func newDBSaveState() *dbSaveState {
+	state := &dbSaveState{}
+	state.cond = sync.NewCond(&state.mu)
+	return state
+}
+
+func (s *dbSaveState) ensureWorker() {
+	s.mu.Lock()
+	if s.started {
+		s.mu.Unlock()
+		return
+	}
+	s.started = true
+	s.mu.Unlock()
+
+	go s.loop()
+}
+
+func (s *dbSaveState) loop() {
+	for {
+		s.mu.Lock()
+		for s.pending == nil {
+			s.cond.Wait()
+		}
+
+		snapshot := s.pending
+		version := s.pendingVersion
+		s.pending = nil
+		s.inFlightVersion = version
+		s.mu.Unlock()
+
+		if err := writeDBSnapshot(snapshot); err != nil {
+			log.Printf("[DB] async save failed: %v", err)
+		}
+
+		s.mu.Lock()
+		if version > s.writtenVersion {
+			s.writtenVersion = version
+		}
+		if s.inFlightVersion == version {
+			s.inFlightVersion = 0
+		}
+		s.cond.Broadcast()
+		s.mu.Unlock()
+	}
+}
+
+func (s *dbSaveState) queue(snapshot *Database) {
+	if snapshot == nil {
+		return
+	}
+
+	s.ensureWorker()
+
+	s.mu.Lock()
+	s.pending = snapshot
+	s.pendingVersion++
+	s.cond.Signal()
+	s.mu.Unlock()
+}
+
+func (s *dbSaveState) wait() {
+	s.mu.Lock()
+	target := s.pendingVersion
+	if s.inFlightVersion > target {
+		target = s.inFlightVersion
+	}
+	for s.writtenVersion < target {
+		s.cond.Wait()
+	}
+	s.mu.Unlock()
+}
 
 const (
 	passChars             = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789"
@@ -408,8 +505,7 @@ func (s *wrapKeyStore) Unwrap(raw, dst []byte) ([]byte, int, error) {
 	return nil, 0, errors.New("wrap: auth failed")
 }
 
-func refreshWrapKeysFromDBLocked() error {
-
+func snapshotWrapPasswordsLocked() (string, []string) {
 	log.Printf("[WRAP] Refreshing keys, passwords in DB: %d", len(db.Passwords))
 
 	passwords := make([]string, 0, len(db.Passwords))
@@ -422,52 +518,95 @@ func refreshWrapKeysFromDBLocked() error {
 
 	log.Printf("[WRAP] Active passwords after filter: %d", len(passwords))
 
-	return serverWrapKeys.SetPasswords(db.MainPassword, passwords)
+	return db.MainPassword, passwords
+}
+
+func refreshWrapKeys(mainPassword string, passwords []string) error {
+	return serverWrapKeys.SetPasswords(mainPassword, passwords)
+}
+
+func refreshWrapKeysFromDB() error {
+	dbMutex.Lock()
+	mainPassword, passwords := snapshotWrapPasswordsLocked()
+	dbMutex.Unlock()
+	return refreshWrapKeys(mainPassword, passwords)
 }
 
 func reloadDB(wgDev *device.Device) error {
-	dbMutex.Lock()
-	defer dbMutex.Unlock()
-
+	asyncDBSave.wait()
 	data, err := os.ReadFile(dbFile)
 	if err != nil {
 		return fmt.Errorf("read db file: %w", err)
 	}
 
-	oldDB := db
-
 	newDB := &Database{
-		Passwords: make(map[string]*PasswordEntry),
-		Devices:   make(map[string]*ClientDevice),
+		Passwords:      make(map[string]*PasswordEntry),
+		Devices:        make(map[string]*ClientDevice),
+		Users:          make(map[string]*UserAccount),
+		Orders:         make(map[string]*Order),
+		SupportTickets: make(map[string]*SupportTicket),
 	}
 	if err := json.Unmarshal(data, newDB); err != nil {
 		return fmt.Errorf("parse db json: %w", err)
 	}
 
+	if newDB.Passwords == nil {
+		newDB.Passwords = make(map[string]*PasswordEntry)
+	}
+	if newDB.Devices == nil {
+		newDB.Devices = make(map[string]*ClientDevice)
+	}
+	if newDB.Users == nil {
+		newDB.Users = make(map[string]*UserAccount)
+	}
+	if newDB.Orders == nil {
+		newDB.Orders = make(map[string]*Order)
+	}
+	if newDB.SupportTickets == nil {
+		newDB.SupportTickets = make(map[string]*SupportTicket)
+	}
+	if newDB.VKHashes == nil {
+		newDB.VKHashes = []string{}
+	}
+
+	dbMutex.Lock()
+	oldDB := db
+
 	newDB.MainPassword = oldDB.MainPassword
+	if newDB.JWTSecret == "" {
+		newDB.JWTSecret = oldDB.JWTSecret
+	}
 	newDB.AdminID = oldDB.AdminID
 	newDB.BotToken = oldDB.BotToken
 
 	db = newDB
+	if ensureJWTSecretLocked() {
+		saveDBLocked()
+	}
 
-	// Очищаем истёкшие
-	cleanupExpiredPasswordsLocked(wgDev)
-
-	// Находим удаленные устройства и удаляем их из WireGuard
+	expiredRemovedCount, expiredRemovedDevices := cleanupExpiredPasswordsLocked()
+	removedDevices := make([]*ClientDevice, 0, len(oldDB.Devices))
 	for devID, oldDev := range oldDB.Devices {
 		if _, exists := db.Devices[devID]; !exists {
-			removePeerFromWG(wgDev, oldDev)
+			removedDevices = append(removedDevices, oldDev)
 		}
 	}
-
-	// Синхронизируем новые/оставшиеся устройства с WireGuard
-	for _, dev := range db.Devices {
-		upsertPeerInWG(wgDev, dev)
+	purgeRemovedDeviceStatsLocked(append(expiredRemovedDevices, removedDevices...))
+	if expiredRemovedCount > 0 {
+		saveDBLocked()
 	}
 
-	// Обновляем криптографические WRAP-ключи в памяти
-	if err := refreshWrapKeysFromDBLocked(); err != nil {
+	persistedDevices := collectActiveWGDevicesLocked()
+	wrapMainPassword, wrapPasswords := snapshotWrapPasswordsLocked()
+	dbMutex.Unlock()
+
+	if err := refreshWrapKeys(wrapMainPassword, wrapPasswords); err != nil {
 		return fmt.Errorf("refresh wrap keys: %w", err)
+	}
+
+	applyRemovedDeviceRuntimeState(wgDev, append(expiredRemovedDevices, removedDevices...))
+	for _, dev := range persistedDevices {
+		upsertPeerInWG(wgDev, dev)
 	}
 
 	return nil
@@ -476,10 +615,11 @@ func reloadDB(wgDev *device.Device) error {
 func initDB(dir, mainPass, adminID, botToken string) {
 	dbFile = filepath.Join(dir, "passwords.json")
 	db = &Database{
-		Passwords: make(map[string]*PasswordEntry),
-		Devices:   make(map[string]*ClientDevice),
-		Users:     make(map[string]*UserAccount),
-		Orders:    make(map[string]*Order),
+		Passwords:      make(map[string]*PasswordEntry),
+		Devices:        make(map[string]*ClientDevice),
+		Users:          make(map[string]*UserAccount),
+		Orders:         make(map[string]*Order),
+		SupportTickets: make(map[string]*SupportTicket),
 	}
 
 	data, err := os.ReadFile(dbFile)
@@ -503,6 +643,10 @@ func initDB(dir, mainPass, adminID, botToken string) {
 		db.Orders = make(map[string]*Order)
 	}
 
+	if db.SupportTickets == nil {
+		db.SupportTickets = make(map[string]*SupportTicket)
+	}
+
 	if db.VKHashes == nil {
 		db.VKHashes = []string{}
 	}
@@ -510,16 +654,147 @@ func initDB(dir, mainPass, adminID, botToken string) {
 	db.MainPassword = mainPass
 	db.AdminID = adminID
 	db.BotToken = botToken
+	ensureJWTSecretLocked()
 
 	saveDB()
-	if err := refreshWrapKeysFromDBLocked(); err != nil {
+	if err := refreshWrapKeysFromDB(); err != nil {
 		log.Fatalf("[WRAP] init keys: %v", err)
 	}
 }
 
+func clonePasswordEntry(entry *PasswordEntry) *PasswordEntry {
+	if entry == nil {
+		return nil
+	}
+
+	cloned := *entry
+	cloned.DeviceIDs = append([]string(nil), entry.DeviceIDs...)
+	return &cloned
+}
+
+func cloneClientDevice(dev *ClientDevice) *ClientDevice {
+	if dev == nil {
+		return nil
+	}
+
+	cloned := *dev
+	return &cloned
+}
+
+func cloneUserAccount(user *UserAccount) *UserAccount {
+	if user == nil {
+		return nil
+	}
+
+	cloned := *user
+	return &cloned
+}
+
+func cloneOrder(order *Order) *Order {
+	if order == nil {
+		return nil
+	}
+
+	cloned := *order
+	return &cloned
+}
+
+func cloneSupportAIHint(hint *SupportAIHint) *SupportAIHint {
+	if hint == nil {
+		return nil
+	}
+
+	cloned := *hint
+	cloned.SimilarTicketIDs = append([]string(nil), hint.SimilarTicketIDs...)
+	return &cloned
+}
+
+func cloneSupportMessage(message *SupportMessage) *SupportMessage {
+	if message == nil {
+		return nil
+	}
+
+	cloned := *message
+	cloned.Attachments = append([]SupportAttachment(nil), message.Attachments...)
+	return &cloned
+}
+
+func cloneSupportTicket(ticket *SupportTicket) *SupportTicket {
+	if ticket == nil {
+		return nil
+	}
+
+	cloned := *ticket
+	cloned.Messages = make([]*SupportMessage, len(ticket.Messages))
+	for i, message := range ticket.Messages {
+		cloned.Messages[i] = cloneSupportMessage(message)
+	}
+	cloned.AIHint = cloneSupportAIHint(ticket.AIHint)
+	return &cloned
+}
+
+func cloneDatabaseLocked() *Database {
+	if db == nil {
+		return nil
+	}
+
+	snapshot := &Database{
+		MainPassword:   db.MainPassword,
+		JWTSecret:      db.JWTSecret,
+		AdminID:        db.AdminID,
+		BotToken:       db.BotToken,
+		Passwords:      make(map[string]*PasswordEntry, len(db.Passwords)),
+		Devices:        make(map[string]*ClientDevice, len(db.Devices)),
+		Users:          make(map[string]*UserAccount, len(db.Users)),
+		Orders:         make(map[string]*Order, len(db.Orders)),
+		SupportTickets: make(map[string]*SupportTicket, len(db.SupportTickets)),
+		VKHashes:       append([]string(nil), db.VKHashes...),
+	}
+
+	for password, entry := range db.Passwords {
+		snapshot.Passwords[password] = clonePasswordEntry(entry)
+	}
+	for deviceID, dev := range db.Devices {
+		snapshot.Devices[deviceID] = cloneClientDevice(dev)
+	}
+	for email, user := range db.Users {
+		snapshot.Users[email] = cloneUserAccount(user)
+	}
+	for orderID, order := range db.Orders {
+		snapshot.Orders[orderID] = cloneOrder(order)
+	}
+	for ticketID, ticket := range db.SupportTickets {
+		snapshot.SupportTickets[ticketID] = cloneSupportTicket(ticket)
+	}
+
+	return snapshot
+}
+
+func writeDBSnapshot(snapshot *Database) error {
+	if snapshot == nil {
+		return nil
+	}
+
+	data, err := json.MarshalIndent(snapshot, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(dbFile, data, 0600)
+}
+
+func saveDBLocked() {
+	asyncDBSave.queue(cloneDatabaseLocked())
+}
+
 func saveDB() {
-	data, _ := json.MarshalIndent(db, "", "  ")
-	os.WriteFile(dbFile, data, 0600)
+	dbMutex.Lock()
+	snapshot := cloneDatabaseLocked()
+	dbMutex.Unlock()
+
+	if err := writeDBSnapshot(snapshot); err != nil {
+		log.Printf("[DB] save failed: %v", err)
+	}
 }
 
 func isPasswordExpired(entry *PasswordEntry) bool {
@@ -567,9 +842,21 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 		cmds := `{"commands":[
         {"command":"new","description":"Создать подписку"},
         {"command":"list","description":"Список подписок"},
-        {"command":"panel","description":"Панель управления"}
+        {"command":"panel","description":"Панель управления"},
+        {"command":"cabinet","description":"Личный кабинет"},
+        {"command":"support","description":"Служба поддержки"}
 ]}`
-		resp, err := http.Post(fmt.Sprintf("https://api.telegram.org/bot%s/setMyCommands", token), "application/json", strings.NewReader(cmds))
+		req, err := http.NewRequest(
+			http.MethodPost,
+			fmt.Sprintf("https://api.telegram.org/bot%s/setMyCommands", token),
+			strings.NewReader(cmds),
+		)
+		if err != nil {
+			log.Printf("[BOT] setMyCommands request error: %v", err)
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := telegramHTTPClient.Do(req)
 		if err == nil {
 			resp.Body.Close()
 		}
@@ -599,23 +886,10 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 		var res struct {
 			Ok     bool `json:"ok"`
 			Result []struct {
-				UpdateID int `json:"update_id"`
-				Message  *struct {
-					Chat struct {
-						ID int64 `json:"id"`
-					} `json:"chat"`
-					Text string `json:"text"`
-				} `json:"message"`
-				CallbackQuery *struct {
-					ID      string `json:"id"`
-					Data    string `json:"data"`
-					Message struct {
-						MessageID int `json:"message_id"`
-						Chat      struct {
-							ID int64 `json:"id"`
-						} `json:"chat"`
-					} `json:"message"`
-				} `json:"callback_query"`
+				UpdateID         int                              `json:"update_id"`
+				Message          *telegramMessagePayload          `json:"message"`
+				CallbackQuery    *telegramCallbackQueryPayload    `json:"callback_query"`
+				PreCheckoutQuery *telegramPreCheckoutQueryPayload `json:"pre_checkout_query"`
 			} `json:"result"`
 		}
 
@@ -630,278 +904,331 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 		for _, u := range res.Result {
 			offset = u.UpdateID + 1
 
+			if u.PreCheckoutQuery != nil {
+				actor := cabinetActor{}
+				if u.PreCheckoutQuery.From != nil {
+					actor.UserID = u.PreCheckoutQuery.From.ID
+					actor.ChatID = u.PreCheckoutQuery.From.ID
+					actor.Username = u.PreCheckoutQuery.From.Username
+					actor.FirstName = u.PreCheckoutQuery.From.FirstName
+					actor.LastName = u.PreCheckoutQuery.From.LastName
+				}
+
+				if handleTelegramPreCheckout(token, actor, u.PreCheckoutQuery) {
+					continue
+				}
+			}
+
 			// ═══ Callback кнопки ═══
-			if u.CallbackQuery != nil && u.CallbackQuery.Message.Chat.ID == adminID {
-				data := u.CallbackQuery.Data
-				log.Println("CALLBACK:", data)
-				if handleCallback(
+			if u.CallbackQuery != nil {
+				actor := cabinetActor{
+					ChatID: u.CallbackQuery.Message.Chat.ID,
+				}
+				if u.CallbackQuery.From != nil {
+					actor.UserID = u.CallbackQuery.From.ID
+					actor.Username = u.CallbackQuery.From.Username
+					actor.FirstName = u.CallbackQuery.From.FirstName
+					actor.LastName = u.CallbackQuery.From.LastName
+				}
+				if actor.UserID == 0 {
+					actor.UserID = actor.ChatID
+				}
+
+				if handleSupportCallback(
 					token,
-					adminID,
-					data,
+					actor,
+					u.CallbackQuery.ID,
+					u.CallbackQuery.Data,
 					u.CallbackQuery.Message.MessageID,
-					wgDev,
 				) {
 					continue
 				}
-				answerCallback(token, u.CallbackQuery.ID)
 
-				if strings.HasPrefix(data, "viewpass_") {
-					// Просмотр деталей пароля
-					pass := strings.TrimPrefix(data, "viewpass_")
-					dbMutex.Lock()
-					entry, exists := db.Passwords[pass]
-					if !exists || entry == nil {
-						dbMutex.Unlock()
-						sendTelegram(token, adminID, "❌ Пароль не найден", nil)
+				if u.CallbackQuery.Message.Chat.ID == adminID {
+					data := u.CallbackQuery.Data
+					log.Println("CALLBACK:", data)
+					if handleCallback(
+						token,
+						adminID,
+						data,
+						u.CallbackQuery.Message.MessageID,
+						wgDev,
+					) {
 						continue
 					}
-					txt := fmt.Sprintf("👤 *Имя:* %s\n🔑 *Пароль:* `%s`\n", passwordEntryLabel(entry, pass, 0), pass)
-					if entry.VkHash != "" {
-						ports := entry.Ports
-						if ports == "" {
-							ports = "56000,56001,9000"
+					answerCallback(token, u.CallbackQuery.ID)
+
+					if strings.HasPrefix(data, "viewpass_") {
+						// Просмотр деталей пароля
+						pass := strings.TrimPrefix(data, "viewpass_")
+						dbMutex.Lock()
+						entry, exists := db.Passwords[pass]
+						if !exists || entry == nil {
+							dbMutex.Unlock()
+							sendTelegram(token, adminID, "❌ Пароль не найден", nil)
+							continue
 						}
-						pts := strings.Split(ports, ",")
-						srvIP := getPublicIP()
-						link := fmt.Sprintf("wdtt://%s:%s:%s:%s:%s:%s", srvIP, pts[0], pts[1], pts[2], pass, entry.VkHash)
-						txt += fmt.Sprintf("🔗 *Быстрая ссылка:* `%s`\n", link)
-					}
-					if entry.IsDeactivated {
-						txt += "🔴 Статус: *ДЕАКТИВИРОВАН*\n"
-					} else {
-						txt += "🟢 Статус: *АКТИВЕН*\n"
-					}
-
-					if entry.ExpiresAt > 0 {
-						expireTime := time.Unix(entry.ExpiresAt, 0)
-						remaining := time.Until(expireTime)
-						if remaining > 0 {
-							txt += fmt.Sprintf("⏰ Истекает: %s (через %dd)\n", expireTime.Format("02.01.2006"), int(remaining.Hours()/24))
-						} else {
-							txt += "⏰ *ИСТЁК* ❌\n"
-						}
-					} else {
-						txt += "⏰ Бессрочный ♾\n"
-					}
-
-					txt += fmt.Sprintf("\n📊 *Трафик:*\n• Скачано: %.2f MB\n• Отдано: %.2f MB\n", float64(entry.DownBytes)/(1024*1024), float64(entry.UpBytes)/(1024*1024))
-
-					limit := entry.MaxDevices
-					if limit <= 0 {
-						limit = 1
-					}
-					boundCount := len(entry.DeviceIDs)
-					if boundCount == 0 && entry.DeviceID != "" {
-						boundCount = 1
-					}
-
-					txt += fmt.Sprintf("\n📱 *Привязанные устройства* (%d/%d):\n", boundCount, limit)
-					hasDevices := false
-
-					// Legacy
-					// Legacy
-					if entry.DeviceID != "" && len(entry.DeviceIDs) == 0 {
-						hasDevices = true
-						dev, devExists := db.Devices[entry.DeviceID]
-						if devExists {
-							name := dev.DeviceName
-							if name == "" {
-								name = entry.DeviceID
+						txt := fmt.Sprintf("👤 *Имя:* %s\n🔑 *Пароль:* `%s`\n", passwordEntryLabel(entry, pass, 0), pass)
+						linkPorts := ""
+						linkHash := ""
+						if entry.VkHash != "" {
+							ports := entry.Ports
+							if ports == "" {
+								ports = "56000,56001,9000"
 							}
-
-							txt += fmt.Sprintf(
-								"• 📱 %s\n  ID: `%s`\n  IP: `%s`\n  📊 ↑%.1f MB / ↓%.1f MB\n",
-								name,
-								entry.DeviceID,
-								dev.IP,
-								float64(dev.UpBytes)/(1024*1024),
-								float64(dev.DownBytes)/(1024*1024),
-							)
-						} else {
-							txt += fmt.Sprintf("• ID: `%s` (удалено)\n", entry.DeviceID)
+							linkPorts = ports
+							linkHash = entry.VkHash
 						}
-					}
+						if entry.IsDeactivated {
+							txt += "🔴 Статус: *ДЕАКТИВИРОВАН*\n"
+						} else {
+							txt += "🟢 Статус: *АКТИВЕН*\n"
+						}
 
-					// Array
-					// Array
-					for i, id := range entry.DeviceIDs {
-						hasDevices = true
-						dev, devExists := db.Devices[id]
-						if devExists {
-							name := dev.DeviceName
-							if name == "" {
-								name = id
+						if entry.ExpiresAt > 0 {
+							expireTime := time.Unix(entry.ExpiresAt, 0)
+							remaining := time.Until(expireTime)
+							if remaining > 0 {
+								txt += fmt.Sprintf("⏰ Истекает: %s (через %dd)\n", expireTime.Format("02.01.2006"), int(remaining.Hours()/24))
+							} else {
+								txt += "⏰ *ИСТЁК* ❌\n"
 							}
-
-							txt += fmt.Sprintf(
-								"• [%d] 📱 %s\n  ID: `%s`\n  IP: `%s`\n  📊 ↑%.1f MB / ↓%.1f MB\n",
-								i+1,
-								name,
-								id,
-								dev.IP,
-								float64(dev.UpBytes)/(1024*1024),
-								float64(dev.DownBytes)/(1024*1024),
-							)
 						} else {
-							txt += fmt.Sprintf("• [%d] ID: `%s` (удалено)\n", i+1, id)
+							txt += "⏰ Бессрочный ♾\n"
 						}
-					}
 
-					var kb []map[string]interface{}
-					kb = append(kb, map[string]interface{}{
-						"text":          "📂 Получить .conf файл",
-						"callback_data": "getfile_" + pass,
-					})
-					if entry.IsDeactivated {
-						kb = append(kb, map[string]interface{}{
-							"text":          "✅ Активировать",
-							"callback_data": "react_" + pass,
-						})
-					} else {
-						kb = append(kb, map[string]interface{}{
-							"text":          "⏸ Деактивировать",
-							"callback_data": "deact_" + pass,
-						})
-					}
-					if !hasDevices {
-						txt += "_Ожидает первого подключения..._\n"
-					} else {
-						kb = append(kb, map[string]interface{}{
-							"text":          "🗑 Отвязать ВСЕ устройства",
-							"callback_data": "unbind_" + pass,
-						})
-					}
+						txt += fmt.Sprintf("\n📊 *Трафик:*\n• Скачано: %.2f MB\n• Отдано: %.2f MB\n", float64(entry.DownBytes)/(1024*1024), float64(entry.UpBytes)/(1024*1024))
 
-					dbMutex.Unlock()
+						limit := entry.MaxDevices
+						if limit <= 0 {
+							limit = 1
+						}
+						boundCount := len(entry.DeviceIDs)
+						if boundCount == 0 && entry.DeviceID != "" {
+							boundCount = 1
+						}
 
-					kb = append(kb, map[string]interface{}{
-						"text":          "📅 Управление сроком",
-						"callback_data": "expiremenu_" + pass,
-					})
+						txt += fmt.Sprintf("\n📱 *Привязанные устройства* (%d/%d):\n", boundCount, limit)
+						hasDevices := false
 
-					kb = append(kb, map[string]interface{}{
-						"text":          "🗑 Удалить подписку",
-						"callback_data": "confirm_delsub_" + pass,
-					})
-
-					kb = append(kb, map[string]interface{}{
-						"text":          "◀️ Назад к списку",
-						"callback_data": "backlist",
-					})
-					var keyboard [][]map[string]interface{}
-					for _, btn := range kb {
-						keyboard = append(keyboard, []map[string]interface{}{btn})
-
-					}
-					editTelegram(
-						token,
-						adminID,
-						u.CallbackQuery.Message.MessageID,
-						txt,
-						map[string]interface{}{
-							"inline_keyboard": keyboard,
-						},
-					)
-
-				} else if strings.HasPrefix(data, "deact_") {
-					pass := strings.TrimPrefix(data, "deact_")
-					dbMutex.Lock()
-					entry, exists := db.Passwords[pass]
-					if exists && entry != nil {
-						entry.IsDeactivated = true
-						// Отключаем активные устройства от WG
-						if entry.DeviceID != "" {
+						// Legacy
+						// Legacy
+						if entry.DeviceID != "" && len(entry.DeviceIDs) == 0 {
+							hasDevices = true
 							dev, devExists := db.Devices[entry.DeviceID]
 							if devExists {
-								pubHex, _ := b64ToHex(dev.PubKey)
-								wgDev.IpcSet(fmt.Sprintf("public_key=%s\nremove=true\n", pubHex))
+								name := dev.DeviceName
+								if name == "" {
+									name = entry.DeviceID
+								}
+
+								txt += fmt.Sprintf(
+									"• 📱 %s\n  ID: `%s`\n  IP: `%s`\n  📊 ↑%.1f MB / ↓%.1f MB\n",
+									name,
+									entry.DeviceID,
+									dev.IP,
+									float64(dev.UpBytes)/(1024*1024),
+									float64(dev.DownBytes)/(1024*1024),
+								)
+							} else {
+								txt += fmt.Sprintf("• ID: `%s` (удалено)\n", entry.DeviceID)
 							}
 						}
-						for _, id := range entry.DeviceIDs {
+
+						// Array
+						// Array
+						for i, id := range entry.DeviceIDs {
+							hasDevices = true
 							dev, devExists := db.Devices[id]
 							if devExists {
-								pubHex, _ := b64ToHex(dev.PubKey)
-								wgDev.IpcSet(fmt.Sprintf("public_key=%s\nremove=true\n", pubHex))
+								name := dev.DeviceName
+								if name == "" {
+									name = id
+								}
+
+								txt += fmt.Sprintf(
+									"• [%d] 📱 %s\n  ID: `%s`\n  IP: `%s`\n  📊 ↑%.1f MB / ↓%.1f MB\n",
+									i+1,
+									name,
+									id,
+									dev.IP,
+									float64(dev.UpBytes)/(1024*1024),
+									float64(dev.DownBytes)/(1024*1024),
+								)
+							} else {
+								txt += fmt.Sprintf("• [%d] ID: `%s` (удалено)\n", i+1, id)
 							}
 						}
-						saveDB()
-					}
-					dbMutex.Unlock()
-					editTelegram(
-						token,
-						adminID,
-						u.CallbackQuery.Message.MessageID,
-						fmt.Sprintf("⏸ Пароль `%s` деактивирован\n\nНажмите кнопку подписки в списке для обновления информации.", pass),
-						map[string]interface{}{
-							"inline_keyboard": [][]map[string]interface{}{
-								{
-									{
-										"text":          "◀️ Назад к списку",
-										"callback_data": "backlist",
-									},
-								},
-							},
-						},
-					)
 
-				} else if strings.HasPrefix(data, "react_") {
-					pass := strings.TrimPrefix(data, "react_")
-					dbMutex.Lock()
-					entry, exists := db.Passwords[pass]
-					if exists && entry != nil {
-						entry.IsDeactivated = false
-						saveDB()
-					}
-					dbMutex.Unlock()
-					editTelegram(
-						token,
-						adminID,
-						u.CallbackQuery.Message.MessageID,
-						fmt.Sprintf("✅ Пароль `%s` активирован\n\nНажмите кнопку подписки в списке для обновления информации.", pass),
-						map[string]interface{}{
-							"inline_keyboard": [][]map[string]interface{}{
-								{
-									{
-										"text":          "◀️ Назад к списку",
-										"callback_data": "backlist",
-									},
-								},
-							},
-						},
-					)
+						var kb []map[string]interface{}
+						kb = append(kb, map[string]interface{}{
+							"text":          "📂 Получить .conf файл",
+							"callback_data": "getfile_" + pass,
+						})
+						if entry.IsDeactivated {
+							kb = append(kb, map[string]interface{}{
+								"text":          "✅ Активировать",
+								"callback_data": "react_" + pass,
+							})
+						} else {
+							kb = append(kb, map[string]interface{}{
+								"text":          "⏸ Деактивировать",
+								"callback_data": "deact_" + pass,
+							})
+						}
+						if !hasDevices {
+							txt += "_Ожидает первого подключения..._\n"
+						} else {
+							kb = append(kb, map[string]interface{}{
+								"text":          "🗑 Отвязать ВСЕ устройства",
+								"callback_data": "unbind_" + pass,
+							})
+						}
 
-				} else if data == "mainlink" {
-					tgState.TargetPassword = "main"
-					var keyboard [][]map[string]interface{}
-					keyboard = append(keyboard, []map[string]interface{}{
-						{"text": "Да", "callback_data": "ports_def"},
-						{"text": "Нет", "callback_data": "ports_custom"},
-					})
-					sendTelegram(token, adminID, "⚙️ Использовать стандартные порты для главного пароля (56000, 56001, 9000)?", map[string]interface{}{"inline_keyboard": keyboard})
-
-				} else if data == "ports_def" {
-					tgState.TempPorts = "56000,56001,9000"
-					tgState.WaitingForPorts = true
-
-					cmd := strings.Join(db.VKHashes, ",")
-					handleTelegramInput(token, adminID, cmd, wgDev)
-				} else if data == "ports_custom" {
-					tgState.WaitingForPorts = true
-					sendTelegram(token, adminID, "⚙️ Укажите через запятую 3 порта (DTLS,WG,TUN):\nНапример: 56000,56001,9000", nil)
-
-				} else if strings.HasPrefix(data, "getfile_") {
-					pass := strings.TrimPrefix(data, "getfile_")
-
-					dbMutex.Lock()
-					entry, exists := db.Passwords[pass]
-
-					if !exists || entry == nil {
 						dbMutex.Unlock()
-						sendTelegram(token, adminID, "❌ Пароль не найден", nil)
-					} else {
-						srvIP := getPublicIP()
 
-						configJSON := fmt.Sprintf(`{
+						if linkHash != "" {
+							pts := strings.Split(linkPorts, ",")
+							srvIP := getPublicIP()
+							link := fmt.Sprintf("wdtt://%s:%s:%s:%s:%s:%s", srvIP, pts[0], pts[1], pts[2], pass, linkHash)
+							txt += fmt.Sprintf("🔗 *Быстрая ссылка:* `%s`\n", link)
+						}
+
+						kb = append(kb, map[string]interface{}{
+							"text":          "📅 Управление сроком",
+							"callback_data": "expiremenu_" + pass,
+						})
+
+						kb = append(kb, map[string]interface{}{
+							"text":          "🗑 Удалить подписку",
+							"callback_data": "confirm_delsub_" + pass,
+						})
+
+						kb = append(kb, map[string]interface{}{
+							"text":          "◀️ Назад к списку",
+							"callback_data": "backlist",
+						})
+						var keyboard [][]map[string]interface{}
+						for _, btn := range kb {
+							keyboard = append(keyboard, []map[string]interface{}{btn})
+
+						}
+						editTelegram(
+							token,
+							adminID,
+							u.CallbackQuery.Message.MessageID,
+							txt,
+							map[string]interface{}{
+								"inline_keyboard": keyboard,
+							},
+						)
+
+					} else if strings.HasPrefix(data, "deact_") {
+						pass := strings.TrimPrefix(data, "deact_")
+						dbMutex.Lock()
+						entry, exists := db.Passwords[pass]
+						removed := []*ClientDevice{}
+						if exists && entry != nil {
+							entry.IsDeactivated = true
+							if entry.DeviceID != "" {
+								if dev, devExists := db.Devices[entry.DeviceID]; devExists {
+									removed = append(removed, dev)
+								}
+							}
+							for _, id := range entry.DeviceIDs {
+								if dev, devExists := db.Devices[id]; devExists {
+									removed = append(removed, dev)
+								}
+							}
+							purgeRemovedDeviceStatsLocked(removed)
+							saveDBLocked()
+						}
+						dbMutex.Unlock()
+						applyRemovedDeviceRuntimeState(wgDev, removed)
+						editTelegram(
+							token,
+							adminID,
+							u.CallbackQuery.Message.MessageID,
+							fmt.Sprintf("⏸ Пароль `%s` деактивирован\n\nНажмите кнопку подписки в списке для обновления информации.", pass),
+							map[string]interface{}{
+								"inline_keyboard": [][]map[string]interface{}{
+									{
+										{
+											"text":          "◀️ Назад к списку",
+											"callback_data": "backlist",
+										},
+									},
+								},
+							},
+						)
+
+					} else if strings.HasPrefix(data, "react_") {
+						pass := strings.TrimPrefix(data, "react_")
+						dbMutex.Lock()
+						entry, exists := db.Passwords[pass]
+						restored := []*ClientDevice{}
+						if exists && entry != nil {
+							entry.IsDeactivated = false
+							restored = collectPasswordDevicesLocked(entry)
+							saveDBLocked()
+						}
+						dbMutex.Unlock()
+						for _, dev := range restored {
+							upsertPeerInWG(wgDev, dev)
+						}
+						editTelegram(
+							token,
+							adminID,
+							u.CallbackQuery.Message.MessageID,
+							fmt.Sprintf("✅ Пароль `%s` активирован\n\nНажмите кнопку подписки в списке для обновления информации.", pass),
+							map[string]interface{}{
+								"inline_keyboard": [][]map[string]interface{}{
+									{
+										{
+											"text":          "◀️ Назад к списку",
+											"callback_data": "backlist",
+										},
+									},
+								},
+							},
+						)
+
+					} else if data == "mainlink" {
+						tgState.TargetPassword = "main"
+						var keyboard [][]map[string]interface{}
+						keyboard = append(keyboard, []map[string]interface{}{
+							{"text": "Да", "callback_data": "ports_def"},
+							{"text": "Нет", "callback_data": "ports_custom"},
+						})
+						sendTelegram(token, adminID, "⚙️ Использовать стандартные порты для главного пароля (56000, 56001, 9000)?", map[string]interface{}{"inline_keyboard": keyboard})
+
+					} else if data == "ports_def" {
+						tgState.TempPorts = "56000,56001,9000"
+						tgState.WaitingForPorts = true
+
+						cmd := strings.Join(db.VKHashes, ",")
+						handleTelegramInput(token, adminID, cmd, wgDev)
+					} else if data == "ports_custom" {
+						tgState.WaitingForPorts = true
+						sendTelegram(token, adminID, "⚙️ Укажите через запятую 3 порта (DTLS,WG,TUN):\nНапример: 56000,56001,9000", nil)
+
+					} else if strings.HasPrefix(data, "getfile_") {
+						pass := strings.TrimPrefix(data, "getfile_")
+
+						dbMutex.Lock()
+						entry, exists := db.Passwords[pass]
+
+						if !exists || entry == nil {
+							dbMutex.Unlock()
+							sendTelegram(token, adminID, "❌ Пароль не найден", nil)
+						} else {
+							label := passwordEntryLabel(entry, pass, 0)
+							vkHash := entry.VkHash
+							dbMutex.Unlock()
+
+							srvIP := getPublicIP()
+
+							configJSON := fmt.Sprintf(`{
   "name": "%s",
   "peer": "%s",
   "vkHashes": "%s",
@@ -909,313 +1236,330 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
   "listenPort": 9000,
   "password": "%s"
 }`,
-							passwordEntryLabel(entry, pass, 0),
-							srvIP,
-							entry.VkHash,
-							pass,
+								label,
+								srvIP,
+								vkHash,
+								pass,
+							)
+
+							fileName := fmt.Sprintf("qwdtt_%s.conf", pass)
+							sendTelegramFile(token, adminID, fileName, []byte(configJSON))
+						}
+
+					} else if strings.HasPrefix(data, "unbind_") {
+						pass := strings.TrimPrefix(data, "unbind_")
+						dbMutex.Lock()
+						entry, exists := db.Passwords[pass]
+						removed := []*ClientDevice{}
+						if exists && entry != nil {
+							removed = unbindDevices(entry, "")
+							purgeRemovedDeviceStatsLocked(removed)
+							saveDBLocked()
+						}
+						dbMutex.Unlock()
+						applyRemovedDeviceRuntimeState(wgDev, removed)
+						sendTelegram(token, adminID, fmt.Sprintf("✅ Все устройства отвязаны от пароля `%s`", pass), nil)
+
+					} else if strings.HasPrefix(data, "extend7_") {
+						pass := strings.TrimPrefix(data, "extend7_")
+						extendPassword(pass, 7)
+						sendTelegram(token, adminID,
+							fmt.Sprintf("✅ Подписка `%s` продлена на 7 дней", pass),
+							nil,
 						)
 
+					} else if strings.HasPrefix(data, "extend30_") {
+						pass := strings.TrimPrefix(data, "extend30_")
+						extendPassword(pass, 30)
+						sendTelegram(token, adminID,
+							fmt.Sprintf("✅ Подписка `%s` продлена на 30 дней", pass),
+							nil,
+						)
+
+					} else if strings.HasPrefix(data, "extend90_") {
+						pass := strings.TrimPrefix(data, "extend90_")
+						extendPassword(pass, 90)
+						sendTelegram(token, adminID,
+							fmt.Sprintf("✅ Подписка `%s` продлена на 90 дней", pass),
+							nil,
+						)
+
+					} else if strings.HasPrefix(data, "expiremenu_") {
+						pass := strings.TrimPrefix(data, "expiremenu_")
+
+						dbMutex.Lock()
+						entry, exists := db.Passwords[pass]
+
+						var txt string
+						if exists && entry != nil {
+							if entry.ExpiresAt > 0 {
+								expireTime := time.Unix(entry.ExpiresAt, 0)
+								remaining := int(time.Until(expireTime).Hours() / 24)
+								if remaining < 0 {
+									remaining = 0
+								}
+
+								txt = fmt.Sprintf(
+									"📅 *Управление сроком*\n\nТекущий срок: %s\nОсталось: %d дней",
+									expireTime.Format("02.01.2006"),
+									remaining,
+								)
+							} else {
+								txt = "📅 *Управление сроком*\n\nПодписка бессрочная."
+							}
+						} else {
+							txt = "❌ Подписка не найдена."
+						}
 						dbMutex.Unlock()
 
-						fileName := fmt.Sprintf("qwdtt_%s.conf", pass)
-						sendTelegramFile(token, adminID, fileName, []byte(configJSON))
-					}
-
-				} else if strings.HasPrefix(data, "unbind_") {
-					pass := strings.TrimPrefix(data, "unbind_")
-					dbMutex.Lock()
-					entry, exists := db.Passwords[pass]
-					if exists && entry != nil {
-						// Удаляем все привязанные устройства из WG и из хранилища
-						if entry.DeviceID != "" {
-							dev, devExists := db.Devices[entry.DeviceID]
-							if devExists {
-								pubHex, _ := b64ToHex(dev.PubKey)
-								wgDev.IpcSet(fmt.Sprintf("public_key=%s\nremove=true\n", pubHex))
-								delete(db.Devices, entry.DeviceID)
-							}
-							entry.DeviceID = ""
-						}
-						for _, id := range entry.DeviceIDs {
-							dev, devExists := db.Devices[id]
-							if devExists {
-								pubHex, _ := b64ToHex(dev.PubKey)
-								wgDev.IpcSet(fmt.Sprintf("public_key=%s\nremove=true\n", pubHex))
-								delete(db.Devices, id)
-							}
-						}
-						entry.DeviceIDs = nil
-						saveDB()
-					}
-					dbMutex.Unlock()
-					sendTelegram(token, adminID, fmt.Sprintf("✅ Все устройства отвязаны от пароля `%s`", pass), nil)
-
-				} else if strings.HasPrefix(data, "extend7_") {
-					pass := strings.TrimPrefix(data, "extend7_")
-					extendPassword(pass, 7)
-					sendTelegram(token, adminID,
-						fmt.Sprintf("✅ Подписка `%s` продлена на 7 дней", pass),
-						nil,
-					)
-
-				} else if strings.HasPrefix(data, "extend30_") {
-					pass := strings.TrimPrefix(data, "extend30_")
-					extendPassword(pass, 30)
-					sendTelegram(token, adminID,
-						fmt.Sprintf("✅ Подписка `%s` продлена на 30 дней", pass),
-						nil,
-					)
-
-				} else if strings.HasPrefix(data, "extend90_") {
-					pass := strings.TrimPrefix(data, "extend90_")
-					extendPassword(pass, 90)
-					sendTelegram(token, adminID,
-						fmt.Sprintf("✅ Подписка `%s` продлена на 90 дней", pass),
-						nil,
-					)
-
-				} else if strings.HasPrefix(data, "expiremenu_") {
-					pass := strings.TrimPrefix(data, "expiremenu_")
-
-					dbMutex.Lock()
-					entry, exists := db.Passwords[pass]
-
-					var txt string
-					if exists && entry != nil {
-						if entry.ExpiresAt > 0 {
-							expireTime := time.Unix(entry.ExpiresAt, 0)
-							remaining := int(time.Until(expireTime).Hours() / 24)
-							if remaining < 0 {
-								remaining = 0
-							}
-
-							txt = fmt.Sprintf(
-								"📅 *Управление сроком*\n\nТекущий срок: %s\nОсталось: %d дней",
-								expireTime.Format("02.01.2006"),
-								remaining,
-							)
-						} else {
-							txt = "📅 *Управление сроком*\n\nПодписка бессрочная."
-						}
-					} else {
-						txt = "❌ Подписка не найдена."
-					}
-					dbMutex.Unlock()
-
-					editTelegram(
-						token,
-						adminID,
-						u.CallbackQuery.Message.MessageID,
-						txt,
-						map[string]interface{}{
-							"inline_keyboard": [][]map[string]interface{}{
-								{
+						editTelegram(
+							token,
+							adminID,
+							u.CallbackQuery.Message.MessageID,
+							txt,
+							map[string]interface{}{
+								"inline_keyboard": [][]map[string]interface{}{
 									{
-										"text":          "➕ Продлить",
-										"callback_data": "extend_" + pass,
+										{
+											"text":          "➕ Продлить",
+											"callback_data": "extend_" + pass,
+										},
 									},
-								},
-								{
 									{
-										"text":          "✏️ Установить остаток дней",
-										"callback_data": "setdays_" + pass,
+										{
+											"text":          "✏️ Установить остаток дней",
+											"callback_data": "setdays_" + pass,
+										},
 									},
-								},
-								{
 									{
-										"text":          "◀️ Назад",
-										"callback_data": "viewpass_" + pass,
+										{
+											"text":          "◀️ Назад",
+											"callback_data": "viewpass_" + pass,
+										},
 									},
 								},
 							},
-						},
-					)
+						)
 
-				} else if strings.HasPrefix(data, "extend_") {
-					pass := strings.TrimPrefix(data, "extend_")
+					} else if strings.HasPrefix(data, "extend_") {
+						pass := strings.TrimPrefix(data, "extend_")
 
-					tgState.TargetPassword = pass
-					tgState.WaitingExtendDays = true
+						tgState.TargetPassword = pass
+						tgState.WaitingExtendDays = true
 
-					sendTelegram(
-						token,
-						adminID,
-						"📅 На сколько дней продлить подписку?\n\nВведите число дней:",
-						nil,
-					)
+						sendTelegram(
+							token,
+							adminID,
+							"📅 На сколько дней продлить подписку?\n\nВведите число дней:",
+							nil,
+						)
 
-				} else if strings.HasPrefix(data, "setdays_") {
-					pass := strings.TrimPrefix(data, "setdays_")
+					} else if strings.HasPrefix(data, "setdays_") {
+						pass := strings.TrimPrefix(data, "setdays_")
 
-					tgState.TargetPassword = pass
-					tgState.WaitingSetDays = true
+						tgState.TargetPassword = pass
+						tgState.WaitingSetDays = true
 
-					sendTelegram(
-						token,
-						adminID,
-						"✏️ Введите, сколько дней должно остаться у подписки:",
-						nil,
-					)
+						sendTelegram(
+							token,
+							adminID,
+							"✏️ Введите, сколько дней должно остаться у подписки:",
+							nil,
+						)
 
-				} else if strings.HasPrefix(data, "confirm_delsub_") {
-					pass := strings.TrimPrefix(data, "confirm_delsub_")
+					} else if strings.HasPrefix(data, "confirm_delsub_") {
+						pass := strings.TrimPrefix(data, "confirm_delsub_")
 
-					editTelegram(
-						token,
-						adminID,
-						u.CallbackQuery.Message.MessageID,
-						"⚠️ *Удалить подписку?*\n\nБудут удалены:\n• подписка\n• пароль\n• все устройства\n• доступ WireGuard\n\nЭто действие необратимо.",
-						map[string]interface{}{
-							"inline_keyboard": [][]map[string]interface{}{
-								{
+						editTelegram(
+							token,
+							adminID,
+							u.CallbackQuery.Message.MessageID,
+							"⚠️ *Удалить подписку?*\n\nБудут удалены:\n• подписка\n• пароль\n• все устройства\n• доступ WireGuard\n\nЭто действие необратимо.",
+							map[string]interface{}{
+								"inline_keyboard": [][]map[string]interface{}{
 									{
-										"text":          "🗑 Да, удалить",
-										"callback_data": "delsub_" + pass,
+										{
+											"text":          "🗑 Да, удалить",
+											"callback_data": "delsub_" + pass,
+										},
 									},
-								},
-								{
 									{
-										"text":          "❌ Отмена",
-										"callback_data": "viewpass_" + pass,
+										{
+											"text":          "❌ Отмена",
+											"callback_data": "viewpass_" + pass,
+										},
 									},
 								},
 							},
-						},
-					)
+						)
 
-				} else if strings.HasPrefix(data, "delsub_") {
-					pass := strings.TrimPrefix(data, "delsub_")
+					} else if strings.HasPrefix(data, "delsub_") {
+						pass := strings.TrimPrefix(data, "delsub_")
 
-					dbMutex.Lock()
+						dbMutex.Lock()
+						removed := []*ClientDevice{}
+						removeWrapPassword := false
 
-					// Удаляем подписку у пользователя
-					for _, user := range db.Users {
-						if user.SubscriptionID == pass {
-							user.SubscriptionStatus = "inactive"
-							user.SubscriptionPlan = ""
-							user.SubscriptionExpires = 0
-							user.DeviceLimit = 0
-							user.SubscriptionID = ""
-							break
-						}
-					}
-
-					// Удаляем пароль и все устройства
-					entry, exists := db.Passwords[pass]
-					if exists && entry != nil {
-
-						if entry.DeviceID != "" {
-							if dev, ok := db.Devices[entry.DeviceID]; ok {
-								pubHex, _ := b64ToHex(dev.PubKey)
-								wgDev.IpcSet(fmt.Sprintf("public_key=%s\nremove=true\n", pubHex))
-								delete(db.Devices, entry.DeviceID)
+						// Удаляем подписку у пользователя
+						for _, user := range db.Users {
+							if user.SubscriptionID == pass {
+								user.SubscriptionStatus = "inactive"
+								user.SubscriptionPlan = ""
+								user.SubscriptionExpires = 0
+								user.DeviceLimit = 0
+								user.SubscriptionID = ""
+								break
 							}
 						}
 
-						for _, id := range entry.DeviceIDs {
-							if dev, ok := db.Devices[id]; ok {
-								pubHex, _ := b64ToHex(dev.PubKey)
-								wgDev.IpcSet(fmt.Sprintf("public_key=%s\nremove=true\n", pubHex))
-								delete(db.Devices, id)
-							}
+						// Удаляем пароль и все устройства
+						entry, exists := db.Passwords[pass]
+						if exists && entry != nil {
+							removed = unbindDevices(entry, "")
+							purgeRemovedDeviceStatsLocked(removed)
+							delete(db.Passwords, pass)
+							removeWrapPassword = true
 						}
 
+						saveDBLocked()
+						dbMutex.Unlock()
+						if removeWrapPassword {
+							serverWrapKeys.RemovePassword(pass)
+						}
+						applyRemovedDeviceRuntimeState(wgDev, removed)
+
+						sendPasswordList(
+							token,
+							adminID,
+							u.CallbackQuery.Message.MessageID,
+							true,
+							wgDev,
+						)
+
+					} else if strings.HasPrefix(data, "delpass_") {
+						pass := strings.TrimPrefix(data, "delpass_")
+						dbMutex.Lock()
+						removed := []*ClientDevice{}
+						removeWrapPassword := false
+						entry, exists := db.Passwords[pass]
+						if exists && entry != nil {
+							removed = unbindDevices(entry, "")
+							purgeRemovedDeviceStatsLocked(removed)
+						}
 						delete(db.Passwords, pass)
-						serverWrapKeys.RemovePassword(pass)
-					}
-
-					saveDB()
-					dbMutex.Unlock()
-
-					sendPasswordList(
-						token,
-						adminID,
-						u.CallbackQuery.Message.MessageID,
-						true,
-						wgDev,
-					)
-
-				} else if strings.HasPrefix(data, "delpass_") {
-					pass := strings.TrimPrefix(data, "delpass_")
-					dbMutex.Lock()
-					entry, exists := db.Passwords[pass]
-					if exists && entry != nil {
-						if entry.DeviceID != "" {
-							dev, devExists := db.Devices[entry.DeviceID]
-							if devExists {
-								pubHex, _ := b64ToHex(dev.PubKey)
-								wgDev.IpcSet(fmt.Sprintf("public_key=%s\nremove=true\n", pubHex))
-								delete(db.Devices, entry.DeviceID)
-							}
+						removeWrapPassword = true
+						saveDBLocked()
+						dbMutex.Unlock()
+						if removeWrapPassword {
+							serverWrapKeys.RemovePassword(pass)
 						}
-						for _, id := range entry.DeviceIDs {
-							dev, devExists := db.Devices[id]
-							if devExists {
-								pubHex, _ := b64ToHex(dev.PubKey)
-								wgDev.IpcSet(fmt.Sprintf("public_key=%s\nremove=true\n", pubHex))
-								delete(db.Devices, id)
-							}
-						}
-					}
-					delete(db.Passwords, pass)
-					serverWrapKeys.RemovePassword(pass)
-					saveDB()
-					dbMutex.Unlock()
+						applyRemovedDeviceRuntimeState(wgDev, removed)
 
-					sendPasswordList(
-						token,
-						adminID,
-						u.CallbackQuery.Message.MessageID,
-						true,
-						wgDev,
-					)
+						sendPasswordList(
+							token,
+							adminID,
+							u.CallbackQuery.Message.MessageID,
+							true,
+							wgDev,
+						)
 
-				} else if strings.HasPrefix(data, "deldev_") {
-					devID := strings.TrimPrefix(data, "deldev_")
-					dbMutex.Lock()
-					dev, exists := db.Devices[devID]
-					if exists {
-						delete(db.Devices, devID)
-						pubHex, _ := b64ToHex(dev.PubKey)
-						wgDev.IpcSet(fmt.Sprintf("public_key=%s\nremove=true\n", pubHex))
-						// Очищаем привязку из пароля
-						for _, entry := range db.Passwords {
-							if entry != nil {
-								if entry.DeviceID == devID {
-									entry.DeviceID = ""
-								}
-								newIDs := []string{}
-								for _, id := range entry.DeviceIDs {
-									if id != devID {
-										newIDs = append(newIDs, id)
+					} else if strings.HasPrefix(data, "deldev_") {
+						devID := strings.TrimPrefix(data, "deldev_")
+						dbMutex.Lock()
+						removed := []*ClientDevice{}
+						dev, exists := db.Devices[devID]
+						if exists {
+							removed = append(removed, dev)
+							delete(db.Devices, devID)
+							// Очищаем привязку из пароля
+							for _, entry := range db.Passwords {
+								if entry != nil {
+									if entry.DeviceID == devID {
+										entry.DeviceID = ""
 									}
+									newIDs := []string{}
+									for _, id := range entry.DeviceIDs {
+										if id != devID {
+											newIDs = append(newIDs, id)
+										}
+									}
+									entry.DeviceIDs = newIDs
 								}
-								entry.DeviceIDs = newIDs
 							}
+							purgeRemovedDeviceStatsLocked(removed)
+							saveDBLocked()
 						}
-						saveDB()
-					}
-					dbMutex.Unlock()
-					sendTelegram(token, adminID, fmt.Sprintf("✅ Устройство `%s` удалено", devID), nil)
+						dbMutex.Unlock()
+						applyRemovedDeviceRuntimeState(wgDev, removed)
+						sendTelegram(token, adminID, fmt.Sprintf("✅ Устройство `%s` удалено", devID), nil)
 
-				} else if data == "backlist" {
-					sendPasswordList(
-						token,
-						adminID,
-						u.CallbackQuery.Message.MessageID,
-						true,
-						wgDev,
-					)
+					} else if data == "backlist" {
+						sendPasswordList(
+							token,
+							adminID,
+							u.CallbackQuery.Message.MessageID,
+							true,
+							wgDev,
+						)
+					}
+					continue
+				}
+
+				if handleCabinetCallback(
+					token,
+					actor,
+					u.CallbackQuery.ID,
+					u.CallbackQuery.Data,
+					u.CallbackQuery.Message.MessageID,
+				) {
+					continue
 				}
 			}
 
 			// ═══ Текстовые команды ═══
 			msg := u.Message
-			if msg == nil || msg.Chat.ID != adminID {
+			if msg == nil {
+				continue
+			}
+
+			actor := cabinetActor{
+				ChatID: msg.Chat.ID,
+			}
+			if msg.From != nil {
+				actor.UserID = msg.From.ID
+				actor.Username = msg.From.Username
+				actor.FirstName = msg.From.FirstName
+				actor.LastName = msg.From.LastName
+			}
+			if actor.UserID == 0 {
+				actor.UserID = actor.ChatID
+			}
+
+			if handleTelegramSuccessfulPayment(
+				token,
+				actor,
+				msg.SuccessfulPayment,
+			) {
+				continue
+			}
+
+			if handleSupportMessage(
+				token,
+				actor,
+				msg,
+			) {
 				continue
 			}
 
 			cmd := strings.TrimSpace(msg.Text)
+
+			if msg.Chat.ID != adminID {
+				if handleCabinetMessage(token, actor, cmd) {
+					continue
+				}
+				continue
+			}
+
 			if handleCommand(token, adminID, cmd, wgDev) {
 				continue
 			}
@@ -1242,7 +1586,7 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 
 					entry.ExpiresAt += int64(days * 24 * 3600)
 
-					saveDB()
+					saveDBLocked()
 				}
 				dbMutex.Unlock()
 
@@ -1269,7 +1613,7 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 				dbMutex.Lock()
 				if entry, ok := db.Passwords[tgState.TargetPassword]; ok && entry != nil {
 					entry.ExpiresAt = time.Now().Add(time.Duration(days) * 24 * time.Hour).Unix()
-					saveDB()
+					saveDBLocked()
 				}
 				dbMutex.Unlock()
 
@@ -1311,23 +1655,20 @@ func upsertPeerInWG(wgDev *device.Device, dev *ClientDevice) {
 	wgDev.IpcSet(fmt.Sprintf("public_key=%s\nallowed_ip=%s/32\n", pubHex, dev.IP))
 }
 
-func cleanupExpiredPasswordsLocked(wgDev *device.Device) int {
+func cleanupExpiredPasswordsLocked() (int, []*ClientDevice) {
 	removed := 0
+	removedDevices := []*ClientDevice{}
 	for p, entry := range db.Passwords {
 		if isPasswordExpired(entry) && !entry.IsDeactivated {
-
 			if entry.DeviceID != "" {
-				removePeerFromWG(
-					wgDev,
-					db.Devices[entry.DeviceID],
-				)
+				if dev, ok := db.Devices[entry.DeviceID]; ok {
+					removedDevices = append(removedDevices, dev)
+				}
 			}
-
 			for _, id := range entry.DeviceIDs {
-				removePeerFromWG(
-					wgDev,
-					db.Devices[id],
-				)
+				if dev, ok := db.Devices[id]; ok {
+					removedDevices = append(removedDevices, dev)
+				}
 			}
 
 			entry.IsDeactivated = true
@@ -1344,16 +1685,48 @@ func cleanupExpiredPasswordsLocked(wgDev *device.Device) int {
 			removed++
 		}
 	}
-	return removed
+	return removed, normalizeRemovedDevices(removedDevices)
+}
+
+func collectPasswordDevicesLocked(entry *PasswordEntry) []*ClientDevice {
+	if entry == nil {
+		return nil
+	}
+
+	devices := make([]*ClientDevice, 0, len(entry.DeviceIDs)+1)
+	if entry.DeviceID != "" {
+		if dev, ok := db.Devices[entry.DeviceID]; ok {
+			devices = append(devices, dev)
+		}
+	}
+	for _, id := range entry.DeviceIDs {
+		if dev, ok := db.Devices[id]; ok {
+			devices = append(devices, dev)
+		}
+	}
+	return normalizeRemovedDevices(devices)
+}
+
+func collectActiveWGDevicesLocked() []*ClientDevice {
+	devices := []*ClientDevice{}
+	for _, entry := range db.Passwords {
+		if entry == nil || entry.IsDeactivated || isPasswordExpired(entry) {
+			continue
+		}
+		devices = append(devices, collectPasswordDevicesLocked(entry)...)
+	}
+	return normalizeRemovedDevices(devices)
 }
 
 func cleanupExpiredPasswords(wgDev *device.Device) int {
 	dbMutex.Lock()
-	defer dbMutex.Unlock()
-	removed := cleanupExpiredPasswordsLocked(wgDev)
+	removed, removedDevices := cleanupExpiredPasswordsLocked()
 	if removed > 0 {
-		saveDB()
+		purgeRemovedDeviceStatsLocked(removedDevices)
+		saveDBLocked()
 	}
+	dbMutex.Unlock()
+	applyRemovedDeviceRuntimeState(wgDev, removedDevices)
 	return removed
 }
 
@@ -1401,9 +1774,11 @@ func expiredPasswordJanitor(
 
 func syncPersistedPeersToWG(wgDev *device.Device) {
 	dbMutex.Lock()
-	defer dbMutex.Unlock()
+	devices := collectActiveWGDevicesLocked()
+	dbMutex.Unlock()
+
 	count := 0
-	for _, dev := range db.Devices {
+	for _, dev := range devices {
 		upsertPeerInWG(wgDev, dev)
 		count++
 	}
@@ -1420,11 +1795,12 @@ func sendPasswordList(
 	wgDev *device.Device,
 ) {
 	dbMutex.Lock()
-	defer dbMutex.Unlock()
 
 	// Очистка истёкших
-	if cleanupExpiredPasswordsLocked(wgDev) > 0 {
-		saveDB()
+	removed, removedDevices := cleanupExpiredPasswordsLocked()
+	if removed > 0 {
+		purgeRemovedDeviceStatsLocked(removedDevices)
+		saveDBLocked()
 	}
 
 	txt := "🔐 *Пароли:*\n\n"
@@ -1492,6 +1868,10 @@ func sendPasswordList(
 			"inline_keyboard": keyboard,
 		}
 	}
+
+	dbMutex.Unlock()
+	applyRemovedDeviceRuntimeState(wgDev, removedDevices)
+
 	if edit {
 		editTelegram(
 			token,
@@ -1513,8 +1893,9 @@ func sendPasswordList(
 func answerCallback(token, callbackID string) {
 	url := fmt.Sprintf("https://api.telegram.org/bot%s/answerCallbackQuery", token)
 	payload := map[string]interface{}{"callback_query_id": callbackID}
-	body, _ := json.Marshal(payload)
-	http.Post(url, "application/json", bytes.NewBuffer(body))
+	if err := postTelegramJSONAndClose(url, payload); err != nil {
+		log.Printf("[BOT] answerCallback error: %v", err)
+	}
 }
 
 func maskPassword(pass string) string {
@@ -1534,8 +1915,9 @@ func sendTelegram(token string, chatID int64, text string, replyMarkup interface
 	if replyMarkup != nil {
 		payload["reply_markup"] = replyMarkup
 	}
-	body, _ := json.Marshal(payload)
-	http.Post(url, "application/json", bytes.NewBuffer(body))
+	if err := postTelegramJSONAndClose(url, payload); err != nil {
+		log.Printf("[BOT] sendTelegram error: %v", err)
+	}
 }
 
 func editTelegram(
@@ -1561,14 +1943,7 @@ func editTelegram(
 		payload["reply_markup"] = replyMarkup
 	}
 
-	body, _ := json.Marshal(payload)
-
-	resp, err := http.Post(
-		url,
-		"application/json",
-		bytes.NewBuffer(body),
-	)
-
+	resp, err := postTelegramJSON(url, payload)
 	if err != nil {
 		log.Println("[EDIT ERROR]", err)
 		return
@@ -1717,6 +2092,7 @@ func updateTrafficFromWG() {
 				targetDevID = devID
 				dev.UpBytes += deltaRx
 				dev.DownBytes += deltaTx
+				dev.LastSeenAt = time.Now().Unix()
 				break
 			}
 		}
@@ -1796,7 +2172,7 @@ func statsLoop(ctx context.Context, configDir string) {
 			saveTicks++
 			if saveTicks >= 6 { // 6 * 10 секунд = 60 секунд
 				saveTicks = 0
-				saveDB()
+				saveDBLocked()
 			}
 			dbMutex.Unlock()
 
@@ -2104,14 +2480,76 @@ PersistentKeepalive = %d`,
 
 // ==================== HTTP Control API ====================
 
-func unbindDevices(entry *PasswordEntry, targetDeviceID string) {
+func normalizeRemovedDevices(removed []*ClientDevice) []*ClientDevice {
+	if len(removed) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]*ClientDevice, len(removed))
+	order := make([]string, 0, len(removed))
+
+	for _, dev := range removed {
+		if dev == nil || dev.DeviceID == "" {
+			continue
+		}
+		if _, exists := seen[dev.DeviceID]; exists {
+			continue
+		}
+		seen[dev.DeviceID] = dev
+		order = append(order, dev.DeviceID)
+	}
+
+	if len(order) == 0 {
+		return nil
+	}
+
+	result := make([]*ClientDevice, 0, len(order))
+	for _, id := range order {
+		result = append(result, seen[id])
+	}
+	return result
+}
+
+func purgeRemovedDeviceStatsLocked(removed []*ClientDevice) {
+	for _, dev := range normalizeRemovedDevices(removed) {
+		if dev == nil || dev.PubKey == "" {
+			continue
+		}
+		delete(lastWGStats, dev.PubKey)
+	}
+}
+
+func applyRemovedDeviceRuntimeState(wgDev *device.Device, removed []*ClientDevice) {
+	removed = normalizeRemovedDevices(removed)
+	if len(removed) == 0 {
+		return
+	}
+
+	activeDevicesMu.Lock()
+	for _, dev := range removed {
+		delete(activeDevices, dev.DeviceID)
+	}
+	activeDevicesMu.Unlock()
+
+	for _, dev := range removed {
+		removePeerFromWG(wgDev, dev)
+	}
+}
+
+func unbindDevices(entry *PasswordEntry, targetDeviceID string) []*ClientDevice {
+	removed := []*ClientDevice{}
+
 	if targetDeviceID == "" {
 		if entry.DeviceID != "" {
-			removeDeviceFromSystem(entry.DeviceID)
+			if dev := removeDeviceFromSystem(entry.DeviceID); dev != nil {
+				removed = append(removed, dev)
+			}
 			entry.DeviceID = ""
 		}
 		for _, id := range entry.DeviceIDs {
-			removeDeviceFromSystem(id)
+			if dev := removeDeviceFromSystem(id); dev != nil {
+				removed = append(removed, dev)
+			}
 		}
 		entry.DeviceIDs = nil
 	} else {
@@ -2121,7 +2559,9 @@ func unbindDevices(entry *PasswordEntry, targetDeviceID string) {
 		newIDs := []string{}
 		for _, id := range entry.DeviceIDs {
 			if id == targetDeviceID {
-				removeDeviceFromSystem(id)
+				if dev := removeDeviceFromSystem(id); dev != nil {
+					removed = append(removed, dev)
+				}
 			} else {
 				newIDs = append(newIDs, id)
 			}
@@ -2133,18 +2573,17 @@ func unbindDevices(entry *PasswordEntry, targetDeviceID string) {
 			entry.DeviceID = "multi"
 		}
 	}
+
+	return removed
 }
 
-func removeDeviceFromSystem(devID string) {
+func removeDeviceFromSystem(devID string) *ClientDevice {
 	dev, exists := db.Devices[devID]
 	if !exists {
-		return
+		return nil
 	}
 	delete(db.Devices, devID)
-	if globalWgDev != nil {
-		pubHex, _ := b64ToHex(dev.PubKey)
-		globalWgDev.IpcSet(fmt.Sprintf("public_key=%s\nremove=true\n", pubHex))
-	}
+	return dev
 }
 
 func handleAPIProfileStatus(w http.ResponseWriter, r *http.Request) {
@@ -2163,10 +2602,9 @@ func handleAPIProfileStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	dbMutex.Lock()
-	defer dbMutex.Unlock()
-
 	entry, exists := db.Passwords[password]
 	if !exists || isPasswordExpired(entry) {
+		dbMutex.Unlock()
 		http.Error(w, `{"error":"Unauthorized or expired password"}`, http.StatusUnauthorized)
 		return
 	}
@@ -2182,19 +2620,24 @@ func handleAPIProfileStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	deviceID := r.FormValue("device_id")
-	isCurrentBound := false
+	primaryDeviceID := entry.DeviceID
+	deviceIDs := append([]string(nil), entry.DeviceIDs...)
+	expiresAt := entry.ExpiresAt
+	dbMutex.Unlock()
 
+	isCurrentBound := false
 	activeCount := 0
+
 	activeDevicesMu.Lock()
-	if len(entry.DeviceIDs) == 0 && entry.DeviceID != "" {
-		if entry.DeviceID == deviceID {
+	if len(deviceIDs) == 0 && primaryDeviceID != "" {
+		if primaryDeviceID == deviceID {
 			isCurrentBound = true
 		}
-		if count := activeDevices[entry.DeviceID]; count > 0 {
+		if count := activeDevices[primaryDeviceID]; count > 0 {
 			activeCount = 1
 		}
 	} else {
-		for _, id := range entry.DeviceIDs {
+		for _, id := range deviceIDs {
 			if id == deviceID {
 				isCurrentBound = true
 			}
@@ -2210,7 +2653,7 @@ func handleAPIProfileStatus(w http.ResponseWriter, r *http.Request) {
 		"bound_devices":    boundDevices,
 		"active_devices":   activeCount,
 		"is_current_bound": isCurrentBound,
-		"expires_at":       entry.ExpiresAt,
+		"expires_at":       expiresAt,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -2234,18 +2677,21 @@ func handleAPIProfileUnbind(w http.ResponseWriter, r *http.Request) {
 	}
 
 	dbMutex.Lock()
-	defer dbMutex.Unlock()
 
 	entry, exists := db.Passwords[password]
 	if !exists || isPasswordExpired(entry) {
+		dbMutex.Unlock()
 		http.Error(w, `{"error":"Unauthorized or expired password"}`, http.StatusUnauthorized)
 		return
 	}
 
-	unbindDevices(entry, deviceID)
-	saveDB()
+	removed := unbindDevices(entry, deviceID)
+	purgeRemovedDeviceStatsLocked(removed)
+	saveDBLocked()
 
 	w.Header().Set("Content-Type", "application/json")
+	dbMutex.Unlock()
+	applyRemovedDeviceRuntimeState(globalWgDev, removed)
 	w.Write([]byte(`{"success":true}`))
 }
 
@@ -2259,6 +2705,11 @@ func main() {
 	adminID := flag.String("admin", "", "Telegram Admin ID")
 	botToken := flag.String("bot-token", "", "Telegram Bot Token")
 	dnsFlag := flag.String("dns", "8.8.8.8", "DNS серверы для клиентов")
+	tgPaymentsProviderToken := flag.String(
+		"telegram-payments-provider-token",
+		defaultTelegramPaymentsProviderToken,
+		"Telegram Payments provider token",
+	)
 	ykShopID := flag.String(
 		"yookassa-shop-id",
 		"",
@@ -2273,6 +2724,7 @@ func main() {
 	flag.Parse()
 	yookassaShopID = *ykShopID
 	yookassaSecretKey = *ykSecretKey
+	telegramPaymentsProviderToken = *tgPaymentsProviderToken
 	dns = *dnsFlag
 
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
@@ -2365,6 +2817,7 @@ func main() {
 		mux.HandleFunc("/api/orders/retry", retryOrderHandler)
 		mux.HandleFunc("/api/orders/cancel", cancelOrderHandler)
 		mux.HandleFunc("/api/orders", ordersHandler)
+		mux.HandleFunc("/api/payments/telegram/confirm", telegramPaymentConfirmHandler)
 		mux.HandleFunc("/api/vkhashes", func(w http.ResponseWriter, r *http.Request) {
 			switch r.Method {
 			case http.MethodGet:
@@ -2568,7 +3021,7 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 
 			// Сохраняем БД, так как canConnectAndBind мог внести привязку нового устройства
 			if isGenPass {
-				saveDB()
+				saveDBLocked()
 			}
 
 			dev, exists := db.Devices[deviceID]
@@ -2589,13 +3042,14 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 				if keyErr == nil {
 					dev.PrivKey = privB64
 					dev.PubKey = pubB64
-					saveDB()
+					saveDBLocked()
 					log.Printf("[WG] Инициализировано устройство %s (IP: %s)", deviceID, dev.IP)
 				} else {
 					dev = nil
 				}
 			}
 			if dev != nil {
+				dev.LastSeenAt = time.Now().Unix()
 				upsertPeerInWG(wgDev, dev)
 				clientConn.Write([]byte(buildClientConfig(keys.serverPublic, dev.PrivKey, dev.IP, clientPort)))
 			} else {
@@ -3046,5 +3500,5 @@ func extendPassword(pass string, days int) {
 	entry.ExpiresAt += int64(days * 24 * 60 * 60)
 	entry.IsDeactivated = false
 
-	saveDB()
+	saveDBLocked()
 }

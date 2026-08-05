@@ -334,3 +334,4 @@ func setupDoHResolver(arg string, endpoints []string) {
 		},
 	}
 }
+	
