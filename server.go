@@ -37,7 +37,6 @@ import (
 
 	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
-	"golang.zx2c4.com/wireguard/ipc"
 	"golang.zx2c4.com/wireguard/tun"
 
 	dtlsnet "github.com/pion/dtls/v3/pkg/net"
@@ -2432,11 +2431,7 @@ func startUserspaceWG(keys *wgKeys, wgPort int) (*device.Device, error) {
 	}
 
 	go func() {
-		uapiFile, err := ipc.UAPIOpen(ifaceName)
-		if err != nil {
-			return
-		}
-		uapi, err := ipc.UAPIListen(ifaceName, uapiFile)
+		uapi, err := listenWireGuardUAPI(ifaceName)
 		if err != nil {
 			return
 		}
@@ -2809,6 +2804,7 @@ func main() {
 		mux.HandleFunc("/api/profile/unbind", handleAPIProfileUnbind)
 
 		mux.HandleFunc("/api/auth/register", registerHandler)
+		mux.HandleFunc("/api/auth/register-by-subscription", registerBySubscriptionHandler)
 		mux.HandleFunc("/api/auth/login", loginHandler)
 
 		mux.HandleFunc("/api/user", userHandler)

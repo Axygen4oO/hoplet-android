@@ -11,7 +11,7 @@ func handleCommand(
 
 	switch cmd {
 	case "/notify":
-		startNotificationCompose(token, adminID)
+		startNotificationWizard(token, adminID)
 		return true
 
 	case "/cancel":

@@ -6,14 +6,15 @@ import (
 )
 
 const (
-	notificationStageTitle   = "title"
-	notificationStageMessage = "message"
-	notificationStageConfirm = "confirm"
+	notificationStageTitle    = "title"
+	notificationStageMessage  = "message"
+	notificationStageConfirm  = "confirm"
+	notificationPanelCallback = "panel_notify"
 )
 
 const notificationPreviewHeader = "--------------------------------"
 
-func startNotificationCompose(token string, adminID int64) {
+func startNotificationWizard(token string, adminID int64) {
 	resetNotificationComposeState()
 	tgState.NotificationStage = notificationStageTitle
 
@@ -23,6 +24,19 @@ func startNotificationCompose(token string, adminID int64) {
 		"Введите заголовок уведомления",
 		nil,
 	)
+}
+
+func startNotificationCompose(token string, adminID int64) {
+	startNotificationWizard(token, adminID)
+}
+
+func handleNotificationPanelAction(token string, adminID int64, data string) bool {
+	if data != notificationPanelCallback {
+		return false
+	}
+
+	startNotificationWizard(token, adminID)
+	return true
 }
 
 func cancelNotificationCompose(token string, chatID int64) {

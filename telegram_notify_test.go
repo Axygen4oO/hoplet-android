@@ -213,6 +213,72 @@ func TestNotificationFlowCancelAndRestart(t *testing.T) {
 	})
 }
 
+func TestNotificationFlowPanelButtonStartsSharedWizard(t *testing.T) {
+	withNotificationTestDB(t, &Database{
+		Passwords:      map[string]*PasswordEntry{},
+		Devices:        map[string]*ClientDevice{},
+		Users:          map[string]*UserAccount{},
+		Orders:         map[string]*Order{},
+		SupportTickets: map[string]*SupportTicket{},
+	}, func(file string) {
+		_ = file
+		withTelegramRecorder(t, func(recorder *telegramRecorderTransport) {
+			if !handleNotificationPanelAction("token", 1, notificationPanelCallback) {
+				t.Fatalf("expected panel notify action to be handled")
+			}
+			if tgState.NotificationStage != notificationStageTitle {
+				t.Fatalf("expected shared wizard to wait for title, got %q", tgState.NotificationStage)
+			}
+			if recorder.lastText() != "Введите заголовок уведомления" {
+				t.Fatalf("unexpected prompt for panel notify callback: %q", recorder.lastText())
+			}
+		})
+	})
+}
+
+func TestMainPanelIncludesNotifyButton(t *testing.T) {
+	withTelegramRecorder(t, func(recorder *telegramRecorderTransport) {
+		showMainPanel("token", 1, 0, false)
+
+		if recorder.requestCount() == 0 {
+			t.Fatalf("expected main panel to send a telegram message")
+		}
+
+		lastRequest := recorder.requests[len(recorder.requests)-1]
+		replyMarkup, ok := lastRequest.Body["reply_markup"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("expected reply_markup in main panel payload")
+		}
+
+		rows, ok := replyMarkup["inline_keyboard"].([]interface{})
+		if !ok {
+			t.Fatalf("expected inline_keyboard rows in main panel payload")
+		}
+
+		found := false
+		for _, row := range rows {
+			buttons, ok := row.([]interface{})
+			if !ok {
+				continue
+			}
+			for _, button := range buttons {
+				buttonPayload, ok := button.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				if buttonPayload["text"] == "📢 Отправить уведомление" &&
+					buttonPayload["callback_data"] == notificationPanelCallback {
+					found = true
+				}
+			}
+		}
+
+		if !found {
+			t.Fatalf("expected main panel to include notify button")
+		}
+	})
+}
+
 func TestNotificationFlowPreviewCancel(t *testing.T) {
 	withNotificationTestDB(t, &Database{
 		Passwords:      map[string]*PasswordEntry{},

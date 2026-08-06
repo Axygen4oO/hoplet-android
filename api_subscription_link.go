@@ -92,17 +92,7 @@ func linkSubscriptionHandler(w http.ResponseWriter, r *http.Request) {
 					"message": "user not found",
 				}
 			} else {
-				user.SubscriptionID = req.Code
-
-				if pass.MaxDevices > 0 {
-					user.DeviceLimit = pass.MaxDevices
-				}
-
-				if pass.ExpiresAt > 0 {
-					user.SubscriptionExpires = pass.ExpiresAt
-				}
-
-				user.SubscriptionStatus = "active"
+				applyLinkedSubscriptionLocked(user, req.Code, pass)
 				saveDBLocked()
 			}
 		}

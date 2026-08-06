@@ -75,7 +75,7 @@ func cancelYooPayment(paymentID string) error {
 		resp.StatusCode != http.StatusCreated {
 
 		data, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf(string(data))
+		return fmt.Errorf("%s", data)
 	}
 
 	return nil
@@ -140,7 +140,7 @@ func createYooPayment(order *Order) (string, string, error) {
 	if resp.StatusCode != http.StatusOK &&
 		resp.StatusCode != http.StatusCreated {
 
-		return "", "", fmt.Errorf(string(data))
+		return "", "", fmt.Errorf("%s", data)
 	}
 
 	var payment YooCreatePaymentResponse

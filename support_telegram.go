@@ -55,6 +55,7 @@ type telegramMessagePayload struct {
 type telegramCallbackMessagePayload struct {
 	MessageID int                 `json:"message_id"`
 	Chat      telegramChatPayload `json:"chat"`
+	Text      string              `json:"text"`
 }
 
 type telegramCallbackQueryPayload struct {
@@ -574,10 +575,11 @@ func showSupportMenu(token string, actor cabinetActor, messageID int, edit bool)
 			token,
 			actor.ChatID,
 			messageID,
-			"<b>💬 Поддержка</b>\n\nЧтобы создать обращение, сначала войдите в существующий аккаунт WDTT или зарегистрируйтесь прямо в Telegram.",
+			"<b>💬 Поддержка</b>\n\nЧтобы создать обращение, сначала войдите в существующий аккаунт WDTT, зарегистрируйтесь прямо в Telegram или привяжите уже существующую подписку.",
 			[][]map[string]interface{}{
 				{cabinetButton("🔑 Войти", "cabinet_login")},
 				{cabinetButton("🆕 Зарегистрироваться", "cabinet_register")},
+				{cabinetButton("У меня уже есть подписка", "cabinet_register_by_subscription")},
 				{cabinetButton("⬅️ Назад", "cabinet_open")},
 			},
 			edit,

@@ -15,6 +15,12 @@ type loginRequest struct {
 	Password string `json:"password"`
 }
 
+type registerBySubscriptionRequest struct {
+	SubscriptionPassword string `json:"subscription_password"`
+	Email                string `json:"email"`
+	Password             string `json:"password"`
+}
+
 type apiResponse struct {
 	Success bool   `json:"success"`
 	Message string `json:"message,omitempty"`
@@ -99,6 +105,55 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 
 	json.NewEncoder(w).Encode(authSuccessResponse{
 		Success:   true,
+		Token:     result.Token,
+		ExpiresAt: result.TokenExpiresAt,
+		User: &authUserResponse{
+			Email:      result.User.Email,
+			Role:       result.User.Role,
+			TelegramID: result.User.TelegramID,
+		},
+	})
+}
+
+func registerBySubscriptionHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req registerBySubscriptionRequest
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	result, err := RegisterUserBySubscriptionAndIssueToken(
+		req.SubscriptionPassword,
+		req.Email,
+		req.Password,
+	)
+	if err != nil {
+		statusCode := http.StatusBadRequest
+
+		switch err {
+		case ErrSubscriptionNotFound:
+			statusCode = http.StatusNotFound
+		case ErrSubscriptionAlreadyRegistered, ErrEmailAlreadyExists:
+			statusCode = http.StatusConflict
+		}
+
+		w.WriteHeader(statusCode)
+		json.NewEncoder(w).Encode(apiResponse{
+			Success: false,
+			Message: err.Error(),
+		})
+		return
+	}
+
+	json.NewEncoder(w).Encode(authSuccessResponse{
+		Success:   true,
+		Message:   "User created",
 		Token:     result.Token,
 		ExpiresAt: result.TokenExpiresAt,
 		User: &authUserResponse{

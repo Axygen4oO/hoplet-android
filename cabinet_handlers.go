@@ -20,6 +20,65 @@ func handleCabinetMessage(token string, actor cabinetActor, text string) bool {
 
 	if state.Mode != "" && text != "/start" && text != "/help" && text != "/cabinet" {
 		switch state.Mode {
+		case "awaiting_subscription_password":
+			subscriptionPassword := strings.TrimSpace(text)
+			if subscriptionPassword == "" {
+				sendCabinetTelegram(
+					token,
+					actor.ChatID,
+					"<b>Регистрация по подписке</b>\n\nВведите пароль от вашей подписки.",
+					nil,
+				)
+				return true
+			}
+
+			err := validateSubscriptionRegistrationPassword(subscriptionPassword)
+			if err != nil {
+				switch err {
+				case ErrSubscriptionNotFound:
+					sendCabinetTelegram(
+						token,
+						actor.ChatID,
+						"<b>Регистрация по подписке</b>\n\nПодписка с таким паролем не найдена. Проверьте пароль и попробуйте снова.",
+						nil,
+					)
+				case ErrSubscriptionAlreadyRegistered:
+					cabinetClearState(telegramID)
+					cabinetRender(
+						token,
+						actor.ChatID,
+						0,
+						"<b>Регистрация по подписке</b>\n\nЭта подписка уже зарегистрирована. Используйте вход по Email и паролю.",
+						[][]map[string]interface{}{
+							{cabinetButton("🔑 Войти", "cabinet_login")},
+							{cabinetButton("⬅️ Назад", "cabinet_back")},
+						},
+						false,
+					)
+				default:
+					sendCabinetTelegram(
+						token,
+						actor.ChatID,
+						"<b>Регистрация по подписке</b>\n\nНе удалось проверить подписку. Попробуйте ещё раз позже.",
+						nil,
+					)
+				}
+				return true
+			}
+
+			cabinetSetState(telegramID, CabinetState{
+				Mode:                 "awaiting_subscription_register_email",
+				SubscriptionPassword: subscriptionPassword,
+			})
+
+			sendCabinetTelegram(
+				token,
+				actor.ChatID,
+				"<b>Регистрация по подписке</b>\n\nВведите Email для нового аккаунта WDTT.",
+				nil,
+			)
+			return true
+
 		case "awaiting_login_email":
 			email := strings.ToLower(strings.TrimSpace(text))
 			if email == "" || !strings.Contains(email, "@") {
@@ -76,6 +135,50 @@ func handleCabinetMessage(token string, actor cabinetActor, text string) bool {
 
 			cabinetClearState(telegramID)
 			showCabinetMain(token, actor, 0, false)
+			return true
+
+		case "awaiting_subscription_register_email":
+			email := strings.ToLower(strings.TrimSpace(text))
+			err := validateSubscriptionRegistrationEmailAvailability(email)
+			if err != nil {
+				switch err {
+				case ErrInvalidRegistrationEmail:
+					sendCabinetTelegram(
+						token,
+						actor.ChatID,
+						"<b>Регистрация по подписке</b>\n\nВведите корректный Email для нового аккаунта WDTT.",
+						nil,
+					)
+				case ErrEmailAlreadyExists:
+					sendCabinetTelegram(
+						token,
+						actor.ChatID,
+						"<b>Регистрация по подписке</b>\n\nЭтот Email уже зарегистрирован. Укажите другой Email.",
+						nil,
+					)
+				default:
+					sendCabinetTelegram(
+						token,
+						actor.ChatID,
+						"<b>Регистрация по подписке</b>\n\nНе удалось проверить Email. Попробуйте ещё раз.",
+						nil,
+					)
+				}
+				return true
+			}
+
+			cabinetSetState(telegramID, CabinetState{
+				Mode:                 "awaiting_subscription_register_password",
+				Email:                normalizeUserEmail(email),
+				SubscriptionPassword: state.SubscriptionPassword,
+			})
+
+			sendCabinetTelegram(
+				token,
+				actor.ChatID,
+				"<b>Регистрация по подписке</b>\n\nПридумайте пароль для входа в личный кабинет.",
+				nil,
+			)
 			return true
 
 		case "awaiting_register_email":
@@ -183,6 +286,104 @@ func handleCabinetMessage(token string, actor cabinetActor, text string) bool {
 			showCabinetMain(token, actor, 0, false)
 			return true
 
+		case "awaiting_subscription_register_password":
+			password := strings.TrimSpace(text)
+			if err := validateSubscriptionRegistrationPasswordValue(password); err != nil {
+				sendCabinetTelegram(
+					token,
+					actor.ChatID,
+					"<b>Регистрация по подписке</b>\n\nПароль не должен быть пустым. Отправьте пароль ещё раз.",
+					nil,
+				)
+				return true
+			}
+
+			auth, err := RegisterUserBySubscriptionAndIssueToken(
+				state.SubscriptionPassword,
+				state.Email,
+				password,
+			)
+			if err != nil {
+				switch err {
+				case ErrSubscriptionNotFound:
+					cabinetClearState(telegramID)
+					cabinetRender(
+						token,
+						actor.ChatID,
+						0,
+						"<b>Регистрация по подписке</b>\n\nПодписка больше не найдена. Начните регистрацию заново.",
+						[][]map[string]interface{}{
+							{cabinetButton("У меня уже есть подписка", "cabinet_register_by_subscription")},
+							{cabinetButton("⬅️ Назад", "cabinet_back")},
+						},
+						false,
+					)
+				case ErrSubscriptionAlreadyRegistered:
+					cabinetClearState(telegramID)
+					cabinetRender(
+						token,
+						actor.ChatID,
+						0,
+						"<b>Регистрация по подписке</b>\n\nЭта подписка уже зарегистрирована. Используйте вход по Email и паролю.",
+						[][]map[string]interface{}{
+							{cabinetButton("🔑 Войти", "cabinet_login")},
+							{cabinetButton("⬅️ Назад", "cabinet_back")},
+						},
+						false,
+					)
+				case ErrEmailAlreadyExists:
+					cabinetSetState(telegramID, CabinetState{
+						Mode:                 "awaiting_subscription_register_email",
+						SubscriptionPassword: state.SubscriptionPassword,
+					})
+					sendCabinetTelegram(
+						token,
+						actor.ChatID,
+						"<b>Регистрация по подписке</b>\n\nЭтот Email уже зарегистрирован. Укажите другой Email.",
+						nil,
+					)
+				default:
+					cabinetClearState(telegramID)
+					cabinetRender(
+						token,
+						actor.ChatID,
+						0,
+						fmt.Sprintf(
+							"<b>Регистрация по подписке</b>\n\nНе удалось завершить регистрацию: %s",
+							cabinetSafe(err.Error()),
+						),
+						[][]map[string]interface{}{
+							{cabinetButton("У меня уже есть подписка", "cabinet_register_by_subscription")},
+							{cabinetButton("🔑 Войти", "cabinet_login")},
+							{cabinetButton("⬅️ Назад", "cabinet_back")},
+						},
+						false,
+					)
+				}
+				return true
+			}
+
+			if err := cabinetAuthorizeTelegramUser(state.Email, telegramID, auth); err != nil {
+				cabinetClearState(telegramID)
+				sendCabinetTelegram(
+					token,
+					actor.ChatID,
+					"<b>Регистрация по подписке</b>\n\nАккаунт создан и подписка привязана, но авторизация в Telegram не удалась. Используйте вход по Email и паролю.",
+					nil,
+				)
+				return true
+			}
+
+			cabinetClearState(telegramID)
+			sendCabinetTelegram(
+				token,
+				actor.ChatID,
+				"<b>Регистрация по подписке</b>\n\nРегистрация прошла успешно. Подписка привязана к вашему аккаунту.",
+				nil,
+			)
+			showCabinetMain(token, actor, 0, false)
+			return true
+
 		case "awaiting_promo":
 			cabinetClearState(telegramID)
 			cabinetRender(
@@ -247,6 +448,8 @@ func handleCabinetCallback(token string, actor cabinetActor, callbackID, data st
 		showCabinetLoginPrompt(token, actor, messageID, true)
 	case data == "cabinet_register":
 		showCabinetRegisterPrompt(token, actor, messageID, true)
+	case data == "cabinet_register_by_subscription":
+		showCabinetRegisterBySubscriptionPrompt(token, actor, messageID, true)
 	case handleCabinetPurchaseCallback(token, actor, messageID, data):
 		return true
 	case data == "cabinet_profile":
@@ -315,6 +518,7 @@ func showCabinetIntro(token string, actor cabinetActor, messageID int, edit bool
 		keyboard = append(keyboard,
 			[]map[string]interface{}{cabinetButton("🔑 Войти", "cabinet_login")},
 			[]map[string]interface{}{cabinetButton("🆕 Зарегистрироваться", "cabinet_register")},
+			[]map[string]interface{}{cabinetButton("У меня уже есть подписка", "cabinet_register_by_subscription")},
 		)
 	}
 
@@ -387,6 +591,25 @@ func showCabinetRegisterPrompt(token string, actor cabinetActor, messageID int, 
 	})
 
 	text := "<b>🆕 Регистрация</b>\n\nСоздайте новый аккаунт WDTT прямо в Telegram.\n\nОтправьте email для регистрации."
+
+	cabinetRender(
+		token,
+		actor.ChatID,
+		messageID,
+		text,
+		[][]map[string]interface{}{
+			{cabinetButton("⬅️ Назад", "cabinet_back")},
+		},
+		edit,
+	)
+}
+
+func showCabinetRegisterBySubscriptionPrompt(token string, actor cabinetActor, messageID int, edit bool) {
+	cabinetSetState(actor.effectiveUserID(), CabinetState{
+		Mode: "awaiting_subscription_password",
+	})
+
+	text := "<b>Регистрация по подписке</b>\n\nВведите пароль от вашей подписки."
 
 	cabinetRender(
 		token,

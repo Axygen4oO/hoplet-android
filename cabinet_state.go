@@ -3,9 +3,10 @@ package main
 import "sync"
 
 type CabinetState struct {
-	Mode     string
-	Email    string
-	Password string
+	Mode                 string
+	Email                string
+	Password             string
+	SubscriptionPassword string
 }
 
 var (

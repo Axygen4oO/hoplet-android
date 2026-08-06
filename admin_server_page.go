@@ -348,7 +348,7 @@ func buildAdminServerDiagnostics() []AdminServerDiagnosticCheck {
 	_, keysErr := os.Stat(filepath.Join(adminServerConfigDir(), "wg-keys.dat"))
 
 	checks := []AdminServerDiagnosticCheck{
-		{ID: "cpu", Title: "CPU", Description: "Текущая загрузка CPU сервера.", Status: "ok", MockResult: fmt.Sprintf("Загрузка CPU: %.1f%%", cpuUsage)},
+		{ID: "cpu", Title: "CPU", Description: "Текущая загрузка CPU сервера.", Status: "ok", MockResult: fmt.Sprintf("Загрузка CPU: %d%%", cpuUsage)},
 		{ID: "ram", Title: "RAM", Description: "Использование оперативной памяти.", Status: "ok", MockResult: fmt.Sprintf("RAM: %d / %d bytes", ramUsed, ramTotal)},
 		{ID: "disk", Title: "Disk", Description: "Использование дискового пространства.", Status: "ok", MockResult: fmt.Sprintf("Disk: %d / %d bytes", diskUsed, diskTotal)},
 		{ID: "network", Title: "Network", Description: "Накопленный сетевой трафик.", Status: "ok", MockResult: fmt.Sprintf("RX %d bytes / TX %d bytes", rx, tx)},

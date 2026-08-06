@@ -20,9 +20,11 @@ func handleCallback(
 	if handleNotificationCallback(token, adminID, data, messageID, messageText) {
 		return true
 	}
+	if handleNotificationPanelAction(token, adminID, data) {
+		return true
+	}
 
 	switch data {
-
 	case "panel_main":
 		showMainPanel(
 			token,

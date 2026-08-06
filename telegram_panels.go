@@ -23,6 +23,10 @@ func showMainPanel(
 			"text":          "⚙️ Сервер",
 			"callback_data": "panel_server",
 		}},
+		{{
+			"text":          "📢 Отправить уведомление",
+			"callback_data": notificationPanelCallback,
+		}},
 	}
 
 	if edit {
