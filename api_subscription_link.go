@@ -55,52 +55,30 @@ func linkSubscriptionHandler(w http.ResponseWriter, r *http.Request) {
 
 	req.Code = strings.TrimSpace(req.Code)
 
-	dbMutex.Lock()
-	statusCode := http.StatusOK
-	resp := map[string]any{
-		"success": true,
-	}
-	pass, ok := db.Passwords[req.Code]
-	if !ok || pass == nil {
-		statusCode = http.StatusNotFound
-		resp = map[string]any{
-			"success": false,
-			"message": "subscription not found",
-		}
-	} else {
-		for email, u := range db.Users {
-			if email == claims.Email {
-				continue
-			}
+	if err := LinkExistingSubscriptionToUser(req.Code, claims.Email); err != nil {
+		statusCode := http.StatusBadRequest
+		message := err.Error()
 
-			if u.SubscriptionID == req.Code {
-				statusCode = http.StatusConflict
-				resp = map[string]any{
-					"success": false,
-					"message": "subscription already linked",
-				}
-				break
-			}
+		switch err {
+		case ErrSubscriptionNotFound:
+			statusCode = http.StatusNotFound
+		case ErrUserNotFound:
+			statusCode = http.StatusNotFound
+		case ErrSubscriptionAlreadyLinked, ErrUserAlreadyHasSubscription:
+			statusCode = http.StatusConflict
+		case ErrSubscriptionBlocked:
+			statusCode = http.StatusForbidden
 		}
 
-		if statusCode == http.StatusOK {
-			user := db.Users[claims.Email]
-			if user == nil {
-				statusCode = http.StatusNotFound
-				resp = map[string]any{
-					"success": false,
-					"message": "user not found",
-				}
-			} else {
-				applyLinkedSubscriptionLocked(user, req.Code, pass)
-				saveDBLocked()
-			}
-		}
-	}
-	dbMutex.Unlock()
-
-	if statusCode != http.StatusOK {
 		w.WriteHeader(statusCode)
+		json.NewEncoder(w).Encode(map[string]any{
+			"success": false,
+			"message": message,
+		})
+		return
 	}
-	json.NewEncoder(w).Encode(resp)
+
+	json.NewEncoder(w).Encode(map[string]any{
+		"success": true,
+	})
 }

@@ -630,9 +630,9 @@ fun SettingsTabContent(
                         "VKHASH",
                         "UI connect aborted: resolved server VK hashes are blank, peer=$peerForTunnel, source=${resolvedHashes.source}"
                     )
-                    "Не удалось получить серверные VK hash"
+                    resolvedHashes.errorMessage ?: "Не удалось получить серверные VK hash"
                 } else {
-                    "Локальные VK hash не заданы"
+                    resolvedHashes.errorMessage ?: "Локальные VK hash не заданы"
                 }
                 Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
                 return@launch
@@ -680,6 +680,10 @@ fun SettingsTabContent(
                 action = "START"
                 putExtra("peer", peerForTunnel)
                 putExtra("vk_hashes", finalHashes)
+                putExtra("vk_hash_source", resolvedHashes.source)
+                putExtra("server_hash_fallback_cache", resolvedHashes.serverCacheFallbackHashes)
+                putExtra("server_hashes_fresh_from_api", resolvedHashes.serverHashesFetchedFreshFromApi)
+                putExtra("server_hashes_used_cache", resolvedHashes.usedServerCache)
                 putExtra("secondary_vk_hash", "")
                 putExtra("workers_per_hash", finalWorkers)
                 putExtra("port", effectiveLocalPort)
@@ -1733,7 +1737,6 @@ fun SettingsTabContent(
                         workersInput = newMax.toFloat()
                     }
 
-                    settingsStore.saveServerVkHashesCache(combined)
                     saveTunnelSettingsNow(activeHashesOverride = combined) { showHashesDialog = false }
                 }
             },
@@ -3383,7 +3386,7 @@ fun HashesDialog(
         serverHashes = ServerVkHashes.load(
             server = server,
             token = AdminSession.getToken(context) ?: ""
-        )
+        ).hashes
     }
 
     val filledHashes = remember(currentHashes) {

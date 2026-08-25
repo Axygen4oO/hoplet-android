@@ -959,6 +959,15 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 					) {
 						continue
 					}
+					if handleAdminUserCardCallback(
+						token,
+						adminID,
+						data,
+						u.CallbackQuery.Message.MessageID,
+						wgDev,
+					) {
+						continue
+					}
 
 					if strings.HasPrefix(data, "viewpass_") {
 						// Просмотр деталей пароля
@@ -1084,6 +1093,13 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 							kb = append(kb, map[string]interface{}{
 								"text":          "🗑 Отвязать ВСЕ устройства",
 								"callback_data": "unbind_" + pass,
+							})
+						}
+
+						if linkedUser, ok := findUserBySubscriptionID(pass); ok && linkedUser != nil {
+							kb = append(kb, map[string]interface{}{
+								"text":          "👤 Карточка пользователя",
+								"callback_data": "usercard_" + pass,
 							})
 						}
 

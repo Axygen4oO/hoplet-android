@@ -23,6 +23,9 @@ func handleCallback(
 	if handleNotificationPanelAction(token, adminID, data) {
 		return true
 	}
+	if handleAdminBulkExtendCallback(token, adminID, data, messageID) {
+		return true
+	}
 
 	switch data {
 	case "panel_main":

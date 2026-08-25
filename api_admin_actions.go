@@ -2,10 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
-
-	"golang.org/x/crypto/bcrypt"
 )
 
 type AdminUserUpdateRequest struct {
@@ -88,6 +87,8 @@ type AdminRenameDeviceRequest struct {
 	DeviceID string `json:"device_id"`
 	Name     string `json:"name"`
 }
+
+var errAdminBulkExtendNoGroupsSelected = errors.New("no user groups selected")
 
 func syncUserSubscription(user *UserAccount) {
 	pass, ok := db.Passwords[user.SubscriptionID]
@@ -303,18 +304,6 @@ func adminUserPasswordHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hash, err := bcrypt.GenerateFromPassword(
-		[]byte(req.Password),
-		bcrypt.DefaultCost,
-	)
-	if err != nil {
-		json.NewEncoder(w).Encode(AdminActionResponse{
-			Success: false,
-			Error:   err.Error(),
-		})
-		return
-	}
-
 	dbMutex.Lock()
 	resp := AdminActionResponse{Success: true}
 	user, ok := db.Users[req.Email]
@@ -324,8 +313,14 @@ func adminUserPasswordHandler(w http.ResponseWriter, r *http.Request) {
 			Error:   "user not found",
 		}
 	} else {
-		user.PasswordHash = string(hash)
-		saveDBLocked()
+		if err := setUserPasswordLocked(user, req.Password); err != nil {
+			resp = AdminActionResponse{
+				Success: false,
+				Error:   err.Error(),
+			}
+		} else {
+			saveDBLocked()
+		}
 	}
 	dbMutex.Unlock()
 
@@ -554,6 +549,50 @@ func adminUserExtendHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(resp)
 }
 
+func adminExtendAllUsers(req AdminUsersExtendAllRequest) (int, error) {
+	if req.Days <= 0 {
+		return 0, errors.New("days must be greater than zero")
+	}
+
+	if !req.IncludeActive &&
+		!req.IncludeBlocked &&
+		!req.IncludeExpired {
+		return 0, errAdminBulkExtendNoGroupsSelected
+	}
+
+	dbMutex.Lock()
+	defer dbMutex.Unlock()
+
+	updated := 0
+
+	for _, user := range db.Users {
+		include := false
+
+		switch user.SubscriptionStatus {
+		case "active":
+			include = req.IncludeActive
+		case "blocked":
+			include = req.IncludeBlocked
+		case "expired":
+			include = req.IncludeExpired
+		}
+
+		if !include {
+			continue
+		}
+
+		if err := extendSubscription(user, req.Days); err != nil {
+			continue
+		}
+
+		updated++
+	}
+
+	saveDBLocked()
+
+	return updated, nil
+}
+
 func adminUsersExtendAllHandler(w http.ResponseWriter, r *http.Request) {
 
 	if r.Method != http.MethodPost {
@@ -578,57 +617,14 @@ func adminUsersExtendAllHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Days <= 0 {
+	updated, err := adminExtendAllUsers(req)
+	if err != nil {
 		json.NewEncoder(w).Encode(AdminUsersExtendAllResponse{
 			Success: false,
-			Error:   "days must be greater than zero",
+			Error:   err.Error(),
 		})
 		return
 	}
-
-	if !req.IncludeActive &&
-		!req.IncludeBlocked &&
-		!req.IncludeExpired {
-
-		json.NewEncoder(w).Encode(AdminUsersExtendAllResponse{
-			Success: false,
-			Error:   "no user groups selected",
-		})
-		return
-	}
-
-	dbMutex.Lock()
-	updated := 0
-
-	for _, user := range db.Users {
-
-		include := false
-
-		switch user.SubscriptionStatus {
-
-		case "active":
-			include = req.IncludeActive
-
-		case "blocked":
-			include = req.IncludeBlocked
-
-		case "expired":
-			include = req.IncludeExpired
-		}
-
-		if !include {
-			continue
-		}
-
-		if err := extendSubscription(user, req.Days); err != nil {
-			continue
-		}
-
-		updated++
-	}
-
-	saveDBLocked()
-	dbMutex.Unlock()
 
 	json.NewEncoder(w).Encode(AdminUsersExtendAllResponse{
 		Success: true,

@@ -49,6 +49,7 @@ class SettingsStore(context: Context) {
         private val VK_HASHES = stringPreferencesKey("vk_hashes")
         private val LOCAL_VK_HASHES = stringPreferencesKey("local_vk_hashes")
         private val SERVER_VK_HASHES_CACHE = stringPreferencesKey("server_vk_hashes_cache")
+        private val SERVER_VK_HASHES_CACHE_UPDATED_AT = longPreferencesKey("server_vk_hashes_cache_updated_at")
         private val VK_HASH_SOURCE = stringPreferencesKey("vk_hash_source")
         private val VK_HASH_SOURCE_SPLIT_MIGRATED = booleanPreferencesKey("vk_hash_source_split_migrated")
         private val GLOBAL_VK_HASHES = stringPreferencesKey("global_vk_hashes")
@@ -352,6 +353,7 @@ class SettingsStore(context: Context) {
     val vkHashes: Flow<String> = dataStore.data.map { it[VK_HASHES] ?: "" }
     val localVkHashes: Flow<String> = dataStore.data.map { normalizeVkHashes(it[LOCAL_VK_HASHES] ?: "") }
     val serverVkHashesCache: Flow<String> = dataStore.data.map { normalizeVkHashes(it[SERVER_VK_HASHES_CACHE] ?: "") }
+    val serverVkHashesCacheUpdatedAt: Flow<Long> = dataStore.data.map { it[SERVER_VK_HASHES_CACHE_UPDATED_AT] ?: 0L }
     val vkHashSource: Flow<String> = dataStore.data.map { normalizeVkHashSource(it[VK_HASH_SOURCE]) }
     val globalVkHashes: Flow<String> = appContext.dataStore.data.map { it[GLOBAL_VK_HASHES] ?: "" }
     val secondaryVkHash: Flow<String> = appContext.dataStore.data.map { it[SECONDARY_VK_HASH] ?: "" }
@@ -664,6 +666,19 @@ class SettingsStore(context: Context) {
         dataStore.edit { prefs ->
             prefs[SERVER_VK_HASHES_CACHE] = normalizeVkHashes(hashes)
         }
+    }
+
+    suspend fun saveServerVkHashesCacheSnapshot(
+        hashes: String,
+        updatedAt: Long = System.currentTimeMillis(),
+    ): Boolean {
+        val normalized = normalizeVkHashes(hashes)
+        if (normalized.isBlank()) return false
+        dataStore.edit { prefs ->
+            prefs[SERVER_VK_HASHES_CACHE] = normalized
+            prefs[SERVER_VK_HASHES_CACHE_UPDATED_AT] = updatedAt
+        }
+        return true
     }
 
     suspend fun saveVkHashSource(source: String) {

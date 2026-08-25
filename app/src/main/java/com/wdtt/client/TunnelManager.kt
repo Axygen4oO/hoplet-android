@@ -632,6 +632,9 @@ val showBlockerWarning = MutableStateFlow(false)
                     } catch (e: Exception) {
                         val msg = e.message ?: e::class.java.simpleName
                         updateLog("vk_auth_fail", "Ошибка авторизации VK: $msg", 99, true)
+                        if (tryServerHashCacheFallback("vk_auth_fail", msg)) {
+                            return@launch
+                        }
                         ConnectionProgressManager.fail(ConnectionStage.VK, msg)
                         finishConnectingFailed(clearEnabled = !isSwitching)
                         return@launch
@@ -757,6 +760,14 @@ val showBlockerWarning = MutableStateFlow(false)
                             lineTrim.contains("истёк") -> "Срок действия пароля истёк"
                             lineTrim.contains("другому устройству") -> "Пароль привязан к другому устройству"
                             else -> "Ошибка авторизации"
+                        }
+                        if (
+                            !lineTrim.contains("неверный пароль", true) &&
+                            !lineTrim.contains("истёк", true) &&
+                            !lineTrim.contains("другому устройству", true) &&
+                            tryServerHashCacheFallback("fatal_auth", reason)
+                        ) {
+                            return@forEachLine
                         }
                         handleCriticalError("\uD83D\uDD12 $reason. Воркеры остановлены.")
                         return@forEachLine
@@ -1089,6 +1100,15 @@ val showBlockerWarning = MutableStateFlow(false)
                                     wgHelper?.startTunnel(configStr)
                                     ConnectionProgressManager.completeStage(ConnectionStage.VPN)
                                     ConnectionProgressManager.markConnected()
+                                    if (currentParams?.usingServerHashFallback == true) {
+                                        updateLog(
+                                            "vkhash_server_fallback_ok",
+                                            "[VKHASH] Fallback успешен: подключение выполнено через SERVER cache",
+                                            2,
+                                            false
+                                        )
+                                        android.util.Log.i("VKHASH", "SERVER cache fallback successful")
+                                    }
                                     finishRecoverySession(
                                         success = true,
                                     )
@@ -1180,6 +1200,64 @@ val showBlockerWarning = MutableStateFlow(false)
         stop()
     }
 
+    private fun tryServerHashCacheFallback(reason: String, detail: String? = null): Boolean {
+        val params = currentParams ?: return false
+        val context = lastContext?.get() ?: return false
+        if (params.vkHashSource != SettingsStore.VK_HASH_SOURCE_SERVER) return false
+
+        if (params.usingServerHashFallback) {
+            updateLog(
+                "vkhash_server_fallback_failed",
+                "[VKHASH] fallback отсутствует/не сработал: ${detail ?: reason}",
+                99,
+                true
+            )
+            android.util.Log.e("VKHASH", "SERVER cache fallback failed: reason=$reason, detail=$detail")
+            return false
+        }
+
+        if (!params.serverHashesFetchedFreshFromApi) {
+            return false
+        }
+
+        val fallbackHashes = SettingsStore.normalizeVkHashes(params.serverHashFallbackCache)
+        if (fallbackHashes.isBlank()) {
+            updateLog(
+                "vkhash_server_fallback_missing",
+                "[VKHASH] fallback отсутствует/не сработал",
+                99,
+                true
+            )
+            android.util.Log.e("VKHASH", "SERVER hash failed and fallback cache is unavailable: reason=$reason, detail=$detail")
+            return false
+        }
+
+        val fallbackParams = params.copy(
+            vkHashes = fallbackHashes,
+            serverHashFallbackCache = "",
+            serverHashesFetchedFreshFromApi = false,
+            usedServerCacheOnResolve = false,
+            usingServerHashFallback = true,
+        )
+        currentParams = fallbackParams
+        activeHashIndex = 0
+        updateLog(
+            "vkhash_server_fallback_start",
+            "[VKHASH] SERVER hash не сработали, выполняется fallback",
+            50,
+            true
+        )
+        stats.value = "Повторное подключение через SERVER cache…"
+        isConnecting.value = true
+        android.util.Log.w(
+            "VKHASH",
+            "SERVER hash failed, starting fallback: reason=$reason, detail=$detail"
+        )
+        stopOnlyProcess()
+        start(context, fallbackParams, isSwitching = true)
+        return true
+    }
+
     private fun handleHashError() {
         val params = currentParams ?: return
         val context = lastContext?.get() ?: return
@@ -1193,6 +1271,9 @@ val showBlockerWarning = MutableStateFlow(false)
             stopOnlyProcess()
             start(context, params, isSwitching = true)
         } else {
+            if (tryServerHashCacheFallback("hash_error", "Текущий набор SERVER hash не прошел проверку")) {
+                return
+            }
             val msg = if (activeHashIndex == 1) "Запасной хеш тоже мертв. Отключение." else "Хеш умер, запасного нет. Отключение."
             handleCriticalError(msg)
         }
@@ -1745,6 +1826,11 @@ try {
 data class TunnelParams(
     val peer: String,
     val vkHashes: String,
+    val vkHashSource: String = SettingsStore.VK_HASH_SOURCE_LOCAL,
+    val serverHashFallbackCache: String = "",
+    val serverHashesFetchedFreshFromApi: Boolean = false,
+    val usedServerCacheOnResolve: Boolean = false,
+    val usingServerHashFallback: Boolean = false,
     val secondaryVkHash: String = "",
     val workersPerHash: Int,
     val port: Int,

@@ -32,6 +32,20 @@ class TunnelService : Service() {
     private lateinit var networkMonitor: TunnelNetworkMonitor
     private var lastVpnReconnectAttemptMs = 0L
 
+    private fun resolvedVkHashesFromIntent(intent: Intent): ResolvedVkHashes? {
+        val hashes = SettingsStore.normalizeVkHashes(intent.getStringExtra("vk_hashes"))
+        if (hashes.isNullOrBlank()) return null
+        return ResolvedVkHashes(
+            source = SettingsStore.normalizeVkHashSource(intent.getStringExtra("vk_hash_source")),
+            hashes = hashes,
+            usedServerCache = intent.getBooleanExtra("server_hashes_used_cache", false),
+            serverHashesFetchedFreshFromApi = intent.getBooleanExtra("server_hashes_fresh_from_api", false),
+            serverCacheFallbackHashes = SettingsStore.normalizeVkHashes(
+                intent.getStringExtra("server_hash_fallback_cache")
+            ),
+        )
+    }
+
     override fun onCreate() {
         super.onCreate()
         NotificationHelper.ensureTunnelChannel(this)
@@ -84,15 +98,20 @@ class TunnelService : Service() {
                             intent.getStringExtra("obfs_mode")?.takeIf { it.isNotEmpty() }
                                 ?: store.obfsMode.first()
                         )
-                        val resolvedHashes = VkHashSourceResolver.resolveForConnection(
-                            context = appContext,
-                            settingsStore = store,
-                            peer = basePeer,
-                        )
+                        val resolvedHashes = resolvedVkHashesFromIntent(intent)
+                            ?: VkHashSourceResolver.resolveForConnection(
+                                context = appContext,
+                                settingsStore = store,
+                                peer = basePeer,
+                            )
                         
                         val params = TunnelParams(
                             peer = peerWithPort,
                             vkHashes = resolvedHashes.hashes,
+                            vkHashSource = resolvedHashes.source,
+                            serverHashFallbackCache = resolvedHashes.serverCacheFallbackHashes,
+                            serverHashesFetchedFreshFromApi = resolvedHashes.serverHashesFetchedFreshFromApi,
+                            usedServerCacheOnResolve = resolvedHashes.usedServerCache,
                             secondaryVkHash = intent.getStringExtra("secondary_vk_hash")?.takeIf { it.isNotEmpty() } ?: store.secondaryVkHash.first(),
                             workersPerHash = intent.getIntExtra("workers_per_hash", 0).takeIf { it > 0 } ?: store.workersPerHash.first(),
                             port = intent.getIntExtra("port", 0).takeIf { it > 0 } ?: store.listenPort.first(),
@@ -167,6 +186,10 @@ class TunnelService : Service() {
                 val params = TunnelParams(
                     peer = peerWithPort,
                     vkHashes = resolvedHashes.hashes,
+                    vkHashSource = resolvedHashes.source,
+                    serverHashFallbackCache = resolvedHashes.serverCacheFallbackHashes,
+                    serverHashesFetchedFreshFromApi = resolvedHashes.serverHashesFetchedFreshFromApi,
+                    usedServerCacheOnResolve = resolvedHashes.usedServerCache,
                     secondaryVkHash = store.secondaryVkHash.first(),
                     workersPerHash = store.workersPerHash.first(),
                     port = store.listenPort.first(),

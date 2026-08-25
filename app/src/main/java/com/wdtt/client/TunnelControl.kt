@@ -41,20 +41,14 @@ object TunnelControl {
             val manualPortsEnabled = store.manualPortsEnabled.first()
             val serverDtlsPort = if (manualPortsEnabled) store.serverDtlsPort.first() else 56000
             val peerWithPort = if (basePeer.isBlank()) basePeer else PeerAddress.ensurePort(basePeer, serverDtlsPort)
-            val hashes = VkHashSourceResolver.resolveForConnection(
-                context = appContext,
-                settingsStore = store,
-                peer = peerWithPort,
-            ).hashes
 
-            if (peerWithPort.isBlank() || hashes.isBlank() || password.isBlank()) {
+            if (peerWithPort.isBlank() || password.isBlank()) {
                 return@launch
             }
 
             val startIntent = Intent(appContext, TunnelService::class.java).apply {
                 action = "START_FORCED"
                 putExtra("peer", peerWithPort)
-                putExtra("vk_hashes", hashes)
                 putExtra("secondary_vk_hash", "")
                 putExtra("workers_per_hash", workers)
                 putExtra("port", port)

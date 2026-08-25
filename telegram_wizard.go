@@ -19,6 +19,65 @@ func handleTelegramInput(
 		return true
 	}
 
+	if handleAdminBulkExtendInput(token, adminID, cmd) {
+		return true
+	}
+
+	if tgState.WaitingUserExtendDays {
+		days, err := strconv.Atoi(strings.TrimSpace(cmd))
+		if err != nil || days <= 0 {
+			sendTelegram(
+				token,
+				adminID,
+				"❌ Введите положительное число дней.",
+				nil,
+			)
+			return true
+		}
+
+		subscriptionID := tgState.TargetUserSubscriptionID
+		resetAdminUserCardState()
+
+		if err := adminExtendUserSubscriptionByID(subscriptionID, int64(days)); err != nil {
+			sendTelegram(token, adminID, "❌ "+err.Error(), nil)
+			return true
+		}
+
+		sendTelegram(
+			token,
+			adminID,
+			fmt.Sprintf("✅ Подписка пользователя продлена на %d дней.", days),
+			nil,
+		)
+		renderAdminUserCard(token, adminID, 0, false, subscriptionID)
+		return true
+	}
+
+	if tgState.WaitingUserMessage {
+		message := strings.TrimSpace(cmd)
+		if message == "" {
+			sendTelegram(
+				token,
+				adminID,
+				"❌ Сообщение не может быть пустым.",
+				nil,
+			)
+			return true
+		}
+
+		subscriptionID := tgState.TargetUserSubscriptionID
+		resetAdminUserCardState()
+
+		if err := adminSendUserMessageBySubscriptionID(token, subscriptionID, message); err != nil {
+			sendTelegram(token, adminID, "❌ "+err.Error(), nil)
+			return true
+		}
+
+		sendTelegram(token, adminID, "✅ Сообщение отправлено пользователю.", nil)
+		renderAdminUserCard(token, adminID, 0, false, subscriptionID)
+		return true
+	}
+
 	if tgState.WaitingForLabel {
 		log.Printf("DEBUG: WaitingForLabel=true, cmd='%s'", cmd)
 		tgState.WaitingForLabel = false

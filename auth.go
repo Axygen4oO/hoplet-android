@@ -21,6 +21,27 @@ func normalizeUserEmail(email string) string {
 	return strings.TrimSpace(strings.ToLower(email))
 }
 
+func setUserPasswordLocked(user *UserAccount, password string) error {
+	if user == nil {
+		return errors.New("user not found")
+	}
+
+	if password == "" {
+		return errors.New("password is empty")
+	}
+
+	hash, err := bcrypt.GenerateFromPassword(
+		[]byte(password),
+		bcrypt.DefaultCost,
+	)
+	if err != nil {
+		return err
+	}
+
+	user.PasswordHash = string(hash)
+	return nil
+}
+
 func createUserLocked(email, password string) (*UserAccount, error) {
 	email = normalizeUserEmail(email)
 
@@ -36,17 +57,8 @@ func createUserLocked(email, password string) (*UserAccount, error) {
 		return nil, errors.New("user already exists")
 	}
 
-	hash, err := bcrypt.GenerateFromPassword(
-		[]byte(password),
-		bcrypt.DefaultCost,
-	)
-	if err != nil {
-		return nil, err
-	}
-
 	user := &UserAccount{
-		Email:        email,
-		PasswordHash: string(hash),
+		Email: email,
 
 		CreatedAt: time.Now().Unix(),
 
@@ -58,6 +70,10 @@ func createUserLocked(email, password string) (*UserAccount, error) {
 
 		DeviceLimit: 5,
 		Language:    "ru",
+	}
+
+	if err := setUserPasswordLocked(user, password); err != nil {
+		return nil, err
 	}
 
 	db.Users[email] = user

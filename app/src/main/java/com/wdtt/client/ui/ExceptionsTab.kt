@@ -89,6 +89,10 @@ object AppCache {
     var cachedList: List<AppItem>? = null
 }
 
+private fun List<AppItem>.selectedFirst(selectedPackages: Set<String>): List<AppItem> {
+    return sortedWith(compareByDescending<AppItem> { it.packageName in selectedPackages })
+}
+
 @Composable
 fun ExceptionsTab() {
     val context = LocalContext.current.applicationContext
@@ -159,34 +163,33 @@ fun ExceptionsTab() {
             }
         }
     }
-
-    val visibleAppsCount by remember(appsList, showSystemApps) {
+    val displayApps by remember(filteredApps, selectedPackages) {
         derivedStateOf {
-            if (showSystemApps) appsList.size else appsList.count { !it.isSystem }
+            filteredApps.selectedFirst(selectedPackages)
         }
     }
 
     val currentModeDescription = if (isWhitelist) {
-        "Белый список: в туннель идут только выбранные приложения."
+        "БС — только выбранные приложения через туннель"
     } else {
-        "Черный список: выбранные приложения обходят туннель."
+        "ЧС — выбранные приложения идут в обход"
     }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(horizontal = 20.dp, vertical = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         BypassHeader(
-            selectedCount = selectedPackages.size,
-            summary = currentModeDescription
+            selectedCount = selectedPackages.size
         )
 
         BypassControlPanel(
             searchQuery = searchQuery,
             onSearchQueryChange = { searchQuery = it },
             isWhitelist = isWhitelist,
+            modeDescription = currentModeDescription,
             isMigrationReady = isMigrationReady,
             showSystemApps = showSystemApps,
             onShowSystemAppsChange = { showSystemApps = it },
@@ -208,13 +211,6 @@ fun ExceptionsTab() {
                     }
                 }
             }
-        )
-
-        BypassListHeader(
-            filteredCount = filteredApps.size,
-            visibleCount = visibleAppsCount,
-            selectedCount = selectedPackages.size,
-            isWhitelist = isWhitelist
         )
 
         when {
@@ -256,7 +252,7 @@ fun ExceptionsTab() {
                     contentPadding = PaddingValues(bottom = 12.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    items(filteredApps, key = { it.packageName }) { app ->
+                    items(displayApps, key = { it.packageName }) { app ->
                         val isSelected = selectedPackages.contains(app.packageName)
 
                         BypassAppRow(
@@ -288,44 +284,23 @@ fun ExceptionsTab() {
 
 @Composable
 private fun BypassHeader(
-    selectedCount: Int,
-    summary: String
+    selectedCount: Int
 ) {
-    Column(
+    Row(
         modifier = Modifier.fillMaxWidth(),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.Top
-        ) {
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                Text(
-                    text = "Обход",
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.onBackground
-                )
-                Text(
-                    text = "Настройка маршрутизации приложений для туннеля.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-            BypassTag(
-                label = "$selectedCount выбрано",
-                background = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f),
-                contentColor = MaterialTheme.colorScheme.primary
-            )
-        }
         Text(
-            text = summary,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+            text = "Обход",
+            style = MaterialTheme.typography.titleLarge,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onBackground
+        )
+        BypassTag(
+            label = "$selectedCount выбрано",
+            background = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f),
+            contentColor = MaterialTheme.colorScheme.primary
         )
     }
 }
@@ -335,56 +310,36 @@ private fun BypassControlPanel(
     searchQuery: String,
     onSearchQueryChange: (String) -> Unit,
     isWhitelist: Boolean,
+    modeDescription: String,
     isMigrationReady: Boolean,
     showSystemApps: Boolean,
     onShowSystemAppsChange: (Boolean) -> Unit,
     onSwitchToBlacklist: () -> Unit,
     onSwitchToWhitelist: () -> Unit
 ) {
-    val surfaceColor = AppCardDefaults.containerColor()
-    val borderColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f)
-
-    Surface(
+    Column(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(28.dp),
-        color = surfaceColor,
-        border = BorderStroke(1.dp, borderColor),
-        shadowElevation = 6.dp,
-        tonalElevation = 2.dp
+        verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
-        ) {
-            BypassSearchField(
-                query = searchQuery,
-                onQueryChange = onSearchQueryChange
-            )
+        BypassSearchField(
+            query = searchQuery,
+            onQueryChange = onSearchQueryChange
+        )
 
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column(
-                    modifier = Modifier
-                        .weight(1f)
-                        .padding(end = 12.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    Text(
-                        text = "Режим маршрутизации",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                    Text(
-                        text = if (isWhitelist) "БС: только выбранные в туннеле" else "ЧС: выбранные идут в обход",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
+                Text(
+                    text = "Режим",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
                 BypassModeSelector(
                     isWhitelist = isWhitelist,
                     enabled = isMigrationReady,
@@ -392,14 +347,17 @@ private fun BypassControlPanel(
                     onSwitchToWhitelist = onSwitchToWhitelist
                 )
             }
-
-            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
-
-            BypassSwitchRow(
-                checked = showSystemApps,
-                onCheckedChange = onShowSystemAppsChange
+            Text(
+                text = modeDescription,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
+
+        BypassSwitchRow(
+            checked = showSystemApps,
+            onCheckedChange = onShowSystemAppsChange
+        )
     }
 }
 
@@ -410,7 +368,7 @@ private fun BypassSearchField(
 ) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(18.dp),
+        shape = RoundedCornerShape(16.dp),
         color = AppCardDefaults.containerColor(),
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
     ) {
@@ -421,11 +379,11 @@ private fun BypassSearchField(
                 .fillMaxWidth()
                 .heightIn(min = 56.dp),
             singleLine = true,
-            textStyle = MaterialTheme.typography.bodyLarge,
+            textStyle = MaterialTheme.typography.bodyMedium,
             placeholder = {
                 Text(
                     text = "Поиск приложений",
-                    style = MaterialTheme.typography.bodyLarge,
+                    style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             },
@@ -440,8 +398,8 @@ private fun BypassSearchField(
                 if (query.isNotEmpty()) {
                     Surface(
                         onClick = { onQueryChange("") },
-                        modifier = Modifier.size(40.dp),
-                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier.size(34.dp),
+                        shape = RoundedCornerShape(12.dp),
                         color = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f)
                     ) {
                         Box(contentAlignment = Alignment.Center) {
@@ -479,12 +437,12 @@ private fun BypassModeSelector(
     onSwitchToWhitelist: () -> Unit
 ) {
     Surface(
-        shape = RoundedCornerShape(18.dp),
+        shape = RoundedCornerShape(16.dp),
         color = AppCardDefaults.containerColor(),
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f))
     ) {
         Row(
-            modifier = Modifier.padding(4.dp),
+            modifier = Modifier.padding(3.dp),
             horizontalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             BypassModeButton(
@@ -530,15 +488,15 @@ private fun BypassModeButton(
     Surface(
         onClick = onClick,
         enabled = enabled,
-        modifier = Modifier.width(58.dp),
-        shape = RoundedCornerShape(14.dp),
+        modifier = Modifier.width(54.dp),
+        shape = RoundedCornerShape(12.dp),
         color = containerColor,
         tonalElevation = if (selected) 2.dp else 0.dp
     ) {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(vertical = 11.dp),
+                .padding(vertical = 9.dp),
             contentAlignment = Alignment.Center
         ) {
             Text(
@@ -558,19 +516,19 @@ private fun BypassSwitchRow(
 ) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(20.dp),
+        shape = RoundedCornerShape(18.dp),
         color = AppCardDefaults.containerColor(),
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(76.dp)
-                .padding(horizontal = 16.dp, vertical = 8.dp),
+                .heightIn(min = 66.dp)
+                .padding(horizontal = 14.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Surface(
-                modifier = Modifier.size(46.dp),
+                modifier = Modifier.size(38.dp),
                 shape = RoundedCornerShape(12.dp),
                 color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
             ) {
@@ -578,7 +536,7 @@ private fun BypassSwitchRow(
                     Icon(
                         imageVector = Icons.Rounded.Apps,
                         contentDescription = null,
-                        modifier = Modifier.size(24.dp),
+                        modifier = Modifier.size(20.dp),
                         tint = MaterialTheme.colorScheme.primary
                     )
                 }
@@ -591,10 +549,10 @@ private fun BypassSwitchRow(
                 verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
                 Text(
-                    text = "Показывать системные",
+                    text = "Показывать системные приложения",
                     style = MaterialTheme.typography.bodyMedium.copy(
-                        fontSize = 16.sp,
-                        lineHeight = 20.sp
+                        fontSize = 15.sp,
+                        lineHeight = 18.sp
                     ),
                     fontWeight = FontWeight.SemiBold,
                     color = MaterialTheme.colorScheme.onSurface,
@@ -605,7 +563,7 @@ private fun BypassSwitchRow(
                     text = "Добавляет в список предустановленные приложения.",
                     style = MaterialTheme.typography.bodySmall.copy(
                         fontSize = 12.sp,
-                        lineHeight = 16.sp
+                        lineHeight = 14.sp
                     ),
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 2,
@@ -625,49 +583,6 @@ private fun BypassSwitchRow(
                     )
                 )
             }
-        }
-    }
-}
-
-@Composable
-private fun BypassListHeader(
-    filteredCount: Int,
-    visibleCount: Int,
-    selectedCount: Int,
-    isWhitelist: Boolean
-) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Column(
-            modifier = Modifier.weight(1f),
-            verticalArrangement = Arrangement.spacedBy(2.dp)
-        ) {
-            Text(
-                text = "Список приложений",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onBackground
-            )
-            Text(
-                text = "$filteredCount из $visibleCount",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            BypassTag(
-                label = if (isWhitelist) "БС" else "ЧС",
-                background = MaterialTheme.colorScheme.secondary.copy(alpha = 0.14f),
-                contentColor = MaterialTheme.colorScheme.secondary
-            )
-            BypassTag(
-                label = "$selectedCount активных",
-                background = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f),
-                contentColor = MaterialTheme.colorScheme.primary
-            )
         }
     }
 }

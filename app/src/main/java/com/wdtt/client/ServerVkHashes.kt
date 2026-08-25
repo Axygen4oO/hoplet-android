@@ -13,15 +13,38 @@ import javax.net.ssl.SSLException
 object ServerVkHashes {
     private const val TAG = "VKHASH"
 
-    suspend fun load(server: String, token: String): List<String> =
+    enum class FailureType {
+        HTTP_ERROR,
+        TIMEOUT,
+        NETWORK_ERROR,
+        INVALID_RESPONSE,
+        UNKNOWN_ERROR,
+    }
+
+    data class LoadResult(
+        val hashes: List<String>,
+        val requestUrl: String,
+        val failureType: FailureType? = null,
+        val errorMessage: String? = null,
+    ) {
+        val isSuccess: Boolean
+            get() = failureType == null && hashes.isNotEmpty()
+    }
+
+    suspend fun load(server: String, token: String): LoadResult =
         withContext(Dispatchers.IO) {
             var conn: HttpURLConnection? = null
             val requestUrl = "http://$server/api/vkhashes"
             val hasBearer = token.isNotBlank()
 
-            fun logEmpty(reason: String): List<String> {
-                android.util.Log.e(TAG, "ServerVkHashes.load returning emptyList(): $reason")
-                return emptyList()
+            fun failure(type: FailureType, reason: String): LoadResult {
+                android.util.Log.e(TAG, "ServerVkHashes.load failed: type=$type, reason=$reason")
+                return LoadResult(
+                    hashes = emptyList(),
+                    requestUrl = requestUrl,
+                    failureType = type,
+                    errorMessage = reason,
+                )
             }
 
             try {
@@ -74,26 +97,32 @@ object ServerVkHashes {
                 )
 
                 if (responseCode !in 200..299) {
-                    return@withContext logEmpty(
+                    return@withContext failure(
+                        FailureType.HTTP_ERROR,
                         "HTTP $responseCode ($responseMessage), errorStream=$errorText, body=$responseText"
                     )
                 }
 
                 if (responseText.isBlank()) {
-                    return@withContext logEmpty("Response body is blank despite HTTP $responseCode")
+                    return@withContext failure(
+                        FailureType.INVALID_RESPONSE,
+                        "Response body is blank despite HTTP $responseCode"
+                    )
                 }
 
                 android.util.Log.d(TAG, "ServerVkHashes.load raw JSON text: $responseText")
                 val json = JSONObject(responseText)
                 android.util.Log.d(TAG, "ServerVkHashes.load parsed JSON: ${json.toString()}")
                 if (json.has("success") && !json.optBoolean("success", false)) {
-                    return@withContext logEmpty(
+                    return@withContext failure(
+                        FailureType.INVALID_RESPONSE,
                         "JSON success=false, body=$responseText"
                     )
                 }
                 val arr = json.optJSONArray("hashes")
                 if (arr == null) {
-                    return@withContext logEmpty(
+                    return@withContext failure(
+                        FailureType.INVALID_RESPONSE,
                         "JSON does not contain hashes array, body=$responseText"
                     )
                 }
@@ -106,25 +135,31 @@ object ServerVkHashes {
                 }
                 android.util.Log.d(TAG, "ServerVkHashes.load parsed hashes: count=${parsedHashes.size}, hashes=$parsedHashes")
                 if (parsedHashes.isEmpty()) {
-                    return@withContext logEmpty("JSON hashes array parsed successfully but produced an empty list")
+                    return@withContext failure(
+                        FailureType.INVALID_RESPONSE,
+                        "JSON hashes array parsed successfully but produced an empty list"
+                    )
                 }
-                parsedHashes
+                LoadResult(
+                    hashes = parsedHashes,
+                    requestUrl = requestUrl,
+                )
 
             } catch (e: SocketTimeoutException) {
                 android.util.Log.e(TAG, "ServerVkHashes.load timeout exception for url=$requestUrl", e)
-                logEmpty("SocketTimeoutException: ${e.message}")
+                failure(FailureType.TIMEOUT, "SocketTimeoutException: ${e.message}")
             } catch (e: UnknownHostException) {
                 android.util.Log.e(TAG, "ServerVkHashes.load unknown host for url=$requestUrl", e)
-                logEmpty("UnknownHostException: ${e.message}")
+                failure(FailureType.NETWORK_ERROR, "UnknownHostException: ${e.message}")
             } catch (e: SSLException) {
                 android.util.Log.e(TAG, "ServerVkHashes.load SSL exception for url=$requestUrl", e)
-                logEmpty("SSLException: ${e.message}")
+                failure(FailureType.NETWORK_ERROR, "SSLException: ${e.message}")
             } catch (e: IOException) {
                 android.util.Log.e(TAG, "ServerVkHashes.load IO exception for url=$requestUrl", e)
-                logEmpty("${e.javaClass.simpleName}: ${e.message}")
+                failure(FailureType.NETWORK_ERROR, "${e.javaClass.simpleName}: ${e.message}")
             } catch (e: Exception) {
                 android.util.Log.e(TAG, "ServerVkHashes.load unexpected exception for url=$requestUrl", e)
-                logEmpty("${e.javaClass.name}: ${e.message}")
+                failure(FailureType.UNKNOWN_ERROR, "${e.javaClass.name}: ${e.message}")
             } finally {
                 android.util.Log.d(TAG, "ServerVkHashes.load disconnect: url=$requestUrl")
                 conn?.disconnect()
