@@ -103,7 +103,15 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.ui.draw.scale
 import com.wdtt.client.NotificationHelper
 import com.wdtt.client.isNewerVersion
+import com.wdtt.client.isNewerRelease
+import com.wdtt.client.isDirect
+import com.wdtt.client.isRawTun
+import com.wdtt.client.TransportMode
 import com.wdtt.client.stripVkUrlStatic
+import com.wdtt.client.transportModeDescription
+import com.wdtt.client.transportModeTitle
+import com.wdtt.client.toPersistedValue
+import com.wdtt.client.resolveForRuntime
 
 import androidx.compose.ui.res.stringResource
 
@@ -162,6 +170,9 @@ fun SettingsTabContent(
     val savedManualPortsEnabled by settingsStore.manualPortsEnabled.collectAsStateWithLifecycle(initialValue = false)
     val savedServerDtlsPort by settingsStore.serverDtlsPort.collectAsStateWithLifecycle(initialValue = 56000)
     val savedServerWgPort by settingsStore.serverWgPort.collectAsStateWithLifecycle(initialValue = 56001)
+    val savedServerDirectPort by settingsStore.serverDirectPort.collectAsStateWithLifecycle(initialValue = 56002)
+    val savedServerRawPort by settingsStore.serverRawPort.collectAsStateWithLifecycle(initialValue = 56003)
+    val savedTransportMode by settingsStore.transportMode.collectAsStateWithLifecycle(initialValue = TransportMode.NORMAL)
     val savedListenPort by settingsStore.listenPort.collectAsStateWithLifecycle(initialValue = 9000)
 
     val tunnelRunning by TunnelManager.running.collectAsStateWithLifecycle()
@@ -177,6 +188,7 @@ fun SettingsTabContent(
     val updateCheckIntervalHours by settingsStore.updateCheckIntervalHours.collectAsStateWithLifecycle(
         initialValue = com.wdtt.client.DEFAULT_UPDATE_CHECK_INTERVAL_HOURS
     )
+    val includeBetaUpdates by settingsStore.includeBetaUpdates.collectAsStateWithLifecycle(initialValue = false)
 
     val currentProfileId by settingsStore.currentProfileId.collectAsStateWithLifecycle(initialValue = "")
     val currentProfileName by settingsStore.currentProfileName.collectAsStateWithLifecycle(initialValue = "")
@@ -212,6 +224,9 @@ fun SettingsTabContent(
     var manualPortsEnabled by rememberSaveable { mutableStateOf(false) }
     var serverDtlsPortInput by rememberSaveable { mutableStateOf("56000") }
     var serverWgPortInput by rememberSaveable { mutableStateOf("56001") }
+    var serverDirectPortInput by rememberSaveable { mutableStateOf("56002") }
+    var serverRawPortInput by rememberSaveable { mutableStateOf("56003") }
+    var transportMode by rememberSaveable { mutableStateOf(TransportMode.NORMAL) }
     var showAppSettingsDialog by rememberSaveable { mutableStateOf(false) }
     var showGeneralSettingsDialog by rememberSaveable { mutableStateOf(false) }
     var isAdminMode by rememberSaveable { mutableStateOf(false) }
@@ -219,12 +234,22 @@ fun SettingsTabContent(
     var versionClickCount by rememberSaveable { mutableIntStateOf(0) }
     var aboutClickCount by remember { mutableIntStateOf(0) }
     var showRolePickerDialog by remember { mutableStateOf(false) }
+    var showSecretsDialog by rememberSaveable { mutableStateOf(false) }
+    var showTransportModeDialog by rememberSaveable { mutableStateOf(false) }
     val openAppSettingsRequest by TunnelManager.openAppSettingsRequest.collectAsStateWithLifecycle()
+    val openSecretsRequest by TunnelManager.openSecretsRequest.collectAsStateWithLifecycle()
     var lastHandledOpenSettings by rememberSaveable { mutableLongStateOf(0L) }
+    var lastHandledOpenSecrets by rememberSaveable { mutableLongStateOf(0L) }
     LaunchedEffect(openAppSettingsRequest) {
         if (openAppSettingsRequest > 0L && openAppSettingsRequest != lastHandledOpenSettings) {
             lastHandledOpenSettings = openAppSettingsRequest
             showAppSettingsDialog = true
+        }
+    }
+    LaunchedEffect(openSecretsRequest) {
+        if (openSecretsRequest > 0L && openSecretsRequest != lastHandledOpenSecrets) {
+            lastHandledOpenSecrets = openSecretsRequest
+            showSecretsDialog = true
         }
     }
 
@@ -293,7 +318,6 @@ fun SettingsTabContent(
     }
     val hasLocalHashErrors = localHashErrors.isNotEmpty()
 
-    var showSecretsDialog by rememberSaveable { mutableStateOf(false) }
     var initialized by remember { mutableStateOf(false) }
 
     fun normalizeHashes(vararg hashes: String): String {
@@ -315,6 +339,8 @@ fun SettingsTabContent(
         val manualPorts = settingsStore.manualPortsEnabled.first()
         val serverDtlsPort = settingsStore.serverDtlsPort.first()
         val serverWgPort = settingsStore.serverWgPort.first()
+        val serverDirectPort = settingsStore.serverDirectPort.first()
+        val currentTransportMode = settingsStore.transportMode.first()
         val sni = settingsStore.sni.first()
         val captchaMode = settingsStore.captchaMode.first()
         val captchaMethod = settingsStore.captchaSolveMethod.first()
@@ -340,15 +366,17 @@ fun SettingsTabContent(
         manualPortsEnabled = manualPorts
         serverDtlsPortInput = (embeddedPort ?: serverDtlsPort).toString()
         serverWgPortInput = serverWgPort.toString()
+        serverDirectPortInput = serverDirectPort.toString()
+        transportMode = currentTransportMode
         if (embeddedPort != null && PeerAddress.hasExplicitPort(peer)) {
             if (embeddedPort != 56000) {
                 settingsStore.saveManualPortsEnabled(true)
                 manualPortsEnabled = true
             }
-            settingsStore.savePorts(embeddedPort, serverWgPort, port)
+            settingsStore.savePorts(embeddedPort, serverWgPort, serverDirectPort, if (manualPortsEnabled) serverRawPortInput.toIntOrNull()?.coerceIn(1, 65535) ?: 56003 else 56003, port)
             settingsStore.save(
                 PeerAddress.host(peer), hashes, "",
-                workers, "udp", port, sni, false
+                workers, "udp", port, sni, false, transportMode = currentTransportMode
             )
         }
         sniInput = sni
@@ -384,7 +412,11 @@ fun SettingsTabContent(
         if (savedPeer.isNotBlank()) {
             peerInput = PeerAddress.host(savedPeer)
             PeerAddress.port(savedPeer)?.let { embedded ->
-                serverDtlsPortInput = embedded.toString()
+                if (savedTransportMode.isDirect()) {
+                    serverDirectPortInput = embedded.toString()
+                } else {
+                    serverDtlsPortInput = embedded.toString()
+                }
             }
         }
         portInput = savedListenPort.toString()
@@ -432,6 +464,18 @@ fun SettingsTabContent(
         serverWgPortInput = savedServerWgPort.toString()
     }
 
+    LaunchedEffect(savedServerDirectPort) {
+        serverDirectPortInput = savedServerDirectPort.toString()
+    }
+
+    LaunchedEffect(savedServerRawPort) {
+        serverRawPortInput = savedServerRawPort.toString()
+    }
+
+    LaunchedEffect(savedTransportMode) {
+        transportMode = savedTransportMode
+    }
+
     LaunchedEffect(savedListenPort) {
         portInput = savedListenPort.toString()
     }
@@ -473,6 +517,7 @@ fun SettingsTabContent(
         saveJob?.cancel()
         scope.launch {
             val savedLocalPort = if (manualPortsEnabled) portInput.toIntOrNull()?.coerceIn(1, 65535) ?: 9000 else 9000
+            val savedDirectPort = if (manualPortsEnabled) serverDirectPortInput.toIntOrNull()?.coerceIn(1, 65535) ?: 56002 else 56002
             val hashes = activeHashesForPersistence(activeHashesOverride)
             val hashesList = hashes.split(Regex("[,\\s\\n]+")).filter { it.isNotBlank() && it.length >= 16 }.distinct()
             val hashesCount = hashesList.size.coerceAtLeast(1)
@@ -489,7 +534,15 @@ fun SettingsTabContent(
             val host = PeerAddress.host(peerInput.trim())
             settingsStore.save(
                 host, hashes, "",
-                finalWorkers, "udp", savedLocalPort, sniInput, false
+                finalWorkers, "udp", savedLocalPort, sniInput, false, transportMode = transportMode
+            )
+            settingsStore.saveTransportMode(transportMode)
+            settingsStore.savePorts(
+                serverDtlsPortInput.toIntOrNull()?.coerceIn(1, 65535) ?: 56000,
+                serverWgPortInput.toIntOrNull()?.coerceIn(1, 65535) ?: 56001,
+                savedDirectPort,
+                if (manualPortsEnabled) serverRawPortInput.toIntOrNull()?.coerceIn(1, 65535) ?: 56003 else 56003,
+                savedLocalPort
             )
             onSaved?.invoke()
         }
@@ -500,6 +553,7 @@ fun SettingsTabContent(
         saveJob = scope.launch {
             delay(300)
             val savedLocalPort = if (manualPortsEnabled) portInput.toIntOrNull()?.coerceIn(1, 65535) ?: 9000 else 9000
+            val savedDirectPort = if (manualPortsEnabled) serverDirectPortInput.toIntOrNull()?.coerceIn(1, 65535) ?: 56002 else 56002
             val hashes = activeHashesForPersistence()
             val hashesList = hashes.split(Regex("[,\\s\\n]+")).filter { it.isNotBlank() && it.length >= 16 }.distinct()
             val hashesCount = hashesList.size.coerceAtLeast(1)
@@ -516,7 +570,15 @@ fun SettingsTabContent(
             val host = PeerAddress.host(peerInput.trim())
             settingsStore.save(
                 host, hashes, "",
-                finalWorkers, "udp", savedLocalPort, sniInput, false
+                finalWorkers, "udp", savedLocalPort, sniInput, false, transportMode = transportMode
+            )
+            settingsStore.saveTransportMode(transportMode)
+            settingsStore.savePorts(
+                serverDtlsPortInput.toIntOrNull()?.coerceIn(1, 65535) ?: 56000,
+                serverWgPortInput.toIntOrNull()?.coerceIn(1, 65535) ?: 56001,
+                savedDirectPort,
+                if (manualPortsEnabled) serverRawPortInput.toIntOrNull()?.coerceIn(1, 65535) ?: 56003 else 56003,
+                savedLocalPort
             )
         }
     }
@@ -607,6 +669,8 @@ fun SettingsTabContent(
         savedConnectionPassword.isNotBlank() &&
         !(vkHashSource == SettingsStore.VK_HASH_SOURCE_LOCAL && hasLocalHashErrors)
     val effectiveServerDtlsPort = if (manualPortsEnabled) serverDtlsPortInput.toIntOrNull()?.coerceIn(1, 65535) ?: 56000 else 56000
+    val effectiveServerWgPort = if (manualPortsEnabled) serverWgPortInput.toIntOrNull()?.coerceIn(1, 65535) ?: 56001 else 56001
+    val effectiveServerDirectPort = if (manualPortsEnabled) serverDirectPortInput.toIntOrNull()?.coerceIn(1, 65535) ?: 56002 else 56002
     val effectiveLocalPort = if (manualPortsEnabled) portInput.toIntOrNull()?.coerceIn(1, 65535) ?: 9000 else 9000
     var pendingStartAfterVpnPermission by remember { mutableStateOf(false) }
 
@@ -614,14 +678,85 @@ fun SettingsTabContent(
         val effectiveCaptchaMode = if (autoCaptchaEnabled) "auto" else if (useWVCaptcha) "wv" else "rjs"
         val effectiveCaptchaSolveMethod = if (!autoCaptchaEnabled && effectiveCaptchaMode == "wv" && isManualMode) "manual" else "auto"
         val host = PeerAddress.host(peerInput.trim())
-        val peerForTunnel = PeerAddress.ensurePort(host, effectiveServerDtlsPort)
+        if (transportMode.isDirect() && (
+            effectiveServerDirectPort == effectiveServerDtlsPort ||
+                effectiveServerDirectPort == effectiveServerWgPort
+            )
+        ) {
+            Toast.makeText(context, "Direct port must differ from DTLS/WG", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val peerPort = when {
+            transportMode.isRawTun() -> if (manualPortsEnabled) serverRawPortInput.toIntOrNull()?.coerceIn(1, 65535) ?: 56003 else 56003
+            transportMode.isDirect() -> effectiveServerDirectPort
+            else -> effectiveServerDtlsPort
+        }
+        val peerForTunnel = PeerAddress.ensurePort(host, peerPort)
         saveJob?.cancel()
         scope.launch {
+            // Получаем серверный статус до запуска транспорта: истёкшая,
+            // заблокированная подписка и достигнутый лимит устройств не должны
+            // приводить к бессмысленному старту TunnelManager.
+            val subscriptionError = withContext(Dispatchers.IO) {
+                try {
+                    val deviceId = android.provider.Settings.Secure.getString(
+                        context.contentResolver,
+                        android.provider.Settings.Secure.ANDROID_ID
+                    ) ?: "unknown"
+                    val device = java.net.URLEncoder.encode(deviceId, "UTF-8")
+                    val endpoint = PeerAddress.httpEndpoint(host, effectiveServerDtlsPort)
+                    val conn = (URL("http://$endpoint/api/profile/status")
+                        .openConnection() as HttpURLConnection).apply {
+                        requestMethod = "POST"
+                        connectTimeout = 2500
+                        readTimeout = 2500
+                        useCaches = false
+                        doOutput = true
+                        setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
+                    }
+                    try {
+                        val postData = "password=${java.net.URLEncoder.encode(savedConnectionPassword, "UTF-8")}&device_id=$device"
+                        conn.outputStream.use { it.write(postData.toByteArray(Charsets.UTF_8)) }
+                        if (conn.responseCode == HttpURLConnection.HTTP_UNAUTHORIZED) {
+                            "Подписка не найдена или больше недействительна. Свяжитесь с администратором."
+                        } else if (conn.responseCode != 200) {
+                            null // Сетевую недоступность оставляем TunnelManager.
+                        } else {
+                            val json = conn.inputStream.bufferedReader().use { it.readText() }
+                            when (json.let { JSONObject(it).optString("subscription_status", "active") }) {
+                                "expired" -> "Подписка истекла. Продлите её через администратора."
+                                "blocked" -> "Подписка заблокирована. Свяжитесь с администратором."
+                                else -> {
+                                    val obj = JSONObject(json)
+                                    val max = obj.optInt("max_devices", 1).coerceAtLeast(1)
+                                    val bound = obj.optInt("bound_devices", 0)
+                                    val current = obj.optBoolean("is_current_bound", false)
+                                    val isMainPassword = obj.optBoolean("is_main_password", false)
+                                    if (!isMainPassword && bound >= max && !current) {
+                                        "Достигнут лимит устройств: $bound/$max. Освободите устройство."
+                                    } else null
+                                }
+                            }
+                        }
+                    } finally {
+                        conn.disconnect()
+                    }
+                } catch (_: Exception) {
+                    null
+                }
+            }
+            if (subscriptionError != null) {
+                Toast.makeText(context, subscriptionError, Toast.LENGTH_LONG).show()
+                return@launch
+            }
             val effectiveVkAnonPath = SettingsStore.resolveVkAnonPath(context)
             val resolvedHashes = VkHashSourceResolver.resolveForConnection(
                 context = context,
                 settingsStore = settingsStore,
-                peer = peerForTunnel,
+                // /api/vkhashes is served by the HTTP control API on the
+                // DTLS/control port, never by the transport-specific RAW port.
+                // peerForTunnel is intentionally used only for the Go client.
+                peer = host,
             )
             val finalHashes = resolvedHashes.hashes
             if (finalHashes.isBlank()) {
@@ -630,9 +765,9 @@ fun SettingsTabContent(
                         "VKHASH",
                         "UI connect aborted: resolved server VK hashes are blank, peer=$peerForTunnel, source=${resolvedHashes.source}"
                     )
-                    "Не удалось получить серверные VK hash"
+                    resolvedHashes.errorMessage ?: "Не удалось получить серверные VK hash"
                 } else {
-                    "Локальные VK hash не заданы"
+                    resolvedHashes.errorMessage ?: "Локальные VK hash не заданы"
                 }
                 Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
                 return@launch
@@ -658,7 +793,16 @@ fun SettingsTabContent(
                 "udp",
                 effectiveLocalPort,
                 sniInput,
-                false
+                false,
+                transportMode = transportMode
+            )
+            settingsStore.saveTransportMode(transportMode)
+            settingsStore.savePorts(
+                effectiveServerDtlsPort,
+                effectiveServerWgPort,
+                effectiveServerDirectPort,
+                if (manualPortsEnabled) serverRawPortInput.toIntOrNull()?.coerceIn(1, 65535) ?: 56003 else 56003,
+                effectiveLocalPort
             )
             android.util.Log.d("VKHASH", "settingsStore.save OK")
 
@@ -680,6 +824,10 @@ fun SettingsTabContent(
                 action = "START"
                 putExtra("peer", peerForTunnel)
                 putExtra("vk_hashes", finalHashes)
+                putExtra("vk_hash_source", resolvedHashes.source)
+                putExtra("server_hash_fallback_cache", resolvedHashes.serverCacheFallbackHashes)
+                putExtra("server_hashes_fresh_from_api", resolvedHashes.serverHashesFetchedFreshFromApi)
+                putExtra("server_hashes_used_cache", resolvedHashes.usedServerCache)
                 putExtra("secondary_vk_hash", "")
                 putExtra("workers_per_hash", finalWorkers)
                 putExtra("port", effectiveLocalPort)
@@ -691,6 +839,7 @@ fun SettingsTabContent(
                 putExtra("vk_anon_path", effectiveVkAnonPath)
                 putExtra("go_dns_arg", effectiveGoDns)
                 putExtra("obfs_mode", obfsMode)
+                putExtra("transport_mode", transportMode.toPersistedValue())
             }
             android.util.Log.d("VKHASH", "Intent created")
 
@@ -1574,13 +1723,29 @@ fun SettingsTabContent(
             initialPassword = savedConnectionPassword,
             initialServerDtlsPort = serverDtlsPortInput,
             initialServerWgPort = serverWgPortInput,
+            initialServerDirectPort = serverDirectPortInput,
+            initialServerRawPort = serverRawPortInput,
             initialLocalPort = portInput,
-            onSaved = { dtls, wg, local ->
+            onSaved = { dtls, wg, direct, raw, local ->
                 serverDtlsPortInput = dtls
                 serverWgPortInput = wg
+                serverDirectPortInput = direct
+                serverRawPortInput = raw
                 portInput = local
             },
             onDismiss = { showSecretsDialog = false }
+        )
+    }
+
+    if (showTransportModeDialog) {
+        TransportModeDialog(
+            initialMode = transportMode.resolveForRuntime(),
+            onModeSelected = { selected ->
+                transportMode = selected
+                scope.launch { settingsStore.saveTransportMode(selected) }
+                showTransportModeDialog = false
+            },
+            onDismiss = { showTransportModeDialog = false }
         )
     }
 
@@ -1733,7 +1898,6 @@ fun SettingsTabContent(
                         workersInput = newMax.toFloat()
                     }
 
-                    settingsStore.saveServerVkHashesCache(combined)
                     saveTunnelSettingsNow(activeHashesOverride = combined) { showHashesDialog = false }
                 }
             },
@@ -1816,14 +1980,14 @@ fun SettingsTabContent(
                         if (
                             latestRelease == null &&
                             updateLatestVersion.isNotBlank() &&
-                            isNewerVersion(currentVersion, updateLatestVersion, false)
+                                            isNewerVersion(currentVersion, updateLatestVersion, includeBetaUpdates)
                         ) {
                             scope.launch {
                                 try {
                                     latestRelease =
                                         com.wdtt.client.fetchLatestReleaseInfo(
                                             currentVersion,
-                                            false
+                                            includeBetaUpdates
                                         )
                                 } catch (_: Exception) {
                                 }
@@ -1910,6 +2074,27 @@ fun SettingsTabContent(
                         )
 
 
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+                                Text("Бета-обновления", style = MaterialTheme.typography.bodyMedium)
+                                Text(
+                                    "Включать предварительные релизы GitHub",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = includeBetaUpdates,
+                                onCheckedChange = { enabled ->
+                                    scope.launch { settingsStore.saveIncludeBetaUpdates(enabled) }
+                                }
+                            )
+                        }
+
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
 
                         // Проверка обновлений
@@ -1993,7 +2178,12 @@ fun SettingsTabContent(
                                                 if (release != null) {
 
                                                     val hasUpdate =
-                                                        isNewerVersion(currentVersion, release.versionTag, false)
+                                                        isNewerRelease(
+                                                            currentVersion,
+                                                            com.wdtt.client.BuildConfig.VERSION_CODE.toLong(),
+                                                            release,
+                                                            includeBetaUpdates
+                                                        )
 
                                                     latestRelease =
                                                         if (hasUpdate) release else null
@@ -2370,6 +2560,10 @@ fun SettingsTabContent(
 
     val tunnelSecretsMissing = savedConnectionPassword.isBlank()
     val connectionLifecycle = connectionProgressState.lifecycle
+    // Режим можно менять только в состоянии ожидания или после ошибки.
+    // Состояние подключения остаётся единственным источником истины для UI.
+    val showModeSelector = connectionLifecycle == ConnectionLifecycle.IDLE ||
+        connectionLifecycle == ConnectionLifecycle.ERROR
     val heroStatusLabel = when {
         tunnelRunning -> "Подключено"
         isConnecting -> "Подключение"
@@ -2497,6 +2691,15 @@ fun SettingsTabContent(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
 
+            // Компактная настройка режима находится непосредственно над «Секреты».
+            // Условный rendering не оставляет пустого места после подключения.
+            if (showModeSelector) {
+                TransportModeButton(
+                    value = transportMode.resolveForRuntime(),
+                    onClick = { showTransportModeDialog = true }
+                )
+            }
+
             if (profiles.isNotEmpty()) {
                 var expanded by remember { mutableStateOf(false) }
 
@@ -2605,7 +2808,10 @@ fun SettingsTabContent(
                     title = heroButtonLabel,
                     subtitle = heroButtonCaption,
                     icon = if (tunnelBusy) Icons.Default.Stop else Icons.Default.PowerSettingsNew,
-                    enabled = (isValid && cooldownSeconds == 0) || tunnelBusy,
+                    // Кнопка остаётся доступной и при неполных параметрах: по нажатию
+                    // пользователь получает понятный путь к вводу секрета/исправлению
+                    // настроек, вместо «немой» disabled-кнопки.
+                    enabled = cooldownSeconds == 0 || tunnelBusy,
                     active = tunnelRunning,
                     connecting = isConnecting,
                     error = connectionLifecycle == ConnectionLifecycle.ERROR,
@@ -2614,6 +2820,14 @@ fun SettingsTabContent(
                             context.startService(
                                 Intent(context, TunnelService::class.java).apply { action = "STOP" }
                             )
+                        } else if (savedConnectionPassword.isBlank()) {
+                            showSecretsDialog = true
+                        } else if (!isValid) {
+                            Toast.makeText(
+                                context,
+                                "Проверьте параметры подключения",
+                                Toast.LENGTH_SHORT
+                            ).show()
                         } else {
                             if (autoSwitchToLogs) {
                                 onConnectRequested()
@@ -2667,7 +2881,7 @@ fun SettingsTabContent(
                             text = if (vkAccountAuth) {
                                 "Точная настройка количества потоков."
                             } else {
-                                "Шаг по $WORKERS_PER_GROUP потоков для подключения."
+                                "Увеличивает потребление батареи."
                             },
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -3250,9 +3464,9 @@ private fun PowerRecommendationInfoBlock(
                             fontWeight = FontWeight.SemiBold
                         )
                     ) {
-                        append("36")
+                        append("18")
                     }
-                    append(" потоков.\nПовышение этого значения увеличивает расход заряда батареи.")
+                    append(" потоков.\n")
                 },
                 style = MaterialTheme.typography.bodySmall,
                 color = textColor
@@ -3383,7 +3597,7 @@ fun HashesDialog(
         serverHashes = ServerVkHashes.load(
             server = server,
             token = AdminSession.getToken(context) ?: ""
-        )
+        ).hashes
     }
 
     val filledHashes = remember(currentHashes) {
@@ -3845,6 +4059,139 @@ private fun copyText(context: android.content.Context, label: String, value: Str
     Toast.makeText(context, "Скопировано", Toast.LENGTH_SHORT).show()
 }
 
+@Composable
+private fun TransportModeDropdown(
+    value: TransportMode,
+    onValueChange: (TransportMode) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var expanded by rememberSaveable { mutableStateOf(false) }
+    Box(modifier = modifier) {
+        OutlinedButton(
+            onClick = { expanded = true },
+            modifier = Modifier.widthIn(min = 160.dp)
+        ) {
+            Text(transportModeTitle(value))
+            Spacer(modifier = Modifier.width(6.dp))
+            Icon(Icons.Default.ArrowDropDown, contentDescription = null)
+        }
+        HopletDropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            modifier = Modifier.widthIn(min = 240.dp)
+        ) {
+            TransportMode.values().forEach { mode ->
+                HopletDropdownMenuItem(
+                    text = {
+                        Column {
+                            Text(transportModeTitle(mode))
+                            Text(
+                                transportModeDescription(mode),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    },
+                    leadingIcon = if (mode == value) {
+                        { Icon(Icons.Filled.CheckCircle, contentDescription = null) }
+                    } else null,
+                    onClick = {
+                        expanded = false
+                        onValueChange(mode)
+                    }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun TransportModeButton(
+    value: TransportMode,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        onClick = onClick,
+        modifier = modifier.fillMaxWidth().height(56.dp),
+        shape = RoundedCornerShape(18.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.58f),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f))
+    ) {
+        Row(
+            modifier = Modifier.fillMaxSize().padding(horizontal = 14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                Text(
+                    "Режим подключения",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    transportModeTitle(value),
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+            Icon(Icons.AutoMirrored.Outlined.ArrowForwardIos, contentDescription = "Выбрать режим", modifier = Modifier.size(16.dp))
+        }
+    }
+}
+
+@Composable
+private fun TransportModeDialog(
+    initialMode: TransportMode,
+    onModeSelected: (TransportMode) -> Unit,
+    onDismiss: () -> Unit
+) {
+    HopletDialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnClickOutside = true)
+    ) {
+        HopletModalSurface(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+            contentPadding = PaddingValues(horizontal = 20.dp, vertical = 20.dp)
+        ) {
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                HopletSectionTitle("Режим подключения", modifier = Modifier.weight(1f))
+                IconButton(onClick = onDismiss) { Icon(Icons.Default.Close, contentDescription = "Закрыть") }
+            }
+            listOf(
+                TransportMode.NORMAL,
+                TransportMode.DIRECT,
+                TransportMode.TURN_TCP,
+                TransportMode.RAW_TUN
+            ).forEach { mode ->
+                val selected = mode == initialMode
+                Surface(
+                    onClick = { onModeSelected(mode) },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                    color = if (selected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f) else Color.Transparent
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            if (selected) Icons.Default.CheckCircle else Icons.Default.Info,
+                            contentDescription = null,
+                            tint = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(Modifier.width(12.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(transportModeTitle(mode), fontWeight = FontWeight.SemiBold)
+                            Text(transportModeDescription(mode), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 // ═══ Модальное окно секретов ═══
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -3853,14 +4200,18 @@ fun SecretsDialog(
     initialPassword: String,
     initialServerDtlsPort: String,
     initialServerWgPort: String,
+    initialServerDirectPort: String,
+    initialServerRawPort: String,
     initialLocalPort: String,
-    onSaved: (String, String, String) -> Unit,
+    onSaved: (String, String, String, String, String) -> Unit,
     onDismiss: () -> Unit
 ) {
     val scope = rememberCoroutineScope()
     var passwordInput by rememberSaveable { mutableStateOf(initialPassword) }
     var serverDtlsPort by rememberSaveable { mutableStateOf(initialServerDtlsPort.ifBlank { "56000" }) }
     var serverWgPort by rememberSaveable { mutableStateOf(initialServerWgPort.ifBlank { "56001" }) }
+    var serverDirectPort by rememberSaveable { mutableStateOf(initialServerDirectPort.ifBlank { "56002" }) }
+    var serverRawPort by rememberSaveable { mutableStateOf(initialServerRawPort.ifBlank { "56003" }) }
     var localPort by rememberSaveable { mutableStateOf(initialLocalPort.ifBlank { "9000" }) }
 
     fun normalizePort(value: String, fallback: String): String {
@@ -3912,11 +4263,11 @@ fun SecretsDialog(
                 Spacer(modifier = Modifier.height(8.dp))
                 Text("Порты", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
                 Text(
-                    "Стандартные: DTLS 56000, WireGuard 56001, локальный 9000",
+                    "Стандартные: DTLS 56000, WireGuard 56001, Raw 56003, локальный 9000",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(12.dp))
                 OutlinedTextField(
                     value = serverDtlsPort,
                     onValueChange = { serverDtlsPort = it.filter(Char::isDigit).take(5) },
@@ -3942,6 +4293,30 @@ fun SecretsDialog(
                 )
                 Spacer(modifier = Modifier.height(8.dp))
                 OutlinedTextField(
+                    value = serverDirectPort,
+                    onValueChange = { serverDirectPort = it.filter(Char::isDigit).take(5) },
+                    label = { Text("Порт Direct") },
+                    placeholder = { Text("56002") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = HopletModalDefaults.fieldShape,
+                    colors = hopletOutlinedTextFieldColors(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = serverRawPort,
+                    onValueChange = { serverRawPort = it.filter(Char::isDigit).take(5) },
+                    label = { Text("Порт Raw TUN") },
+                    placeholder = { Text("56003") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = HopletModalDefaults.fieldShape,
+                    colors = hopletOutlinedTextFieldColors(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                OutlinedTextField(
                     value = localPort,
                     onValueChange = { localPort = it.filter(Char::isDigit).take(5) },
                     label = { Text("Локальный порт VPN") },
@@ -3959,15 +4334,17 @@ fun SecretsDialog(
                     onClick = {
                         val finalDtls = normalizePort(serverDtlsPort, "56000")
                         val finalWg = normalizePort(serverWgPort, "56001")
+                        val finalDirect = normalizePort(serverDirectPort, "56002")
+                        val finalRaw = normalizePort(serverRawPort, "56003")
                         val finalLocal = normalizePort(localPort, "9000")
                         scope.launch {
                             settingsStore.saveConnectionPassword(passwordInput)
-                            settingsStore.savePorts(finalDtls.toInt(), finalWg.toInt(), finalLocal.toInt())
-                            val customPorts = finalDtls != "56000" || finalWg != "56001" || finalLocal != "9000"
+                            settingsStore.savePorts(finalDtls.toInt(), finalWg.toInt(), finalDirect.toInt(), finalRaw.toInt(), finalLocal.toInt())
+                            val customPorts = finalDtls != "56000" || finalWg != "56001" || finalRaw != "56003" || finalLocal != "9000"
                             if (customPorts) {
                                 settingsStore.saveManualPortsEnabled(true)
                             }
-                            onSaved(finalDtls, finalWg, finalLocal)
+                            onSaved(finalDtls, finalWg, finalDirect, finalRaw, finalLocal)
                             onDismiss()
                         }
                     },

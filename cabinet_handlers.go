@@ -20,6 +20,73 @@ func handleCabinetMessage(token string, actor cabinetActor, text string) bool {
 
 	if state.Mode != "" && text != "/start" && text != "/help" && text != "/cabinet" {
 		switch state.Mode {
+		case "awaiting_subscription_link_password":
+			subscriptionPassword := strings.TrimSpace(text)
+			if subscriptionPassword == "" {
+				sendCabinetTelegram(
+					token,
+					actor.ChatID,
+					"<b>📦 Привязка подписки</b>\n\nВведите пароль от вашей подписки.",
+					nil,
+				)
+				return true
+			}
+
+			email, _, _, ok := cabinetEnsureAuthorizedUser(telegramID)
+			if !ok {
+				cabinetClearState(telegramID)
+				showCabinetLoginPrompt(token, actor, 0, false)
+				return true
+			}
+
+			err := LinkExistingSubscriptionToUser(subscriptionPassword, email)
+			if err != nil {
+				switch err {
+				case ErrSubscriptionNotFound:
+					sendCabinetTelegram(
+						token,
+						actor.ChatID,
+						"<b>📦 Привязка подписки</b>\n\nПодписка с таким паролем не найдена.",
+						nil,
+					)
+				case ErrSubscriptionAlreadyLinked:
+					sendCabinetTelegram(
+						token,
+						actor.ChatID,
+						"<b>📦 Привязка подписки</b>\n\nДанная подписка уже привязана к другому аккаунту.",
+						nil,
+					)
+				case ErrSubscriptionBlocked:
+					sendCabinetTelegram(
+						token,
+						actor.ChatID,
+						"<b>📦 Привязка подписки</b>\n\nДанная подписка заблокирована.",
+						nil,
+					)
+				case ErrUserAlreadyHasSubscription:
+					cabinetClearState(telegramID)
+					showCabinetSubscription(token, actor, 0, false)
+				default:
+					sendCabinetTelegram(
+						token,
+						actor.ChatID,
+						"<b>📦 Привязка подписки</b>\n\nНе удалось привязать подписку. Попробуйте ещё раз позже.",
+						nil,
+					)
+				}
+				return true
+			}
+
+			cabinetClearState(telegramID)
+			sendCabinetTelegram(
+				token,
+				actor.ChatID,
+				"✅ Подписка успешно привязана к вашему аккаунту.",
+				nil,
+			)
+			showCabinetSubscription(token, actor, 0, false)
+			return true
+
 		case "awaiting_subscription_password":
 			subscriptionPassword := strings.TrimSpace(text)
 			if subscriptionPassword == "" {
@@ -456,6 +523,8 @@ func handleCabinetCallback(token string, actor cabinetActor, callbackID, data st
 		showCabinetProfile(token, actor, messageID, true)
 	case data == "cabinet_subscription":
 		showCabinetSubscription(token, actor, messageID, true)
+	case data == "cabinet_subscription_link_existing":
+		startCabinetLinkExistingSubscriptionFlow(token, actor, messageID)
 	case data == "cabinet_app":
 		showCabinetApp(token, actor, messageID, true, false)
 	case data == "cabinet_app_refresh":

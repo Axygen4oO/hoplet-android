@@ -46,6 +46,7 @@ import com.wdtt.client.requestInstallDownloadedUpdate
 import com.wdtt.client.resumeAppUpdateDownload
 import com.wdtt.client.retryAppUpdateDownload
 import com.wdtt.client.startAppUpdateDownload
+import com.wdtt.client.sanitizedReleaseNotes
 
 @Composable
 fun AppUpdateDialog(
@@ -63,6 +64,7 @@ fun AppUpdateDialog(
         initialValue = com.wdtt.client.AppUpdateDownloadSnapshot()
     )
     val activeSnapshot = updateSnapshot.takeIf { it.matchesVersion(release.versionTag) }
+    val displayVersion = release.versionName?.ifBlank { null } ?: release.versionTag
     var autoInstallRequested by rememberSaveable(release.versionTag) { mutableStateOf(false) }
 
     LaunchedEffect(activeSnapshot?.phase, activeSnapshot?.filePath, autoInstallRequested) {
@@ -73,9 +75,9 @@ fun AppUpdateDialog(
     }
 
     val description = if (isTagOnly) {
-        "Обнаружена новая версия Hoplet ${release.versionTag}. Обновление станет доступно сразу после публикации релиза."
+        "Обнаружена новая версия Hoplet $displayVersion. Обновление станет доступно сразу после публикации релиза."
     } else {
-        "Доступна новая версия Hoplet ${release.versionTag}.\n\nРекомендуется установить обновление, чтобы получить новые возможности, исправления ошибок и улучшения стабильности."
+        "Доступна новая версия Hoplet $displayVersion.\n\nРекомендуется установить обновление, чтобы получить новые возможности, исправления ошибок и улучшения стабильности."
     }
 
     val secondaryLabel = when (activeSnapshot?.phase) {
@@ -138,7 +140,7 @@ fun AppUpdateDialog(
                             color = MaterialTheme.colorScheme.primary
                         )
                         Text(
-                            text = release.versionTag,
+                            text = displayVersion,
                             style = MaterialTheme.typography.bodyMedium,
                             fontWeight = FontWeight.SemiBold,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -153,7 +155,8 @@ fun AppUpdateDialog(
                     lineHeight = 20.sp
                 )
 
-                if (release.releaseNotes.isNotBlank()) {
+                val visibleReleaseNotes = sanitizedReleaseNotes(release.releaseNotes)
+                if (visibleReleaseNotes.isNotBlank()) {
                     Text(
                         text = "Что нового",
                         style = MaterialTheme.typography.titleSmall,
@@ -170,7 +173,7 @@ fun AppUpdateDialog(
                         tonalElevation = 0.dp
                     ) {
                         Text(
-                            text = release.releaseNotes,
+                            text = visibleReleaseNotes,
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurface,
                             lineHeight = 20.sp,

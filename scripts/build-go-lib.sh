@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-GO_DIR="$ROOT_DIR/go_client"
+GO_DIR="$ROOT_DIR"
 ABI="${1:-arm64-v8a}"
 API_LEVEL="${ANDROID_NATIVE_API_LEVEL:-21}"
 NDK_DIR="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}"
@@ -70,11 +70,8 @@ if [[ ! -x "$CC" ]]; then
   exit 1
 fi
 
-echo "Refreshing Go checksums"
-(
-  cd "$GO_DIR"
-  go mod tidy -e
-)
+export GOCACHE="$ROOT_DIR/.gocache/go-build"
+mkdir -p "$GOCACHE"
 
 OUT_DIR="$ROOT_DIR/app/src/main/jniLibs/$ABI"
 mkdir -p "$OUT_DIR"
@@ -84,10 +81,10 @@ echo "Building $ABI -> $OUT_DIR/libclient.so"
   cd "$GO_DIR"
   if needs_checklinkname_flag; then
     GOOS=android GOARCH="$GOARCH" CGO_ENABLED=1 CC="$CC" \
-      go build -trimpath -ldflags=-checklinkname=0 -o "$OUT_DIR/libclient.so" .
+      go build -trimpath -ldflags=-checklinkname=0 -o "$OUT_DIR/libclient.so" ./go_client
   else
     GOOS=android GOARCH="$GOARCH" CGO_ENABLED=1 CC="$CC" \
-      go build -trimpath -o "$OUT_DIR/libclient.so" .
+      go build -trimpath -o "$OUT_DIR/libclient.so" ./go_client
   fi
 )
 

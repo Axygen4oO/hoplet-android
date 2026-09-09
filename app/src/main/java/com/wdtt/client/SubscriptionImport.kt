@@ -148,8 +148,16 @@ object SubscriptionImport {
         val hashes = jsonObj.optString("hashes", jsonObj.optString("vkHashes", ""))
         val workers = jsonObj.optInt("workers", jsonObj.optInt("workersPerHash", 16))
         val port = jsonObj.optInt("port", jsonObj.optInt("listenPort", 9000))
+        val directPort = jsonObj.optInt("directPort", jsonObj.optInt("direct_port", 56002))
         val pass = jsonObj.optString("password", jsonObj.optString("pass", ""))
         val traffic = jsonObj.optDouble("trafficMb", jsonObj.optDouble("trafficUsedMb", 0.0))
+        val transportMode = when {
+            jsonObj.has("transportMode") -> normalizeTransportMode(jsonObj.optString("transportMode"))
+            jsonObj.optBoolean("directModeEnabled", false) -> TransportMode.DIRECT
+            jsonObj.has("turnTcpEnabled") || jsonObj.has("turn_tcp_enabled") ->
+                if (jsonObj.optBoolean("turnTcpEnabled", jsonObj.optBoolean("turn_tcp_enabled", false))) TransportMode.TURN_TCP else TransportMode.NORMAL
+            else -> TransportMode.NORMAL
+        }
         return ConnectionProfile(
             id = UUID.randomUUID().toString(),
             name = name,
@@ -160,7 +168,9 @@ object SubscriptionImport {
             password = pass,
             trafficMb = traffic.coerceAtLeast(0.0),
             groupId = "",
-            useGlobalHashes = hashes.isBlank()
+            useGlobalHashes = hashes.isBlank(),
+            directPort = directPort,
+            transportMode = transportMode
         )
     }
 
@@ -172,7 +182,17 @@ object SubscriptionImport {
             val hashes = uri.getQueryParameter("hashes") ?: ""
             val workers = uri.getQueryParameter("workers")?.toIntOrNull() ?: 18
             val port = uri.getQueryParameter("port")?.toIntOrNull() ?: 9000
+            val directPort = uri.getQueryParameter("directPort")?.toIntOrNull()
+                ?: uri.getQueryParameter("direct_port")?.toIntOrNull()
+                ?: 56002
             val pass = uri.getQueryParameter("pass") ?: uri.getQueryParameter("password") ?: ""
+            val transportMode = when {
+                uri.getQueryParameter("transportMode") != null -> normalizeTransportMode(uri.getQueryParameter("transportMode"))
+                uri.getBooleanQueryParameter("directModeEnabled", false) -> TransportMode.DIRECT
+                uri.getBooleanQueryParameter("turnTcpEnabled", false) ||
+                    uri.getBooleanQueryParameter("turn_tcp_enabled", false) -> TransportMode.TURN_TCP
+                else -> TransportMode.NORMAL
+            }
             ConnectionProfile(
                 id = UUID.randomUUID().toString(),
                 name = name,
@@ -181,7 +201,9 @@ object SubscriptionImport {
                 workersPerHash = workers,
                 listenPort = port,
                 password = pass,
-                useGlobalHashes = hashes.isBlank()
+                useGlobalHashes = hashes.isBlank(),
+                directPort = directPort,
+                transportMode = transportMode
             )
         } catch (_: Exception) {
             null

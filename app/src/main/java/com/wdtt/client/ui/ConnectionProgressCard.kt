@@ -242,7 +242,7 @@ private fun ConnectionProgressScheme(
 
             StageItem(
                 stage = stage,
-                label = stage.displayName,
+                label = state.displayName(stage),
                 status = status,
                 previousStatus = previousStatus,
                 nextStatus = nextStatus,

@@ -20,6 +20,7 @@ import kotlinx.coroutines.sync.withLock
 import java.io.File
 import java.net.DatagramSocket
 import java.net.InetSocketAddress
+import java.security.MessageDigest
 import java.util.Collections
 import java.util.concurrent.TimeUnit
 import kotlin.math.min
@@ -70,6 +71,7 @@ object TunnelManager {
     private var watchdogJob: Job? = null
     private var detailedLogsJob: Job? = null
     private var wgHelper: WireGuardHelper? = null
+    private var rawTunSocketName: String? = null
 
     @Volatile
     private var isDetailedLogsEnabled = false
@@ -278,11 +280,38 @@ val showBlockerWarning = MutableStateFlow(false)
     private var connectingStartedAtMs = 0L
     private val startGate = Any()
 
+    /** Диагностика входа без раскрытия секрета: plaintext никогда не пишется в лог. */
+    private fun logConnectionCredentialFingerprint(params: TunnelParams) {
+        val password = params.connectionPassword
+        val fingerprint = if (password.isBlank()) {
+            "none"
+        } else {
+            MessageDigest.getInstance("SHA-256")
+                .digest(password.toByteArray(Charsets.UTF_8))
+                .take(8)
+                .joinToString("") { "%02x".format(it) }
+        }
+        android.util.Log.i(
+            "WDTT",
+            "[CREDENTIALS] present=${password.isNotBlank()}, length=${password.length}, " +
+                "sha256_8=$fingerprint, profileId=${params.activeServerId.ifBlank { "none" }}, " +
+                "endpoint=${params.peer}, transport=${params.transportMode.resolveForRuntime()}"
+        )
+    }
+
     /** Инкремент → MainActivity / SettingsTab открывают диалог ⚙️ настроек. */
     val openAppSettingsRequest = MutableStateFlow(0L)
 
+    /** Запрос на повторный ввод credentials после потери Android Keystore. */
+    val openSecretsRequest = MutableStateFlow(0L)
+
     fun requestOpenAppSettings() {
         openAppSettingsRequest.value = System.currentTimeMillis()
+    }
+
+    fun requestOpenSecrets() {
+        openSecretsRequest.value = System.currentTimeMillis()
+        openAppSettingsRequest.value = openSecretsRequest.value
     }
 
     /** Сразу показывает статус на вкладке «Логи», ещё до старта сервиса / VK auth. */
@@ -305,9 +334,17 @@ val showBlockerWarning = MutableStateFlow(false)
         showBlockerWarning.value = false
         val ctx = lastContext?.get()
         val params = currentParams
-        android.util.Log.d("WDTT", "startForced: ctx=$ctx, params=$params")
+        android.util.Log.d(
+            "WDTT",
+            "startForced: ctxPresent=${ctx != null}, paramsPresent=${params != null}, " +
+                "profileId=${params?.activeServerId?.ifBlank { "none" } ?: "none"}, " +
+                "endpoint=${params?.peer ?: "none"}, transport=${params?.transportMode?.resolveForRuntime() ?: "none"}"
+        )
         if (ctx != null && params != null) {
-            start(ctx, params, isSwitching = false, forceStart = true)
+            scope.launch {
+                val refreshed = refreshTransportSnapshot(params, ctx)
+                start(ctx, refreshed, isSwitching = false, forceStart = true)
+            }
         } else {
             android.util.Log.e("WDTT", "startForced failed: ctx or params is null")
         }
@@ -343,6 +380,10 @@ val showBlockerWarning = MutableStateFlow(false)
 
     fun addNetworkLog(message: String) {
         updateLog("network_event", message, 2, false)
+    }
+
+    fun addRawDiagLog(message: String, isError: Boolean = false) {
+        updateLog("raw_${message.hashCode()}", "[RAW] $message", 2, isError)
     }
 
     private fun updateLog(key: String, message: String, priority: Int, isError: Boolean = false) {
@@ -384,6 +425,15 @@ val showBlockerWarning = MutableStateFlow(false)
         }
     }
 
+    private suspend fun refreshTransportSnapshot(params: TunnelParams, context: Context): TunnelParams {
+        val transportMode = SettingsStore(context).transportMode.first()
+        val serverRawPort = SettingsStore(context).serverRawPort.first()
+        return params.copy(
+            transportMode = transportMode,
+            serverRawPort = serverRawPort
+        )
+    }
+
     fun start(context: Context, params: TunnelParams, isSwitching: Boolean = false, forceStart: Boolean = false) {
         android.util.Log.d("WDTT", "TunnelManager.start() called. isSwitching=$isSwitching, forceStart=$forceStart, running=${running.value}, connecting=${isConnecting.value}")
         synchronized(startGate) {
@@ -396,6 +446,7 @@ val showBlockerWarning = MutableStateFlow(false)
         }
 
         val appContext = context.applicationContext // Защита от Memory Leak
+        currentParams = params
 
         if (!isSwitching) {
             clearLogs()
@@ -405,7 +456,9 @@ val showBlockerWarning = MutableStateFlow(false)
             isConnecting.value = true
             stats.value = "Ожидание данных..."
             updateLog("start_progress", "Подключение…", 0, false)
-            ConnectionProgressManager.beginConnection()
+            ConnectionProgressManager.beginConnection(
+                transportLabel = transportDiagnosticLabel(params.transportMode.resolveForRuntime())
+            )
 
             detailedLogsJob?.cancel()
             detailedLogsJob = scope.launch {
@@ -432,7 +485,9 @@ val showBlockerWarning = MutableStateFlow(false)
             lastSessionTrafficMb = 0.0
         }
 
-        wgHelper = WireGuardHelper(appContext)
+        val rawMode = params.transportMode.resolveForRuntime().isRawTun()
+        rawTunSocketName = if (rawMode) TunFdBridge.newSocketName() else null
+        wgHelper = if (rawMode) null else WireGuardHelper(appContext)
 
         synchronized(startGate) {
             if (!isSwitching && startJob?.isActive == true) {
@@ -542,6 +597,7 @@ val showBlockerWarning = MutableStateFlow(false)
 
                 cmd.add("-password")
                 cmd.add(params.connectionPassword)
+                logConnectionCredentialFingerprint(params)
 
                 // Captcha mode: wv или rjs
                 cmd.add("-captcha-mode")
@@ -575,6 +631,16 @@ val showBlockerWarning = MutableStateFlow(false)
                     1,
                     false
                 )
+
+                val transportMode = params.transportMode.resolveForRuntime()
+                cmd.add("-transport")
+                cmd.add(transportMode.toPersistedValue())
+                if (rawMode) {
+                    cmd.add("-mode")
+                    cmd.add("rawtun")
+                    cmd.add("-tun-fd-sock")
+                    cmd.add(TunFdBridge.goSockPath(requireNotNull(rawTunSocketName)))
+                }
 
                 updateLog("go_dns_precheck_start", "[СЕТЬ] Проверка DNS перед запуском…", 1, false)
                 val dnsProbe = GoDnsProbe.check(params.goDnsArg)
@@ -632,6 +698,9 @@ val showBlockerWarning = MutableStateFlow(false)
                     } catch (e: Exception) {
                         val msg = e.message ?: e::class.java.simpleName
                         updateLog("vk_auth_fail", "Ошибка авторизации VK: $msg", 99, true)
+                        if (tryServerHashCacheFallback("vk_auth_fail", msg)) {
+                            return@launch
+                        }
                         ConnectionProgressManager.fail(ConnectionStage.VK, msg)
                         finishConnectingFailed(clearEnabled = !isSwitching)
                         return@launch
@@ -757,6 +826,14 @@ val showBlockerWarning = MutableStateFlow(false)
                             lineTrim.contains("истёк") -> "Срок действия пароля истёк"
                             lineTrim.contains("другому устройству") -> "Пароль привязан к другому устройству"
                             else -> "Ошибка авторизации"
+                        }
+                        if (
+                            !lineTrim.contains("неверный пароль", true) &&
+                            !lineTrim.contains("истёк", true) &&
+                            !lineTrim.contains("другому устройству", true) &&
+                            tryServerHashCacheFallback("fatal_auth", reason)
+                        ) {
+                            return@forEachLine
                         }
                         handleCriticalError("\uD83D\uDD12 $reason. Воркеры остановлены.")
                         return@forEachLine
@@ -1013,7 +1090,22 @@ val showBlockerWarning = MutableStateFlow(false)
                                 )
                             }
                             if (activeRecoverySession == null) {
-                                updateLog("dtls_start", "[DTLS] Рукопожатие (Handshake)...", 1, false)
+                                val transport = currentTransportDiagnosticLabel()
+                                updateLog(
+                                    "transport_handshake_start",
+                                    "[$transport] ${transportHandshakeText(transport)}",
+                                    1,
+                                    false
+                                )
+                            }
+                        }
+                        lineTrim.contains("[ПРЯМОЙ]") -> {
+                            // Direct и RAW подтверждают AEAD-путь без DTLS.
+                            if (ConnectionProgressManager.state.value.lifecycle == ConnectionLifecycle.CONNECTING) {
+                                ConnectionProgressManager.completeStageAndRun(
+                                    ConnectionStage.DTLS,
+                                    ConnectionStage.STREAMS
+                                )
                             }
                         }
                         lineTrim.contains("DTLS ОК") -> {
@@ -1055,7 +1147,7 @@ val showBlockerWarning = MutableStateFlow(false)
                             val errorMessage = if (errorKey == "err_vk_dns") {
                                 "[СЕТЬ] DNS до VK недоступен: login.vk.ru — смените DNS в ⚙️ → Сеть"
                             } else {
-                                lineTrim
+                                displayTransportError(lineTrim)
                             }
                             updateLog(errorKey, errorMessage, 99, true)
                             if (errorKey == "err_vk_dns") {
@@ -1070,7 +1162,7 @@ val showBlockerWarning = MutableStateFlow(false)
                     }
 
                     // 3. Обработка конфига (Скрываем от пользователя)
-                    if (line.contains("╔") && line.contains("WireGuard")) {
+                    if (line.contains("╔") && (line.contains("WireGuard") || line.contains("RAW"))) {
                         collectingConfig = true
                         configBuilder.clear()
                         return@forEachLine
@@ -1079,6 +1171,8 @@ val showBlockerWarning = MutableStateFlow(false)
                             collectingConfig = false
                             val configStr = configBuilder.toString().trim()
                             config.value = configStr
+                            val isRawConfig = currentParams?.transportMode?.resolveForRuntime()?.isRawTun() == true &&
+                                configStr.lines().any { it.contains("IP =", ignoreCase = false) }
                             
                             scope.launch(Dispatchers.Main) {
                                 try {
@@ -1086,9 +1180,38 @@ val showBlockerWarning = MutableStateFlow(false)
                                         ConnectionStage.VPN,
                                         statusText = "Запуск TUN…"
                                     )
-                                    wgHelper?.startTunnel(configStr)
+                                    if (isRawConfig) {
+                                        val rawIp = configStr.lineSequence().firstOrNull { it.contains("IP =", ignoreCase = false) }
+                                            ?.substringAfter("=")
+                                            ?.trim()
+                                            .orEmpty()
+                                        val rawDns = configStr.lineSequence().firstOrNull { it.contains("DNS =", ignoreCase = false) }
+                                            ?.substringAfter("=")
+                                            ?.trim()
+                                            .orEmpty()
+                                        val rawMtu = configStr.lineSequence().firstOrNull { it.contains("MTU =", ignoreCase = false) }
+                                            ?.substringAfter("=")
+                                            ?.trim()
+                                            ?.toIntOrNull()
+                                            ?: 1300
+                                        val rawContext = lastContext?.get()?.applicationContext ?: return@launch
+                                        val sockName = rawTunSocketName ?: TunFdBridge.newSocketName()
+                                        rawTunSocketName = sockName
+                                        RawTunEngine.start(rawContext, rawIp, rawDns, rawMtu, sockName)
+                                    } else {
+                                        wgHelper?.startTunnel(configStr)
+                                    }
                                     ConnectionProgressManager.completeStage(ConnectionStage.VPN)
                                     ConnectionProgressManager.markConnected()
+                                    if (currentParams?.usingServerHashFallback == true) {
+                                        updateLog(
+                                            "vkhash_server_fallback_ok",
+                                            "[VKHASH] Fallback успешен: подключение выполнено через SERVER cache",
+                                            2,
+                                            false
+                                        )
+                                        android.util.Log.i("VKHASH", "SERVER cache fallback successful")
+                                    }
                                     finishRecoverySession(
                                         success = true,
                                     )
@@ -1180,6 +1303,64 @@ val showBlockerWarning = MutableStateFlow(false)
         stop()
     }
 
+    private fun tryServerHashCacheFallback(reason: String, detail: String? = null): Boolean {
+        val params = currentParams ?: return false
+        val context = lastContext?.get() ?: return false
+        if (params.vkHashSource != SettingsStore.VK_HASH_SOURCE_SERVER) return false
+
+        if (params.usingServerHashFallback) {
+            updateLog(
+                "vkhash_server_fallback_failed",
+                "[VKHASH] fallback отсутствует/не сработал: ${detail ?: reason}",
+                99,
+                true
+            )
+            android.util.Log.e("VKHASH", "SERVER cache fallback failed: reason=$reason, detail=$detail")
+            return false
+        }
+
+        if (!params.serverHashesFetchedFreshFromApi) {
+            return false
+        }
+
+        val fallbackHashes = SettingsStore.normalizeVkHashes(params.serverHashFallbackCache)
+        if (fallbackHashes.isBlank()) {
+            updateLog(
+                "vkhash_server_fallback_missing",
+                "[VKHASH] fallback отсутствует/не сработал",
+                99,
+                true
+            )
+            android.util.Log.e("VKHASH", "SERVER hash failed and fallback cache is unavailable: reason=$reason, detail=$detail")
+            return false
+        }
+
+        val fallbackParams = params.copy(
+            vkHashes = fallbackHashes,
+            serverHashFallbackCache = "",
+            serverHashesFetchedFreshFromApi = false,
+            usedServerCacheOnResolve = false,
+            usingServerHashFallback = true,
+        )
+        currentParams = fallbackParams
+        activeHashIndex = 0
+        updateLog(
+            "vkhash_server_fallback_start",
+            "[VKHASH] SERVER hash не сработали, выполняется fallback",
+            50,
+            true
+        )
+        stats.value = "Повторное подключение через SERVER cache…"
+        isConnecting.value = true
+        android.util.Log.w(
+            "VKHASH",
+            "SERVER hash failed, starting fallback: reason=$reason, detail=$detail"
+        )
+        stopOnlyProcess()
+        start(context, fallbackParams, isSwitching = true)
+        return true
+    }
+
     private fun handleHashError() {
         val params = currentParams ?: return
         val context = lastContext?.get() ?: return
@@ -1193,6 +1374,9 @@ val showBlockerWarning = MutableStateFlow(false)
             stopOnlyProcess()
             start(context, params, isSwitching = true)
         } else {
+            if (tryServerHashCacheFallback("hash_error", "Текущий набор SERVER hash не прошел проверку")) {
+                return
+            }
             val msg = if (activeHashIndex == 1) "Запасной хеш тоже мертв. Отключение." else "Хеш умер, запасного нет. Отключение."
             handleCriticalError(msg)
         }
@@ -1234,7 +1418,10 @@ val showBlockerWarning = MutableStateFlow(false)
                         lastActiveAtMs == 0L &&
                         !ManlCaptchaWebViewManager.isCaptchaPending
                     ) {
-                        handleCriticalError("\uD83D\uDD12 Неверный пароль подключения или несовместимый WRAP. Воркеры остановлены.")
+                        handleCriticalError(
+                            "\u26a0\ufe0f WRAP/DTLS не подтвердился: сервер, сеть, endpoint или credentials. " +
+                                "Воркеры остановлены."
+                        )
                         return@launch
                     } else if (System.currentTimeMillis() - zeroWorkersSince > 90_000 && !ManlCaptchaWebViewManager.isCaptchaPending) {
                         updateLog("watchdog", "⚠ Зомби-процесс (0 воркеров 90с). Перезапуск...", 50, true)
@@ -1292,7 +1479,7 @@ val showBlockerWarning = MutableStateFlow(false)
     }
 
     private fun reconnectAll(trigger: RecoveryTrigger) {
-        val params = currentParams ?: return
+        val baseParams = currentParams ?: return
         val context = lastContext?.get() ?: return
         if (!enabled.value) return
 
@@ -1318,6 +1505,7 @@ val showBlockerWarning = MutableStateFlow(false)
                         "restart",
                         "🛡 Перезапуск TUN",
                     )
+                    val params = refreshTransportSnapshot(baseParams, context)
                     withContext(Dispatchers.IO) {
                         ensureTransportStopped(params.port)
                     }
@@ -1354,7 +1542,8 @@ val showBlockerWarning = MutableStateFlow(false)
         stabilizationDelayMs: Long = DEFAULT_RECOVERY_STABILIZATION_MS,
     ) {
         val resumeCtx = lastContext?.get()
-        if (enabled.value && currentParams != null && resumeCtx != null) {
+        val baseParams = currentParams
+        if (enabled.value && baseParams != null && resumeCtx != null) {
             scope.launch {
                 val recoverySession = beginRecoverySession(
                     RecoveryTrigger(reason, details, stabilizationDelayMs)
@@ -1374,12 +1563,13 @@ val showBlockerWarning = MutableStateFlow(false)
                         "restart",
                         "🛡 Перезапуск TUN",
                     )
+                    val params = refreshTransportSnapshot(baseParams, resumeCtx)
                     withContext(Dispatchers.Main) {
                         if (config.value != null) {
                             wgHelper?.reloadTunnel()
                         }
                     }
-                    start(resumeCtx, currentParams!!, isSwitching = true)
+                    start(resumeCtx, params, isSwitching = true)
                 } catch (e: Exception) {
                     finishRecoverySession(
                         success = false,
@@ -1396,7 +1586,18 @@ val showBlockerWarning = MutableStateFlow(false)
         watchdogJob?.cancel()
         readerJob?.cancel()
         markExpectedStopForActiveSession()
+        val rawCtx = lastContext?.get()
+        if (currentParams?.rawTunEnabled == true && rawCtx != null) {
+            scope.launch(Dispatchers.IO) {
+                runCatching { RawTunEngine.stop(rawCtx) }
+            }
+        }
         stopGoProcessGracefully()
+    }
+
+    /** Вызывается из RawTunVpnService.onRevoke() — система сама отозвала VPN-разрешение. */
+    fun onRawTunRevoked() {
+        RawTunEngine.onVpnRevoked()
     }
 
     private fun stopGoProcessGracefully() {
@@ -1509,10 +1710,18 @@ val showBlockerWarning = MutableStateFlow(false)
         startJob?.cancel()
         startJob = null
 
-try {
+        try {
     VkAuthWebViewManager.notifyCancelled()
 } catch (_: Exception) {
 }
+        if (currentParams?.rawTunEnabled == true) {
+            val rawCtx = lastContext?.get()
+            if (rawCtx != null) {
+                scope.launch(Dispatchers.IO) {
+                    runCatching { RawTunEngine.stop(rawCtx) }
+                }
+            }
+        }
         scope.launch(Dispatchers.Main) {
             wgHelper?.stopTunnel()
         }
@@ -1533,11 +1742,16 @@ try {
         startJob?.cancel()
         startJob = null
 
-try {
+        try {
     VkAuthWebViewManager.notifyCancelled()
 } catch (_: Exception) {
-}
+        }
         val port = currentParams?.port ?: 9000
+        if (currentParams?.rawTunEnabled == true) {
+            lastContext?.get()?.let { rawCtx ->
+                RawTunEngine.stop(rawCtx)
+            }
+        }
         withContext(Dispatchers.Main) {
             wgHelper?.stopTunnel()
         }
@@ -1736,6 +1950,29 @@ try {
         }
     }
 
+    private fun currentTransportDiagnosticLabel(): String =
+        transportDiagnosticLabel(currentParams?.transportMode?.resolveForRuntime() ?: TransportMode.NORMAL)
+
+    private fun transportDiagnosticLabel(mode: TransportMode): String = when (mode) {
+        TransportMode.DIRECT -> "Direct"
+        TransportMode.TURN_TCP -> "TURN TCP / DTLS"
+        TransportMode.RAW_TUN -> "RAW"
+        TransportMode.AUTO, TransportMode.NORMAL -> "DTLS"
+    }
+
+    /** Переписывает только пользовательскую подпись ошибки, сохраняя исходную классификацию. */
+    private fun displayTransportError(message: String): String {
+        val label = currentTransportDiagnosticLabel()
+        if (label == "DTLS") return message
+        return transportErrorLabel(message, label)
+    }
+
+    private fun transportHandshakeText(transport: String): String = when (transport) {
+        "Direct" -> "Подготовка Direct-соединения..."
+        "RAW" -> "Подготовка RAW-соединения..."
+        else -> "Рукопожатие (Handshake)..."
+    }
+
     private fun Throwable.readableMessage(): String {
         val text = message ?: localizedMessage
         return if (text.isNullOrBlank()) this::class.java.simpleName else "${this::class.java.simpleName}: $text"
@@ -1744,10 +1981,22 @@ try {
 
 data class TunnelParams(
     val peer: String,
+    val host: String = "",
     val vkHashes: String,
+    val vkHashSource: String = SettingsStore.VK_HASH_SOURCE_LOCAL,
+    val serverHashFallbackCache: String = "",
+    val serverHashesFetchedFreshFromApi: Boolean = false,
+    val usedServerCacheOnResolve: Boolean = false,
+    val usingServerHashFallback: Boolean = false,
     val secondaryVkHash: String = "",
     val workersPerHash: Int,
     val port: Int,
+    val dtlsPort: Int = 56000,
+    val wgPort: Int = 56001,
+    val directPort: Int = 56002,
+    val serverRawPort: Int = 56003,
+    val transportMode: TransportMode = TransportMode.NORMAL,
+    val activeServerId: String = "",
     val sni: String = "",
     val connectionPassword: String = "",
     val protocol: String = "udp",
@@ -1757,5 +2006,14 @@ data class TunnelParams(
     val vkAnonPath: String = "vkcalls", // "vkcalls" или "legacy" (только anonymous)
     val goDnsArg: String = "yandex", // yandex/cloudflare/google, doh-*, custom:IP, doh:URL
     val obfsMode: String = "audio", // "audio" or "video"
-    val detailedLogs: Boolean = false
-)
+    val detailedLogs: Boolean = false,
+) {
+    val directEnabled: Boolean
+        get() = transportMode.resolveForRuntime().isDirect()
+
+    val turnTcpEnabled: Boolean
+        get() = transportMode.resolveForRuntime().isTurnTcp()
+
+    val rawTunEnabled: Boolean
+        get() = transportMode.resolveForRuntime().isRawTun()
+}

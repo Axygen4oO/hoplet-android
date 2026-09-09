@@ -11,8 +11,8 @@ import (
 	"time"
 )
 
-
 const workersPerGroup = 9
+const allocateGateInterval = 100 * time.Millisecond
 
 // WorkerGroup:
 // Запускает 9 потоков с одними кредами. Ротации нет — работает до смерти воркеров.
@@ -113,17 +113,21 @@ func WorkerGroup(
 	// Сигнализируем следующей группе, что мы успешно запустились (креды получены + 2 сек форы)
 	if signalReady != nil {
 		go func() {
-			time.Sleep(2000 * time.Millisecond)
+			delayMs := 500 + rand.Intn(250)
+			time.Sleep(time.Duration(delayMs) * time.Millisecond)
 			close(signalReady)
 			log.Printf("[ГРУППА #%d] Успешный старт! Передача эстафеты следующей группе...", groupID)
 		}()
 	}
 
+	allocateTicker := time.NewTicker(allocateGateInterval)
+	defer allocateTicker.Stop()
+
 	for i, wid := range workerIDs {
 		wg.Add(1)
 
-		// Stagger: 500мс между воркерами
-		workerDelay := time.Duration(i) * 500 * time.Millisecond
+		// Stagger: 75мс между воркерами
+		workerDelay := time.Duration(i) * 75 * time.Millisecond
 
 		go func(wid int, delay time.Duration) {
 			defer wg.Done()
@@ -159,9 +163,10 @@ func WorkerGroup(
 				credsMu.RUnlock()
 
 				configDelivered, sessErr := RunSession(ctx, tp, peer, d, localPort,
-					getConf, cc, wid, &credsSnapshot, deviceID, password, stats)
+					getConf, cc, wid, &credsSnapshot, deviceID, password, stats, allocateTicker.C)
 
 				quotaRetry := false
+				fastRetry := false
 				if getConf {
 					if configDelivered {
 						atomic.StoreInt32(&configSent, 1)
@@ -181,6 +186,10 @@ func WorkerGroup(
 						strings.Contains(errStrLower, "attribute not found")
 					isTurnQuota := strings.Contains(errStrLower, "quota") || strings.Contains(errStr, "486")
 					quotaRetry = isTurnQuota
+					fastRetry = strings.Contains(errStrLower, "broken pipe") ||
+						strings.Contains(errStrLower, "connection reset by peer") ||
+						strings.Contains(errStrLower, "unexpected eof")
+
 					turnCredRefreshNeeded := !isTurnQuota && (turnAllocAttrMissing ||
 						strings.Contains(errStrLower, "turn allocate auth") ||
 						strings.Contains(errStrLower, "invalid credential") ||
@@ -233,6 +242,8 @@ func WorkerGroup(
 				retryDelay := time.Duration(5+rand.Intn(11)) * time.Second
 				if quotaRetry {
 					retryDelay = time.Duration(30+rand.Intn(31)) * time.Second
+				} else if fastRetry {
+					retryDelay = time.Duration(1+rand.Intn(3)) * time.Second
 				}
 				select {
 				case <-time.After(retryDelay):
@@ -287,11 +298,14 @@ func normalizeVKJoinHash(input string) string {
 
 // TurnParams — конфигурация TURN
 type TurnParams struct {
-	Host    string
-	Port    string
-	Hashes  []string
-	WrapKey []byte // Password-derived WRAP key (32 bytes), nil = disabled
-	ObfsMode string // "audio" or "video" — RTP masking mode
+	Host         string
+	Port         string
+	Hashes       []string
+	WrapKey      []byte // Password-derived WRAP key (32 bytes), nil = disabled
+	ObfsMode     string // "audio" or "video" — RTP masking mode
+	NoTLS        bool   // Direct UDP mode without DTLS/TURN relay
+	RawMode      bool   // Raw-IP mode without WireGuard
+	TCPTransport bool   // TURN over TCP instead of UDP
 }
 
 // Credentials — учетные данные TURN
@@ -301,5 +315,3 @@ type Credentials struct {
 	TurnURLs      []string
 	CacheStreamID int
 }
-
-

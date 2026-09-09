@@ -41,11 +41,19 @@ class SecureStringStore(context: Context) {
         val parts = payload.split(":", limit = 2)
         if (parts.size != 2) return null
 
+        val key = runCatching { keyStore.getKey(KEY_ALIAS, null) as? SecretKey }.getOrNull()
+            ?: return null
+
         return runCatching {
             val iv = Base64.decode(parts[0], Base64.NO_WRAP)
             val encrypted = Base64.decode(parts[1], Base64.NO_WRAP)
             val cipher = Cipher.getInstance(TRANSFORMATION)
-            cipher.init(Cipher.DECRYPT_MODE, getOrCreateKey(), GCMParameterSpec(GCM_TAG_BITS, iv))
+            // Чтение никогда не создаёт новый ключ. После удаления APK Android
+            // удаляет старый alias; создание нового ключа во время decrypt
+            // маскировало этот сценарий и оставляло старый ciphertext навсегда
+            // нечитаемым. Новый ключ создаётся только при явном сохранении
+            // пользователем нового секрета через encrypt().
+            cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(GCM_TAG_BITS, iv))
             cipher.doFinal(encrypted).toString(Charsets.UTF_8)
         }.getOrNull()
     }

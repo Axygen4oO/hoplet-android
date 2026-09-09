@@ -1,66 +1,118 @@
-name: Release Android APK
+name: Hoplet release
 
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag/release to build and upload
+        required: true
+        type: string
 
 permissions:
   contents: write
 
 jobs:
-  release:
-    runs-on: ubuntu-24.04
-
+  build-release:
+    runs-on: ubuntu-latest
+    env:
+      TAG_NAME: ${{ github.event.release.tag_name || inputs.tag }}
+      KEYSTORE_B64: ${{ secrets.KEYSTORE_BASE64 }}
+      KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+      KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+      KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
 
-      - uses: actions/setup-java@v4
+      - name: Set up Java
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: '17'
           cache: gradle
 
-      - uses: actions/setup-go@v5
+      - name: Set up Go and Android NDK
+        uses: actions/setup-go@v5
         with:
-          go-version: "1.25"
+          go-version: '1.25'
           cache: true
 
       - uses: android-actions/setup-android@v3
-
       - run: sdkmanager "ndk;29.0.13846066"
-
       - run: |
-          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/29.0.13846066" >> $GITHUB_ENV
-          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/29.0.13846066" >> $GITHUB_ENV
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/29.0.13846066" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/29.0.13846066" >> "$GITHUB_ENV"
 
-      - name: Restore keystore
+      - name: Configure production signing
+        shell: bash
         run: |
-          mkdir -p app
+          set -euo pipefail
+          test -n "$KEYSTORE_B64" || { echo "KEYSTORE_BASE64 is not configured" >&2; exit 1; }
+          echo "$KEYSTORE_B64" | base64 --decode > "$GITHUB_WORKSPACE/release.keystore"
+          {
+            echo "KEYSTORE_FILE=$GITHUB_WORKSPACE/release.keystore"
+            echo "KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD"
+            echo "KEY_ALIAS=$KEY_ALIAS"
+            echo "KEY_PASSWORD=$KEY_PASSWORD"
+          } > local.properties
 
-          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > app/release.keystore
-
-          cat > local.properties <<EOF
-          KEYSTORE_FILE=release.keystore
-          KEYSTORE_PASSWORD=${{ secrets.KEYSTORE_PASSWORD }}
-          KEY_ALIAS=${{ secrets.KEY_ALIAS }}
-          KEY_PASSWORD=${{ secrets.KEY_PASSWORD }}
-          EOF
-
-          echo "Keystore:"
-          ls -lh app/release.keystore
-
-      - run: |
-          chmod +x gradlew
-          chmod +x scripts/build-go-lib.sh
-          chmod +x scripts/build-native-libs.sh
-
-      - run: ./gradlew assembleRelease
-
-      - name: Collect APK
+      - name: Build signed APK and AAB
         run: |
-          mkdir release-assets
-          find app -type f -name "*.apk" -exec cp {} release-assets/ \;
+          chmod +x gradlew scripts/build-go-lib.sh scripts/build-native-libs.sh
+          ./gradlew --no-daemon :app:assembleRelease :app:bundleRelease
 
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: release-assets/*
+      - name: Prepare stable release assets and manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          apk_source="$(find app/build/outputs/apk -type f -name 'app-universal-release.apk' -print -quit)"
+          if [ -z "$apk_source" ]; then
+            apk_source="$(find app/build/outputs/apk -type f -name '*release.apk' ! -name '*debug*' ! -name '*test*' -print -quit)"
+          fi
+          test -n "$apk_source" && test -s "$apk_source"
+          aab_source="$(find app/build/outputs/bundle -type f -name '*release.aab' -print -quit)"
+          test -n "$aab_source" && test -s "$aab_source"
+          cp "$apk_source" dist/app-release.apk
+          cp "$aab_source" dist/app-release.aab
+          if find app/build/outputs -type f -name 'mapping.txt' -print -quit | grep -q .; then
+            cp "$(find app/build/outputs -type f -name 'mapping.txt' -print -quit)" dist/mapping.txt
+          fi
+
+          version_name="$(sed -nE 's/^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' app/build.gradle.kts | head -n1)"
+          version_code="$(sed -nE 's/^[[:space:]]*versionCode[[:space:]]*=[[:space:]]*([0-9]+).*/\1/p' app/build.gradle.kts | head -n1)"
+          test -n "$version_name" && test -n "$version_code"
+          apk_sha="$(sha256sum dist/app-release.apk | awk '{print $1}')"
+          apk_size="$(stat -c '%s' dist/app-release.apk)"
+          aab_sha="$(sha256sum dist/app-release.aab | awk '{print $1}')"
+          jq -n \
+            --arg versionName "$version_name" \
+            --argjson versionCode "$version_code" \
+            --arg tag "$TAG_NAME" \
+            --arg apk "app-release.apk" \
+            --arg sha256 "$apk_sha" \
+            --arg releaseUrl "https://github.com/${{ github.repository }}/releases/tag/$TAG_NAME" \
+            --arg publishedAt "${{ github.event.release.published_at || '' }}" \
+            --argjson size "$apk_size" \
+            '{versionName:$versionName,versionCode:$versionCode,tag:$tag,apk:$apk,sha256:$sha256,mandatory:false,releaseUrl:$releaseUrl,publishedAt:$publishedAt,size:$size}' \
+            > dist/update.json
+          {
+            sha256sum dist/app-release.apk
+            sha256sum dist/app-release.aab
+          } > dist/checksums.txt
+          cat dist/update.json
+
+      - name: Upload assets to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release view "$TAG_NAME" >/dev/null 2>&1 || gh release create "$TAG_NAME" --title "$TAG_NAME" --generate-notes
+          assets=(dist/app-release.apk dist/app-release.aab dist/update.json dist/checksums.txt)
+          if [ -f dist/mapping.txt ]; then assets+=(dist/mapping.txt); fi
+          gh release upload "$TAG_NAME" "${assets[@]}" --clobber

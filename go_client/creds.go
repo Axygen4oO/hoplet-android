@@ -444,11 +444,11 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
 	}
 	dataMap, ok := resp["data"].(map[string]interface{})
 	if !ok {
-		return "", "", nil, fmt.Errorf("unexpected anon token response: %v", resp)
+		return "", "", nil, fmt.Errorf("unexpected anon token response")
 	}
 	token1, ok := dataMap["access_token"].(string)
 	if !ok {
-		return "", "", nil, fmt.Errorf("missing access_token in response: %v", resp)
+		return "", "", nil, fmt.Errorf("missing access_token in response")
 	}
 
 	vkDelayRandom(100, 150)
@@ -522,11 +522,11 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
 
 		respMap, okLoop := resp["response"].(map[string]interface{})
 		if !okLoop {
-			return "", "", nil, fmt.Errorf("unexpected getAnonymousToken response: %v", resp)
+			return "", "", nil, fmt.Errorf("unexpected getAnonymousToken response")
 		}
 		token2, okLoop = respMap["token"].(string)
 		if !okLoop {
-			return "", "", nil, fmt.Errorf("missing token in response: %v", resp)
+			return "", "", nil, fmt.Errorf("missing token in response")
 		}
 		break
 	}
@@ -542,7 +542,7 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
 	}
 	token3, ok := resp["session_key"].(string)
 	if !ok {
-		return "", "", nil, fmt.Errorf("missing session_key in response: %v", resp)
+		return "", "", nil, fmt.Errorf("missing session_key in response")
 	}
 
 	vkDelayRandom(100, 150)
@@ -556,7 +556,7 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
 
 	tsRaw, ok := resp["turn_server"].(map[string]interface{})
 	if !ok {
-		return "", "", nil, fmt.Errorf("missing turn_server in response: %v", resp)
+		return "", "", nil, fmt.Errorf("missing turn_server in response")
 	}
 	user, ok := tsRaw["username"].(string)
 	if !ok {

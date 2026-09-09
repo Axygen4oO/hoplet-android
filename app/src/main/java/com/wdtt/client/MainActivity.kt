@@ -69,6 +69,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.text.font.FontWeight
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.lifecycleScope
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.runtime.getValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -96,6 +97,22 @@ import kotlin.math.min
 import kotlin.math.sin
 
 class MainActivity : ComponentActivity() {
+
+    override fun onResume() {
+        super.onResume()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            packageManager.canRequestPackageInstalls()
+        ) {
+            lifecycleScope.launch {
+                val snapshot = SettingsStore(this@MainActivity).updateDownloadState.first()
+                if (snapshot.phase == AppUpdatePhase.READY_TO_INSTALL &&
+                    snapshot.statusMessage.contains("разрешите установку", ignoreCase = true)
+                ) {
+                    requestInstallDownloadedUpdate(this@MainActivity)
+                }
+            }
+        }
+    }
 
     private val batteryLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
         // Диалог оптимизации батареи закрыт — VPN-разрешение запрашиваем только при подключении.
@@ -160,17 +177,27 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleIncomingIntent(intent: Intent?) {
-        when (intent?.action) {
-            AppShortcuts.ACTION_ADD_PROFILE -> {
-                pendingAddProfile.value = true
-            }
-            Intent.ACTION_VIEW -> {
-                val uri = intent.data
-                if (uri != null) {
-                    pendingFileUri.value = uri
-                }
+        val handledShortcut = AppShortcuts.dispatchShortcutAction(
+            action = intent?.action,
+            onAddProfile = { pendingAddProfile.value = true },
+            onStartTunnel = { startTunnelFromShortcut() },
+            onStopTunnel = { stopTunnelFromShortcut() },
+        )
+        if (!handledShortcut && intent?.action == Intent.ACTION_VIEW) {
+            val uri = intent.data
+            if (uri != null) {
+                pendingFileUri.value = uri
             }
         }
+    }
+
+    private fun startTunnelFromShortcut() {
+        if (!AppShortcuts.shouldStartTunnel(TunnelManager.running.value, TunnelManager.isConnecting.value)) return
+        prepareVpnThen { TunnelControl.startFromSavedSettings(applicationContext) }
+    }
+
+    private fun stopTunnelFromShortcut() {
+        TunnelControl.stop(applicationContext)
     }
 
     override fun onStart() {
@@ -264,7 +291,7 @@ private data class NavItem(
 private val navItems = listOf(
     NavItem(0, "Туннель", Icons.Filled.VpnKey, Icons.Outlined.VpnKey),
     NavItem(1, "Деплой", Icons.Filled.Cloud, Icons.Outlined.Cloud),
-    NavItem(2, "Профили", Icons.Filled.FolderOpen, Icons.Outlined.Folder),
+    NavItem(2, "Подписка", Icons.Filled.FolderOpen, Icons.Outlined.Folder),
     NavItem(3, "Обход", Icons.Filled.FilterList, Icons.Outlined.FilterList),
     NavItem(4, "Логи", Icons.Filled.Terminal, Icons.Outlined.Terminal),
 )
@@ -289,6 +316,7 @@ fun MainScreen(
     val updateCheckIntervalHours by settingsStore.updateCheckIntervalHours.collectAsStateWithLifecycle(
         initialValue = DEFAULT_UPDATE_CHECK_INTERVAL_HOURS
     )
+    val includeBetaUpdates by settingsStore.includeBetaUpdates.collectAsStateWithLifecycle(initialValue = false)
 
     val interfaceRole by settingsStore.interfaceRole.collectAsStateWithLifecycle(initialValue = "admin")
     val isAdminInterface = interfaceRole == "admin"
@@ -406,7 +434,7 @@ fun MainScreen(
         }
     }
 
-    LaunchedEffect(updateCheckIntervalHours) {
+    LaunchedEffect(updateCheckIntervalHours, includeBetaUpdates) {
         if (updateCheckIntervalHours == UPDATE_CHECK_NEVER) return@LaunchedEffect
 
         val intervalMillis = updateIntervalHoursToMillis(updateCheckIntervalHours)
@@ -414,7 +442,7 @@ fun MainScreen(
             ?: 12L * 60L * 60L * 1000L
 
         suspend fun runUpdateCheck(reason: String) {
-            val outcome = performAppUpdateCheck(currentVersion, false)
+            val outcome = performAppUpdateCheck(currentVersion, includeBetaUpdates)
             val checkedAt = outcome.checkedAt
             val release = outcome.release
             settingsStore.saveUpdateState(
@@ -431,10 +459,14 @@ fun MainScreen(
                 return
             }
 
-            val hasUpdate = isNewerVersion(currentVersion, release.versionTag, false)
+            val hasUpdate = isNewerRelease(currentVersion, BuildConfig.VERSION_CODE.toLong(), release, includeBetaUpdates)
             val postponeVer = settingsStore.updatePostponeVersion.first()
             val postponeUntil = settingsStore.updatePostponeUntil.first()
             val isPostponed = postponeVer == release.versionTag && checkedAt < postponeUntil
+            val dialogShownVersion = settingsStore.updateDialogLastShownVersion.first()
+            val lastDialogAction = settingsStore.updateDialogLastAction.first()
+            val dialogAlreadyShown = dialogShownVersion == release.versionTag &&
+                !(lastDialogAction == UPDATE_DIALOG_ACTION_POSTPONED && checkedAt >= postponeUntil)
             val currentDownload = settingsStore.updateDownloadState.first()
             val isAlreadyDownloadingSameRelease =
                 currentDownload.matchesVersion(release.versionTag) &&
@@ -446,7 +478,7 @@ fun MainScreen(
                 "Update check: local=$currentVersion remote=${release.versionTag} newer=$hasUpdate postponed=$isPostponed active=${currentDownload.phase} reason=$reason"
             )
 
-            if (hasUpdate && !isPostponed && !isAlreadyDownloadingSameRelease) {
+            if (hasUpdate && !isPostponed && !isAlreadyDownloadingSameRelease && !dialogAlreadyShown) {
                 settingsStore.saveUpdateDialogShown(release.versionTag, checkedAt)
                 pendingRelease = release
             }
@@ -651,10 +683,12 @@ fun MainScreen(
                         TunnelManager.showBlockerWarning.value = false
                         scope.launch {
                             settingsStore.saveHideBlockerWarning(dontShowAgain)
+                            val transportMode = settingsStore.transportMode.first()
+                            context.startService(Intent(context, TunnelService::class.java).apply {
+                                action = "START_FORCED"
+                                putExtra("transport_mode", transportMode.toPersistedValue())
+                            })
                         }
-                        context.startService(Intent(context, TunnelService::class.java).apply {
-                            action = "START_FORCED"
-                        })
                     },
                     destructive = true
                 ) {

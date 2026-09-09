@@ -38,23 +38,27 @@ object TunnelControl {
             val vkAnonPath = SettingsStore.normalizeVkAnonPath(store.vkAnonPath.first())
             val goDnsArg = store.resolveGoDnsArg()
             val obfsMode = SettingsStore.normalizeObfsMode(store.obfsMode.first())
+            val transportMode = store.transportMode.first()
             val manualPortsEnabled = store.manualPortsEnabled.first()
             val serverDtlsPort = if (manualPortsEnabled) store.serverDtlsPort.first() else 56000
-            val peerWithPort = if (basePeer.isBlank()) basePeer else PeerAddress.ensurePort(basePeer, serverDtlsPort)
-            val hashes = VkHashSourceResolver.resolveForConnection(
-                context = appContext,
-                settingsStore = store,
-                peer = peerWithPort,
-            ).hashes
+            val serverRawPort = if (manualPortsEnabled) store.serverRawPort.first() else 56003
+            val serverPort = when {
+                transportMode.isRawTun() -> serverRawPort
+                else -> serverDtlsPort
+            }
+            val peerWithPort = if (basePeer.isBlank()) basePeer else PeerAddress.ensurePort(basePeer, serverPort)
 
-            if (peerWithPort.isBlank() || hashes.isBlank() || password.isBlank()) {
+            if (peerWithPort.isBlank() || password.isBlank()) {
+                TunnelManager.addNetworkLog(
+                    "[AUTH] Сохранённый пароль недоступен. Введите пароль заново в разделе «Секреты»."
+                )
+                TunnelManager.requestOpenSecrets()
                 return@launch
             }
 
             val startIntent = Intent(appContext, TunnelService::class.java).apply {
                 action = "START_FORCED"
                 putExtra("peer", peerWithPort)
-                putExtra("vk_hashes", hashes)
                 putExtra("secondary_vk_hash", "")
                 putExtra("workers_per_hash", workers)
                 putExtra("port", port)
@@ -65,6 +69,7 @@ object TunnelControl {
                 putExtra("vk_anon_path", vkAnonPath)
                 putExtra("go_dns_arg", goDnsArg)
                 putExtra("obfs_mode", obfsMode)
+                putExtra("transport_mode", transportMode.toPersistedValue())
             }
 
             withContext(Dispatchers.Main) {

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"time"
@@ -22,7 +23,12 @@ func postTelegramJSON(url string, payload interface{}) (*http.Response, error) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	return telegramHTTPClient.Do(req)
+	resp, err := telegramHTTPClient.Do(req)
+	if err == nil {
+		return resp, nil
+	}
+
+	return nil, fmt.Errorf("telegram request failed: %T", err)
 }
 
 func postTelegramJSONAndClose(url string, payload interface{}) error {

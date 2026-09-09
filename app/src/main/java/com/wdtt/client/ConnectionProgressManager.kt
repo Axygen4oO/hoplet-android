@@ -40,8 +40,22 @@ data class ConnectionState(
     val statusText: String,
     val timeoutSeconds: Int?,
     val errorReason: String?,
-    val lifecycle: ConnectionLifecycle
-)
+    val lifecycle: ConnectionLifecycle,
+    /** Название сетевой стадии для выбранного транспорта; влияет только на UI. */
+    val transportLabel: String = "DTLS"
+) {
+    fun displayName(stage: ConnectionStage?): String = when (stage) {
+        ConnectionStage.DTLS -> transportLabel
+        null -> "ожидание"
+        else -> stage.displayName
+    }
+}
+
+/** Подпись ошибки в UI с фактическим транспортом, без изменения её причины. */
+fun transportErrorLabel(message: String, transportLabel: String): String {
+    if (transportLabel == "DTLS") return message
+    return message.replace(Regex("\\bDTLS\\b", RegexOption.IGNORE_CASE), transportLabel)
+}
 
 object ConnectionProgressManager {
     private const val DEFAULT_TIMEOUT_SECONDS = 30
@@ -66,10 +80,17 @@ object ConnectionProgressManager {
 
     val state = MutableStateFlow(idleState())
 
-    private fun runningText(stage: ConnectionStage, timeoutSeconds: Int): String =
-        "Таймаут $timeoutSeconds с: ${stage.displayName}"
+    private fun runningText(
+        stage: ConnectionStage,
+        timeoutSeconds: Int,
+        transportLabel: String = state.value.transportLabel,
+    ): String =
+        "Таймаут $timeoutSeconds с: ${if (stage == ConnectionStage.DTLS) transportLabel else stage.displayName}"
 
-    fun beginConnection(timeoutSeconds: Int = DEFAULT_TIMEOUT_SECONDS) {
+    fun beginConnection(
+        timeoutSeconds: Int = DEFAULT_TIMEOUT_SECONDS,
+        transportLabel: String = "DTLS",
+    ) {
         disconnectJob?.cancel()
         val stages = waitingStages().apply {
             put(ConnectionStage.DNS, StageStatus.RUNNING)
@@ -77,10 +98,11 @@ object ConnectionProgressManager {
         state.value = ConnectionState(
             currentStage = ConnectionStage.DNS,
             stageStatuses = stages,
-            statusText = runningText(ConnectionStage.DNS, timeoutSeconds),
+            statusText = runningText(ConnectionStage.DNS, timeoutSeconds, transportLabel),
             timeoutSeconds = timeoutSeconds,
             errorReason = null,
-            lifecycle = ConnectionLifecycle.CONNECTING
+            lifecycle = ConnectionLifecycle.CONNECTING,
+            transportLabel = transportLabel,
         )
     }
 
@@ -148,16 +170,18 @@ object ConnectionProgressManager {
         state.update { current ->
             val stages = LinkedHashMap(current.stageStatuses)
             stages[stage] = StageStatus.ERROR
+            val displayReason = transportErrorLabel(reason, current.transportLabel)
             current.copy(
                 currentStage = stage,
                 stageStatuses = stages,
-                statusText = "Ошибка: $reason",
+                statusText = "Ошибка: $displayReason",
                 timeoutSeconds = null,
-                errorReason = reason,
+                errorReason = displayReason,
                 lifecycle = ConnectionLifecycle.ERROR
             )
         }
     }
+
 
     fun failCurrent(reason: String) {
         val currentStage = state.value.currentStage ?: ConnectionStage.DNS
@@ -166,6 +190,7 @@ object ConnectionProgressManager {
 
     fun markConnected() {
         disconnectJob?.cancel()
+        val selectedTransport = state.value.transportLabel
         val stages = waitingStages().apply {
             stageOrder.forEach { put(it, StageStatus.SUCCESS) }
         }
@@ -175,7 +200,8 @@ object ConnectionProgressManager {
             statusText = "Подключено",
             timeoutSeconds = null,
             errorReason = null,
-            lifecycle = ConnectionLifecycle.CONNECTED
+            lifecycle = ConnectionLifecycle.CONNECTED,
+            transportLabel = selectedTransport
         )
     }
 

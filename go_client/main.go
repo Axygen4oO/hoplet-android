@@ -14,6 +14,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	transportselector "wg-turn-client/go_client/transportselector"
 )
 
 // CaptchaResultChan — канал для получения токена капчи из внешнего решателя (WebView)
@@ -165,7 +167,7 @@ func main() {
 	listen := flag.String("listen", "127.0.0.1:9000", "локальный адрес")
 	vkHash := flag.String("vk", "", "хеши VK-звонков (через запятую)")
 	peerAddr := flag.String("peer", "", "адрес:порт VPS сервера")
-	numW := flag.Int("n", 24, "количество воркеров (кратно 12)")
+	numW := flag.Int("n", 9, "количество воркеров")
 	pingOnly := flag.Bool("ping-only", false, "запустить только замер задержки и выйти")
 
 	deviceID := flag.String("device-id", "unknown", "уникальный ID устройства")
@@ -177,13 +179,20 @@ func main() {
 	goDNS := flag.String("go-dns", "yandex", "DNS для VK (yandex/cloudflare/google, doh-yandex/doh-cloudflare/doh-google, custom:IP или doh:URL)")
 	obfsMode := flag.String("obfs", "audio", "режим обфускации (audio/video)")
 	checkHashes := flag.Bool("check-hashes", false, "проверить VK-хеши и выйти")
-	connMode := flag.String("mode", "vpn", "режим клиента (vpn|socks)")
+	connMode := flag.String("mode", "vpn", "режим клиента (vpn|socks|rawtun)")
 	socksAddr := flag.String("socks", "127.0.0.1:1080", "локальный SOCKS5 (только -mode socks)")
+	transportMode := flag.String("transport", "", "режим транспорта (normal|direct|turn_tcp|auto)")
+	noTLS := flag.Bool("notls", false, "Direct UDP listener без DTLS")
+	turnTCP := flag.Bool("turn-tcp", false, "соединяться с TURN-relay по TCP вместо UDP")
+	tunFdSock := flag.String("tun-fd-sock", "", "unix-сокет для получения TUN fd от Android (только -mode rawtun)")
 
 	flag.Parse()
 	activeConnMode := strings.ToLower(strings.TrimSpace(*connMode))
-	if activeConnMode != "socks" {
+	if activeConnMode != "socks" && activeConnMode != "rawtun" {
 		activeConnMode = "vpn"
+	}
+	if activeConnMode == "rawtun" && *tunFdSock == "" {
+		log.Fatal("[RAW] Для -mode rawtun нужен -tun-fd-sock")
 	}
 	setupGlobalResolver(*goDNS)
 	activeCaptchaMode := setCaptchaMode(*captchaMode)
@@ -230,6 +239,10 @@ func main() {
 		log.Fatal("[КЛИЕНТ] Нужен -password: WRAP ключ теперь выводится из пароля подключения")
 	}
 
+	activeTransportMode, resolvedNoTLS, resolvedTurnTCP := transportselector.Resolve(*transportMode, *noTLS, *turnTCP)
+	*noTLS = resolvedNoTLS
+	*turnTCP = resolvedTurnTCP
+
 	// WRAP key
 	wrapKey, err := deriveWrapKey(*connPassword)
 	if err != nil {
@@ -257,13 +270,7 @@ func main() {
 		*numW = (*numW / workersPerGroup) * workersPerGroup
 	}
 
-	tp := &TurnParams{
-		Host:     *host,
-		Port:     *port,
-		Hashes:   hashes,
-		WrapKey:  wrapKey,
-		ObfsMode: normalizeObfsMode(*obfsMode),
-	}
+	tp := buildTurnParams(*host, *port, hashes, wrapKey, normalizeObfsMode(*obfsMode), *noTLS, activeConnMode == "rawtun", *turnTCP)
 
 	if *pingOnly {
 		var lastErr error
@@ -327,6 +334,14 @@ func main() {
 	log.Printf("[КЛИЕНТ] Слушаю: %s | Пир: %s", *listen, *peerAddr)
 	log.Printf("[КЛИЕНТ] Протокол: UDP")
 	log.Printf("[КЛИЕНТ] Режим: %s", activeConnMode)
+	log.Printf("[КЛИЕНТ] Transport mode: %s", activeTransportMode)
+	if *noTLS {
+		log.Printf("[КЛИЕНТ] Transport: Direct UDP (-notls)")
+	} else if *turnTCP {
+		log.Printf("[КЛИЕНТ] Transport: TURN TCP (-turn-tcp)")
+	} else {
+		log.Printf("[КЛИЕНТ] Transport: DTLS")
+	}
 	if activeConnMode == "socks" {
 		log.Printf("[КЛИЕНТ] SOCKS5: %s", *socksAddr)
 	}
@@ -344,8 +359,18 @@ func main() {
 	}()
 	go stats.RunLoop(shutdownCh)
 
-	disp := NewDispatcher(ctx, localConn, stats)
-	defer disp.Shutdown()
+	var disp *Dispatcher
+	if activeConnMode == "rawtun" {
+		disp = NewDispatcherPendingTUN(ctx, stats)
+	} else {
+		disp = NewDispatcher(ctx, localConn, stats)
+	}
+	defer func() {
+		disp.Shutdown()
+		if activeConnMode == "rawtun" {
+			log.Printf("[RAW] Counters: %s", disp.RawSummary())
+		}
+	}()
 
 	configCh := make(chan string, 1)
 	configDone := make(chan struct{})
@@ -354,6 +379,42 @@ func main() {
 		select {
 		case rawConf, ok := <-configCh:
 			if !ok || rawConf == "" {
+				return
+			}
+			if strings.HasPrefix(rawConf, "RAWCONF:") {
+				parts := strings.Split(strings.TrimPrefix(rawConf, "RAWCONF:"), "|")
+				if len(parts) != 3 {
+					log.Printf("[RAW] Некорректный RAWCONF: %q", rawConf)
+					return
+				}
+				ip, dnsCSV, mtuStr := parts[0], parts[1], parts[2]
+				fmt.Println()
+				fmt.Println("╔══════════════ RAW Конфиг ══════════════╗")
+				fmt.Printf("║ %-40s ║\n", fmt.Sprintf("IP = %s", ip))
+				fmt.Printf("║ %-40s ║\n", fmt.Sprintf("DNS = %s", dnsCSV))
+				fmt.Printf("║ %-40s ║\n", fmt.Sprintf("MTU = %s", mtuStr))
+				fmt.Println("╚══════════════════════════════════════╝")
+				log.Println("[RAW] Ожидание TUN fd от Android...")
+				var tunFile *os.File
+				var fdErr error
+				attempt := 0
+				for {
+					attempt++
+					tunFile, fdErr = recvTunFD(*tunFdSock)
+					if fdErr == nil {
+						break
+					}
+					rawDiagf("recvTunFD попытка #%d неудачна: %v (повтор через 200мс)", attempt, fdErr)
+					select {
+					case <-ctx.Done():
+						rawDiagf("recvTunFD: ctx отменён, прекращаю попытки")
+						return
+					case <-time.After(200 * time.Millisecond):
+					}
+				}
+				rawDiagf("recvTunFD успешен на попытке #%d, fd=%v", attempt, tunFile.Fd())
+				disp.AttachTUN(tunFile)
+				log.Println("[RAW] TUN подключён, трафик пошёл")
 				return
 			}
 			finalConf := rawConf

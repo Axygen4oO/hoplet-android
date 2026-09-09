@@ -134,7 +134,7 @@ func (s *captchaV2Session) solveSliderCaptcha(
 func parseSliderPuzzleV2(raw map[string]any) (*sliderPuzzleV2, error) {
 	resp, ok := raw["response"].(map[string]any)
 	if !ok {
-		return nil, fmt.Errorf("invalid slider content response: %v", raw)
+		return nil, errors.New("invalid slider content response")
 	}
 	status := captchaV2StringifyAny(resp["status"])
 	if !strings.EqualFold(status, "ok") {

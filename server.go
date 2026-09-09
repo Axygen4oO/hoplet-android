@@ -45,16 +45,23 @@ import (
 
 const (
 	wgIfaceName           = "wdtt0"
+	rawIfaceName          = "wdtraw0"
 	wgServerAddr          = "10.66.66.1"
 	wgClientAddr          = "10.66.66.2"
 	wgClientCIDR          = wgClientAddr + "/32"
 	wgServerCIDR          = wgServerAddr + "/16"
+	rawServerAddr         = "10.67.66.1"
+	rawServerCIDR         = rawServerAddr + "/16"
 	defaultInternalWGPort = 56001
+	defaultRawPort        = 56003
 	wgMTU                 = 1280
+	rawMTU                = 1280
 	keepalive             = 25
 )
 
 var dns = "8.8.8.8"
+var serverDirectPort = 56002
+var serverRawPort = defaultRawPort
 
 // ==================== База данных и Бот ====================
 
@@ -62,6 +69,7 @@ type ClientDevice struct {
 	DeviceID   string `json:"device_id"`
 	DeviceName string `json:"device_name,omitempty"`
 	IP         string `json:"ip"`
+	RawIP      string `json:"raw_ip,omitempty"`
 	PrivKey    string `json:"priv_key"`
 	PubKey     string `json:"pub_key"`
 	DownBytes  int64  `json:"down_bytes"`
@@ -481,15 +489,15 @@ func (s *wrapKeyStore) Count() int {
 	return len(s.entries)
 }
 
-func (s *wrapKeyStore) Unwrap(raw, dst []byte) ([]byte, int, error) {
+func (s *wrapKeyStore) Unwrap(raw, dst []byte) ([]byte, string, int, error) {
 	if !obfsIsRTPPacket(raw) {
-		return nil, 0, errors.New("wrap: non-obfs packet")
+		return nil, "", 0, errors.New("wrap: non-obfs packet")
 	}
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if len(s.entries) == 0 {
-		return nil, 0, errors.New("wrap: no active keys")
+		return nil, "", 0, errors.New("wrap: no active keys")
 	}
 	log.Printf("[WRAP] Active keys: %d", len(s.entries))
 
@@ -499,10 +507,10 @@ func (s *wrapKeyStore) Unwrap(raw, dst []byte) ([]byte, int, error) {
 		m, err := obfsUnwrapPacket(entry.key, raw, dst)
 		if err == nil {
 			log.Printf("[WRAP] SUCCESS with key: %s", entry.id)
-			return append([]byte(nil), entry.key...), m, nil
+			return append([]byte(nil), entry.key...), entry.id, m, nil
 		}
 	}
-	return nil, 0, errors.New("wrap: auth failed")
+	return nil, "", 0, errors.New("wrap: auth failed")
 }
 
 func snapshotWrapPasswordsLocked() (string, []string) {
@@ -827,6 +835,27 @@ func getNextIP() string {
 	return ""
 }
 
+func getNextRawIP() string {
+	used := make(map[string]bool)
+	for _, dev := range db.Devices {
+		if dev != nil {
+			used[dev.RawIP] = true
+		}
+	}
+	for b3 := 0; b3 <= 255; b3++ {
+		for b4 := 1; b4 <= 254; b4++ {
+			ip := fmt.Sprintf("%s.%d.%d", "10.67", b3, b4)
+			if ip == rawServerAddr {
+				continue
+			}
+			if !used[ip] {
+				return ip
+			}
+		}
+	}
+	return ""
+}
+
 func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 	if token == "" || adminIDstr == "" {
 		return
@@ -947,7 +976,7 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 
 				if u.CallbackQuery.Message.Chat.ID == adminID {
 					data := u.CallbackQuery.Data
-					log.Println("CALLBACK:", data)
+					log.Println("[BOT] Callback received")
 					answerCallback(token, u.CallbackQuery.ID)
 					if handleCallback(
 						token,
@@ -955,6 +984,15 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 						data,
 						u.CallbackQuery.Message.MessageID,
 						u.CallbackQuery.Message.Text,
+						wgDev,
+					) {
+						continue
+					}
+					if handleAdminUserCardCallback(
+						token,
+						adminID,
+						data,
+						u.CallbackQuery.Message.MessageID,
 						wgDev,
 					) {
 						continue
@@ -1087,6 +1125,13 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 							})
 						}
 
+						if linkedUser, ok := findUserBySubscriptionID(pass); ok && linkedUser != nil {
+							kb = append(kb, map[string]interface{}{
+								"text":          "👤 Карточка пользователя",
+								"callback_data": "usercard_" + pass,
+							})
+						}
+
 						dbMutex.Unlock()
 
 						if linkHash != "" {
@@ -1196,13 +1241,7 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 						)
 
 					} else if data == "mainlink" {
-						tgState.TargetPassword = "main"
-						var keyboard [][]map[string]interface{}
-						keyboard = append(keyboard, []map[string]interface{}{
-							{"text": "Да", "callback_data": "ports_def"},
-							{"text": "Нет", "callback_data": "ports_custom"},
-						})
-						sendTelegram(token, adminID, "⚙️ Использовать стандартные порты для главного пароля (56000, 56001, 9000)?", map[string]interface{}{"inline_keyboard": keyboard})
+						sendTelegram(token, adminID, "🔒 Главный пароль установлен. Его экспорт через Telegram отключён.", nil)
 
 					} else if data == "ports_def" {
 						tgState.TempPorts = "56000,56001,9000"
@@ -1236,11 +1275,13 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
   "vkHashes": "%s",
   "workersPerHash": 16,
   "listenPort": 9000,
+  "directPort": %d,
   "password": "%s"
 }`,
 								label,
 								srvIP,
 								vkHash,
+								serverDirectPort,
 								pass,
 							)
 
@@ -1681,7 +1722,7 @@ func cleanupExpiredPasswordsLocked() (int, []*ClientDevice) {
 
 			log.Printf(
 				"[SUB] Подписка %s истекла и деактивирована",
-				p,
+				maskPassword(p),
 			)
 			expiredSubscriptions = append(
 				expiredSubscriptions,
@@ -1810,13 +1851,13 @@ func sendPasswordList(
 	}
 
 	txt := "🔐 *Пароли:*\n\n"
-	txt += fmt.Sprintf("🔒 Главный: `%s` (владелец)\n\n", db.MainPassword)
+	if db.MainPassword == "" {
+		txt += "🔒 Главный: не установлен (владелец)\n\n"
+	} else {
+		txt += "🔒 Главный: установлен (владелец)\n\n"
+	}
 
 	var inlineKb []map[string]interface{}
-	inlineKb = append(inlineKb, map[string]interface{}{
-		"text":          "🔗 Ссылка на главный пароль",
-		"callback_data": "mainlink",
-	})
 
 	if len(db.Passwords) == 0 {
 		txt += "_Нет сгенерированных паролей._\n"
@@ -1957,13 +1998,8 @@ func editTelegram(
 
 	defer resp.Body.Close()
 
-	respBody, _ := io.ReadAll(resp.Body)
-
-	log.Printf(
-		"[EDIT RESPONSE] status=%d body=%s",
-		resp.StatusCode,
-		string(respBody),
-	)
+	_, _ = io.Copy(io.Discard, resp.Body)
+	log.Printf("[EDIT RESPONSE] status=%d", resp.StatusCode)
 }
 
 func sendTelegramFile(token string, chatID int64, fileName string, fileContent []byte) {
@@ -2001,14 +2037,14 @@ func sendTelegramFile(token string, chatID int64, fileName string, fileContent [
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Println("[BOT] Error sending file to Telegram:", err)
+		log.Println("[BOT] Error sending file to Telegram")
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		log.Printf("[BOT] sendTelegramFile failed with status %d: %s\n", resp.StatusCode, string(respBody))
+		_, _ = io.Copy(io.Discard, resp.Body)
+		log.Printf("[BOT] sendTelegramFile failed with status %d\n", resp.StatusCode)
 	}
 }
 
@@ -2195,6 +2231,7 @@ func statsLoop(ctx context.Context, configDir string) {
 				"up_gb":     fmt.Sprintf("%.2f", upGB),
 				"passwords": numPasswords,
 				"devices":   numDevices,
+				"raw":       snapshotRawStats(),
 				"timestamp": time.Now().Unix(),
 			})
 			os.WriteFile(statsFile, statsJSON, 0644)
@@ -2605,10 +2642,23 @@ func handleAPIProfileStatus(w http.ResponseWriter, r *http.Request) {
 
 	dbMutex.Lock()
 	entry, exists := db.Passwords[password]
-	if !exists || isPasswordExpired(entry) {
+	isMainPassword := db.MainPassword != "" && password == db.MainPassword
+	if !isMainPassword && (!exists || entry == nil) {
 		dbMutex.Unlock()
-		http.Error(w, `{"error":"Unauthorized or expired password"}`, http.StatusUnauthorized)
+		http.Error(w, `{"error":"Unauthorized password"}`, http.StatusUnauthorized)
 		return
+	}
+	// Статус подписки нужен клиенту для различения EXPIRED/BLOCKED/MISSING.
+	// Само наличие пароля уже является credential-проверкой; транспорт по-прежнему
+	// выполняет отдельную строгую проверку перед подключением.
+	subscriptionStatus := "active"
+	if isMainPassword {
+		// Главный пароль не является подпиской и не имеет срока действия.
+		entry = &PasswordEntry{MaxDevices: 0}
+	} else if entry.IsDeactivated {
+		subscriptionStatus = "blocked"
+	} else if isPasswordExpired(entry) {
+		subscriptionStatus = "expired"
 	}
 
 	maxDevs := entry.MaxDevices
@@ -2651,11 +2701,13 @@ func handleAPIProfileStatus(w http.ResponseWriter, r *http.Request) {
 	activeDevicesMu.Unlock()
 
 	resp := map[string]interface{}{
-		"max_devices":      maxDevs,
-		"bound_devices":    boundDevices,
-		"active_devices":   activeCount,
-		"is_current_bound": isCurrentBound,
-		"expires_at":       expiresAt,
+		"max_devices":         maxDevs,
+		"bound_devices":       boundDevices,
+		"active_devices":      activeCount,
+		"is_current_bound":    isCurrentBound,
+		"expires_at":          expiresAt,
+		"subscription_status": subscriptionStatus,
+		"is_main_password":    isMainPassword,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -2701,6 +2753,8 @@ func handleAPIProfileUnbind(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	listen := flag.String("listen", "0.0.0.0:56000", "DTLS адрес")
+	listenDirect := flag.String("listen-direct", "", "Direct UDP адрес")
+	listenRaw := flag.String("listen-raw", "", "Raw TUN UDP адрес")
 	wgPort := flag.Int("wg-port", defaultInternalWGPort, "WireGuard UDP порт")
 	configDir := flag.String("config-dir", "/etc/wdtt", "директория конфигурации")
 	mainPass := flag.String("password", "", "пароль владельца")
@@ -2728,6 +2782,32 @@ func main() {
 	yookassaSecretKey = *ykSecretKey
 	telegramPaymentsProviderToken = *tgPaymentsProviderToken
 	dns = *dnsFlag
+
+	if strings.TrimSpace(*listenDirect) != "" {
+		_, dtlsPortStr, dtlsErr := net.SplitHostPort(*listen)
+		_, directPortStr, directErr := net.SplitHostPort(*listenDirect)
+		if dtlsErr == nil && directErr == nil {
+			if dtlsPortStr == directPortStr || directPortStr == strconv.Itoa(*wgPort) {
+				log.Fatalf("[DIRECT] listen-direct must differ from DTLS/WG ports")
+			}
+		}
+	}
+	var rawWG sync.WaitGroup
+	if strings.TrimSpace(*listenRaw) != "" {
+		_, dtlsPortStr, dtlsErr := net.SplitHostPort(*listen)
+		_, rawPortStr, rawErr := net.SplitHostPort(*listenRaw)
+		if dtlsErr == nil && rawErr == nil {
+			if rawPortStr == dtlsPortStr || rawPortStr == strconv.Itoa(*wgPort) {
+				log.Fatalf("[RAW] listen-raw must differ from DTLS/WG ports")
+			}
+			if strings.TrimSpace(*listenDirect) != "" {
+				_, directPortStr, directErr := net.SplitHostPort(*listenDirect)
+				if directErr == nil && rawPortStr == directPortStr {
+					log.Fatalf("[RAW] listen-raw must differ from direct port")
+				}
+			}
+		}
+	}
 
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
 	log.Println("══════════════════════════════════════════")
@@ -2927,9 +3007,100 @@ func main() {
 	}
 	context.AfterFunc(ctx, func() { listener.Close() })
 
+	if strings.TrimSpace(*listenDirect) != "" {
+		directAddr, err := net.ResolveUDPAddr("udp", *listenDirect)
+		if err != nil {
+			log.Fatalf("[DIRECT] %v", err)
+		}
+		if _, portStr, splitErr := net.SplitHostPort(*listenDirect); splitErr == nil {
+			if parsedPort, convErr := strconv.Atoi(portStr); convErr == nil {
+				serverDirectPort = parsedPort
+			}
+		}
+		// Direct использует тот же RTP-AEAD wire format, что и клиентский
+		// obfsDirectConn.  Обычный net.ListenUDP передаёт ciphertext прямо в
+		// handleConn, поэтому AUTH/GETCONF никогда не распознаются. RAW уже
+		// использует listenWrapped ниже; Direct обязан сохранять авторский
+		// wrapped-listener контракт, но без DTLS поверх него.
+		directWrapListener, err := listenDirectWrapped(directAddr, serverWrapKeys)
+		if err != nil {
+			log.Fatalf("[DIRECT] %v", err)
+		}
+		context.AfterFunc(ctx, func() { _ = directWrapListener.Close() })
+		log.Printf("   DIRECT (no-DTLS, RTP-AEAD): %s", *listenDirect)
+		go func() {
+			for {
+				pc, remoteAddr, acceptErr := directWrapListener.Accept()
+				if acceptErr != nil {
+					select {
+					case <-ctx.Done():
+						return
+					default:
+						log.Printf("[DIRECT] accept: %v", acceptErr)
+						continue
+					}
+				}
+				go func(pc net.PacketConn, addr net.Addr) {
+					c := &directConn{pc: pc, addr: addr}
+					defer c.Close()
+					handleConn(ctx, c, fmt.Sprintf("127.0.0.1:%d", *wgPort), wgDev, keys)
+				}(pc, remoteAddr)
+			}
+		}()
+	}
+
+	if strings.TrimSpace(*listenRaw) != "" {
+		rawAddr, err := net.ResolveUDPAddr("udp", *listenRaw)
+		if err != nil {
+			log.Fatalf("[RAW] %v", err)
+		}
+		if _, portStr, splitErr := net.SplitHostPort(*listenRaw); splitErr == nil {
+			if parsedPort, convErr := strconv.Atoi(portStr); convErr == nil {
+				serverRawPort = parsedPort
+			}
+		}
+		rawRouter, err := newRawRouter(ctx)
+		if err != nil {
+			log.Fatalf("[RAW] %v", err)
+		}
+		rawWrapListener, err := listenWrapped(rawAddr, serverWrapKeys)
+		if err != nil {
+			log.Fatalf("[RAW] %v", err)
+		}
+		context.AfterFunc(ctx, func() { _ = rawWrapListener.Close() })
+		log.Printf("   RAW (без WireGuard, без DTLS): %s", *listenRaw)
+
+		go func() {
+			for {
+				pc, remoteAddr, acceptErr := rawWrapListener.Accept()
+				if acceptErr != nil {
+					select {
+					case <-ctx.Done():
+						return
+					default:
+					}
+					continue
+				}
+				rawWG.Add(1)
+				go func(pc net.PacketConn, addr net.Addr) {
+					defer rawWG.Done()
+					c := &directConn{pc: pc, addr: addr}
+					defer c.Close()
+					handleConnRaw(ctx, c, rawRouter)
+				}(pc, remoteAddr)
+			}
+		}()
+	}
+
 	wgEndpoint := fmt.Sprintf("127.0.0.1:%d", *wgPort)
 
 	log.Printf("   DTLS: %s | WG: %s | NAT: %s", *listen, wgEndpoint, natType)
+	if strings.TrimSpace(*listenDirect) != "" {
+		log.Printf("   Direct: %s", *listenDirect)
+	}
+	if strings.TrimSpace(*listenRaw) != "" {
+		log.Printf("   Raw: %s", *listenRaw)
+	}
 	log.Printf("   WRAP: password HKDF + RTP AEAD | keys: %d", serverWrapKeys.Count())
 	log.Println("[SERVER] Готов")
 
@@ -2940,6 +3111,7 @@ func main() {
 			select {
 			case <-ctx.Done():
 				wg.Wait()
+				rawWG.Wait()
 				return
 			default:
 			}
@@ -2961,18 +3133,17 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 
 	var connDeviceID string
 
-	dtlsConn, ok := clientConn.(*dtls.Conn)
-	if !ok {
-		return
-	}
-
-	hctx, hcancel := context.WithTimeout(ctx, 60*time.Second)
-	if err := dtlsConn.HandshakeContext(hctx); err != nil {
+	if dtlsConn, ok := clientConn.(*dtls.Conn); ok {
+		hctx, hcancel := context.WithTimeout(ctx, 60*time.Second)
+		if err := dtlsConn.HandshakeContext(hctx); err != nil {
+			hcancel()
+			log.Printf("[DTLS] [ERR] Handshake failed from %s: %v", clientConn.RemoteAddr().String(), err)
+			return
+		}
 		hcancel()
-		log.Printf("[DTLS] [ERR] Handshake failed from %s: %v", clientConn.RemoteAddr().String(), err)
-		return
+	} else {
+		log.Printf("[DIRECT] Accepted %s", clientConn.RemoteAddr().String())
 	}
-	hcancel()
 
 	atomic.AddInt32(&activeConns, 1)
 	defer atomic.AddInt32(&activeConns, -1)
@@ -3217,6 +3388,210 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 	proxyWg.Wait()
 }
 
+type directTimeoutError struct{}
+
+func (directTimeoutError) Error() string   { return "i/o timeout" }
+func (directTimeoutError) Timeout() bool   { return true }
+func (directTimeoutError) Temporary() bool { return true }
+
+type directUDPListener struct {
+	conn     *net.UDPConn
+	mu       sync.Mutex
+	sessions map[string]*directSessionConn
+}
+
+type directSessionConn struct {
+	listener   *directUDPListener
+	remote     *net.UDPAddr
+	key        string
+	in         chan []byte
+	closed     chan struct{}
+	deadlineCh chan struct{}
+	closeOnce  sync.Once
+	deadlineMu sync.RWMutex
+	readBy     time.Time
+	writeBy    time.Time
+}
+
+func serveDirectUDP(ctx context.Context, conn *net.UDPConn, wgEndpoint string, wgDev *device.Device, keys *wgKeys) {
+	listener := &directUDPListener{
+		conn:     conn,
+		sessions: make(map[string]*directSessionConn),
+	}
+	buf := make([]byte, 2048)
+	for {
+		n, remote, err := conn.ReadFromUDP(buf)
+		if err != nil {
+			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
+				return
+			}
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				continue
+			}
+			log.Printf("[DIRECT] listener error: %v", err)
+			return
+		}
+		session := listener.sessionFor(ctx, remote, wgEndpoint, wgDev, keys)
+		if session == nil {
+			continue
+		}
+		payload := append([]byte(nil), buf[:n]...)
+		if !session.deliver(payload) {
+			listener.remove(session.key)
+		}
+	}
+}
+
+func (l *directUDPListener) sessionFor(ctx context.Context, remote *net.UDPAddr, wgEndpoint string, wgDev *device.Device, keys *wgKeys) *directSessionConn {
+	key := remote.String()
+	l.mu.Lock()
+	if existing := l.sessions[key]; existing != nil {
+		l.mu.Unlock()
+		return existing
+	}
+	session := &directSessionConn{
+		listener:   l,
+		remote:     cloneUDPAddr(remote),
+		key:        key,
+		in:         make(chan []byte, 128),
+		closed:     make(chan struct{}),
+		deadlineCh: make(chan struct{}, 1),
+	}
+	l.sessions[key] = session
+	l.mu.Unlock()
+
+	go func() {
+		defer session.Close()
+		handleConn(ctx, session, wgEndpoint, wgDev, keys)
+	}()
+	return session
+}
+
+func (l *directUDPListener) remove(key string) {
+	l.mu.Lock()
+	delete(l.sessions, key)
+	l.mu.Unlock()
+}
+
+func (c *directSessionConn) deliver(payload []byte) bool {
+	select {
+	case <-c.closed:
+		return false
+	case c.in <- payload:
+		return true
+	}
+}
+
+func (c *directSessionConn) Read(p []byte) (int, error) {
+	for {
+		readBy, _ := c.deadlines()
+		if readBy.IsZero() {
+			select {
+			case payload := <-c.in:
+				return copy(p, payload), nil
+			case <-c.closed:
+				return 0, net.ErrClosed
+			case <-c.deadlineCh:
+				continue
+			}
+		}
+		wait := time.Until(readBy)
+		if wait <= 0 {
+			return 0, directTimeoutError{}
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case payload := <-c.in:
+			timer.Stop()
+			return copy(p, payload), nil
+		case <-timer.C:
+			return 0, directTimeoutError{}
+		case <-c.closed:
+			timer.Stop()
+			return 0, net.ErrClosed
+		case <-c.deadlineCh:
+			timer.Stop()
+			continue
+		}
+	}
+}
+
+func (c *directSessionConn) Write(p []byte) (int, error) {
+	_, writeBy := c.deadlines()
+	if !writeBy.IsZero() && time.Now().After(writeBy) {
+		return 0, directTimeoutError{}
+	}
+	select {
+	case <-c.closed:
+		return 0, net.ErrClosed
+	default:
+	}
+	if _, err := c.listener.conn.WriteToUDP(p, c.remote); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+func (c *directSessionConn) Close() error {
+	c.closeOnce.Do(func() {
+		close(c.closed)
+		c.listener.remove(c.key)
+	})
+	return nil
+}
+
+func (c *directSessionConn) LocalAddr() net.Addr  { return c.listener.conn.LocalAddr() }
+func (c *directSessionConn) RemoteAddr() net.Addr { return c.remote }
+
+func (c *directSessionConn) SetDeadline(t time.Time) error {
+	c.deadlineMu.Lock()
+	c.readBy = t
+	c.writeBy = t
+	c.deadlineMu.Unlock()
+	c.notifyDeadlineChange()
+	return nil
+}
+
+func (c *directSessionConn) SetReadDeadline(t time.Time) error {
+	c.deadlineMu.Lock()
+	c.readBy = t
+	c.deadlineMu.Unlock()
+	c.notifyDeadlineChange()
+	return nil
+}
+
+func (c *directSessionConn) SetWriteDeadline(t time.Time) error {
+	c.deadlineMu.Lock()
+	c.writeBy = t
+	c.deadlineMu.Unlock()
+	c.notifyDeadlineChange()
+	return nil
+}
+
+func (c *directSessionConn) deadlines() (time.Time, time.Time) {
+	c.deadlineMu.RLock()
+	defer c.deadlineMu.RUnlock()
+	return c.readBy, c.writeBy
+}
+
+func (c *directSessionConn) notifyDeadlineChange() {
+	select {
+	case c.deadlineCh <- struct{}{}:
+	default:
+	}
+}
+
+func cloneUDPAddr(addr *net.UDPAddr) *net.UDPAddr {
+	if addr == nil {
+		return nil
+	}
+	return &net.UDPAddr{
+		IP:   append(net.IP(nil), addr.IP...),
+		Port: addr.Port,
+		Zone: addr.Zone,
+	}
+}
+
 const (
 	wrapNonceLen = 12
 	wrapKeyLen   = 32
@@ -3231,6 +3606,43 @@ type ObfsConfig struct {
 }
 
 var aeadCache sync.Map
+var wrapCredentialBindings sync.Map
+
+func wrapConnectionBindingID(local, remote net.Addr) string {
+	if local == nil || remote == nil {
+		return ""
+	}
+	return local.String() + "|" + remote.String()
+}
+
+func connectionCredentialMatches(conn net.Conn, password string) bool {
+	if conn == nil || password == "" {
+		return false
+	}
+	bindingID := wrapConnectionBindingID(conn.LocalAddr(), conn.RemoteAddr())
+	if bindingID == "" {
+		return false
+	}
+	if value, ok := wrapCredentialBindings.Load(bindingID); ok {
+		stored, _ := value.(string)
+		// Generated credentials are indexed by their deterministic WRAP id.
+		// The main server password intentionally uses the dedicated `main`
+		// key id in wrapKeyStore.SetPasswords; treating it as a generated
+		// password here caused valid main-password RAW AUTH to be rejected
+		// with DENIED:wrong_password before rawAuthorizeConnection ran.
+		if stored == "pass:"+wrapKeyID(password) {
+			return true
+		}
+		if stored == "main" {
+			dbMutex.Lock()
+			isMain := db != nil && password == db.MainPassword
+			dbMutex.Unlock()
+			return isMain
+		}
+		return false
+	}
+	return true
+}
 
 func getAEAD(key []byte) (cipher.AEAD, error) {
 	if len(key) != wrapKeyLen {
@@ -3338,6 +3750,13 @@ func obfsUnwrapPacket(key, wire, dst []byte) (int, error) {
 	if (wire[0] >> 6) != 2 {
 		return 0, errors.New("obfs: not RTP v2")
 	}
+	headerLen := 12
+	if wire[0]&0x10 != 0 {
+		headerLen = 24
+	}
+	if len(wire) < headerLen+1 {
+		return 0, errors.New("obfs: packet too short for declared extension")
+	}
 	seq := binary.BigEndian.Uint16(wire[2:4])
 	ts := binary.BigEndian.Uint32(wire[4:8])
 	ssrc := binary.BigEndian.Uint32(wire[8:12])
@@ -3345,12 +3764,12 @@ func obfsUnwrapPacket(key, wire, dst []byte) (int, error) {
 	payloadEnd := len(wire)
 	if wire[0]&0x20 != 0 {
 		padLen := int(wire[len(wire)-1])
-		if padLen == 0 || padLen > payloadEnd-12 {
+		if padLen == 0 || padLen > payloadEnd-headerLen {
 			return 0, fmt.Errorf("obfs: invalid padding length %d", padLen)
 		}
 		payloadEnd -= padLen
 	}
-	ciphertextLen := payloadEnd - 12
+	ciphertextLen := payloadEnd - headerLen
 	if ciphertextLen <= chacha20poly1305.Overhead {
 		return 0, errors.New("obfs: no payload")
 	}
@@ -3362,7 +3781,7 @@ func obfsUnwrapPacket(key, wire, dst []byte) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("obfs: cipher init: %w", err)
 	}
-	plain, err := aead.Open(dst[:0], nonce, wire[12:payloadEnd], wire[:12])
+	plain, err := aead.Open(dst[:0], nonce, wire[headerLen:payloadEnd], wire[:headerLen])
 	if err != nil {
 		return 0, fmt.Errorf("obfs: auth: %w", err)
 	}
@@ -3376,7 +3795,7 @@ func obfsIsRTPPacket(wire []byte) bool {
 		return false
 	}
 	pt := wire[1] & 0x7F
-	return pt == 111
+	return pt == 111 || pt == 96
 }
 
 func listenWrapped(addr *net.UDPAddr, keys *wrapKeyStore) (dtlsnet.PacketListener, error) {
@@ -3391,6 +3810,13 @@ func listenWrapped(addr *net.UDPAddr, keys *wrapKeyStore) (dtlsnet.PacketListene
 		inner: dtlsnet.PacketListenerFromListener(inner),
 		keys:  keys,
 	}, nil
+}
+
+// listenDirectWrapped сохраняет протокольный контракт Direct: RTP-AEAD
+// расшифровывается до обработки AUTH/GETCONF, но DTLS не поднимается.
+// Отдельная функция делает это требование явным и проверяемым тестом.
+func listenDirectWrapped(addr *net.UDPAddr, keys *wrapKeyStore) (dtlsnet.PacketListener, error) {
+	return listenWrapped(addr, keys)
 }
 
 type wrapPacketListener struct {
@@ -3413,6 +3839,7 @@ type wrapPacketConn struct {
 	inner     net.PacketConn
 	keys      *wrapKeyStore
 	key       []byte
+	bindingID string
 	selected  int32
 	authLog   int32
 	obfsCfg   *ObfsConfig
@@ -3429,7 +3856,7 @@ func (c *wrapPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
 	raw := buf[:n]
 
 	if atomic.LoadInt32(&c.selected) == 0 {
-		key, m, uErr := c.keys.Unwrap(raw, p)
+		key, keyID, m, uErr := c.keys.Unwrap(raw, p)
 		if uErr != nil {
 			if atomic.CompareAndSwapInt32(&c.authLog, 0, 1) {
 				log.Printf("[WRAP] Отказ: RTP AEAD auth failed from %s (keys=%d)", addr.String(), c.keys.Count())
@@ -3437,6 +3864,10 @@ func (c *wrapPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
 			return 0, addr, uErr
 		}
 		c.key = append([]byte(nil), key...) // Клонируем ключ в независимую память!
+		c.bindingID = wrapConnectionBindingID(c.inner.LocalAddr(), addr)
+		if c.bindingID != "" {
+			wrapCredentialBindings.Store(c.bindingID, keyID)
+		}
 		c.obfsCfg = NewObfsConfig()
 		c.obfsWrite = NewObfsState()
 		atomic.StoreInt32(&c.selected, 1)
@@ -3450,9 +3881,15 @@ func (c *wrapPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
 	if uErr != nil {
 		// Если расшифровка старым ключом провалилась — возможно, пароль обновился!
 		// Пробуем пере-верифицировать пакет по всем активным ключам
-		key, m2, uErr2 := c.keys.Unwrap(raw, p)
+		key, keyID, m2, uErr2 := c.keys.Unwrap(raw, p)
 		if uErr2 == nil {
 			c.key = append([]byte(nil), key...) // На лету обновляем ключ сессии!
+			if c.bindingID == "" {
+				c.bindingID = wrapConnectionBindingID(c.inner.LocalAddr(), addr)
+			}
+			if c.bindingID != "" {
+				wrapCredentialBindings.Store(c.bindingID, keyID)
+			}
 			c.obfsCfg = NewObfsConfig()
 			c.obfsWrite = NewObfsState()
 			log.Printf("[WRAP] Обновлен ключ на лету для %s (пароль изменился/обновился)", addr.String())
@@ -3481,7 +3918,12 @@ func (c *wrapPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 	return len(p), nil
 }
 
-func (c *wrapPacketConn) Close() error                       { return c.inner.Close() }
+func (c *wrapPacketConn) Close() error {
+	if c.bindingID != "" {
+		wrapCredentialBindings.Delete(c.bindingID)
+	}
+	return c.inner.Close()
+}
 func (c *wrapPacketConn) LocalAddr() net.Addr                { return c.inner.LocalAddr() }
 func (c *wrapPacketConn) SetDeadline(t time.Time) error      { return c.inner.SetDeadline(t) }
 func (c *wrapPacketConn) SetReadDeadline(t time.Time) error  { return c.inner.SetReadDeadline(t) }

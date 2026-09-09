@@ -541,7 +541,7 @@ object VkAuthWebViewManager {
                         fun onTurnServer(json: String) {
                             val creds = parseTurnJson(json)
                             if (creds == null) {
-                                logAuth("Неполный turn_server: $json", isError = true)
+                                logAuth("Неполный turn_server", isError = true)
                                 return
                             }
                             logAuth("TURN получены")
@@ -1472,7 +1472,7 @@ class VkAuthActivity : ComponentActivity() {
                 if (url.isNotBlank()) urls.add(url)
             }
             if (user.isBlank() || pass.isBlank() || urls.isEmpty()) {
-                VkAuthWebViewManager.logAuth("Неполный turn_server: $json", isError = true)
+                VkAuthWebViewManager.logAuth("Неполный turn_server", isError = true)
                 return
             }
             VkAuthWebViewManager.logAuth("TURN получены")

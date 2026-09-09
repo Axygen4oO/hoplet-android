@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"strings"
@@ -102,8 +101,7 @@ func editCabinetTelegram(token string, chatID int64, messageID int, text string,
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		log.Printf("[CABINET] edit message failed: status=%d body=%s", resp.StatusCode, string(respBody))
+		log.Printf("[CABINET] edit message failed: status=%d", resp.StatusCode)
 	}
 }
 

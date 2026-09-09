@@ -7,14 +7,33 @@
 #  WG:   порт 56001 (не конфликтует с существующим WG на 51820)
 #  DTLS: порт 56000
 # ==============================================================================
-set -uo pipefail
+set -euo pipefail
+
+STAGED_BINARY=""
+STAGED_UNIT=""
+cleanup_staged_binary() {
+    if [ -n "$STAGED_BINARY" ]; then
+        if ! rm -f -- "$STAGED_BINARY" 2>/dev/null; then
+            echo "[!] Не удалось удалить временный файл бинарника: $STAGED_BINARY" >&2
+        fi
+    fi
+    if [ -n "$STAGED_UNIT" ]; then
+        if ! rm -f -- "$STAGED_UNIT" 2>/dev/null; then
+            echo "[!] Не удалось удалить временный unit-файл: $STAGED_UNIT" >&2
+        fi
+    fi
+}
+trap cleanup_staged_binary EXIT
 
 readonly SCRIPT_VERSION="3.2"
 readonly LOG_FILE="/var/log/wdtt-install.log"
 readonly WG_PORT="${WDTT_WG_PORT:-56001}"
 readonly DTLS_PORT="${WDTT_DTLS_PORT:-56000}"
+readonly DIRECT_PORT="${WDTT_DIRECT_PORT:-56002}"
+readonly RAW_PORT="${WDTT_RAW_PORT:-56003}"
 readonly SSH_PORT="${WDTT_SSH_PORT:-22}"
 readonly WDTT_ARGS="${WDTT_ARGS:-}"
+readonly WDTT_SERVER_SHA256="${WDTT_SERVER_SHA256:-}"
 readonly WDTT_IFACE="wdtt0"
 readonly WDTT_CONFIG_DIR="/etc/wdtt"
 readonly WDTT_ACCESS_DB="passwords.json"
@@ -44,10 +63,47 @@ die() { log_error "$*"; exit 1; }
 
 prog() { echo "WDTT_PROGRESS|$1|$2"; }
 
+NEW_SERVER_SHA256=""
+
+server_sha256() {
+    sha256sum "$1" | awk '{print $1}'
+}
+
+validate_server_binary() {
+    local path="$1" expected_sha="${2:-}"
+    local magic elf_class elf_data machine actual_sha
+
+    [ -f "$path" ] || die "server binary not found: $path"
+    [ -s "$path" ] || die "server binary is empty: $path"
+    command -v od >/dev/null 2>&1 || die "Команда od нужна для проверки ELF."
+    command -v sha256sum >/dev/null 2>&1 || die "Команда sha256sum нужна для проверки бинарника."
+
+    magic=$(od -An -tx1 -N4 "$path" | tr -d '[:space:]')
+    elf_class=$(od -An -tx1 -j4 -N1 "$path" | tr -d '[:space:]')
+    elf_data=$(od -An -tx1 -j5 -N1 "$path" | tr -d '[:space:]')
+    machine=$(od -An -tx1 -j18 -N2 "$path" | tr -d '[:space:]')
+    [ "$magic" = "7f454c46" ] || die "invalid ELF binary"
+    [ "$elf_class" = "02" ] || die "invalid ELF64 binary"
+    [ "$elf_data" = "01" ] || die "invalid ELF byte order"
+    [ "$machine" = "3e00" ] || die "invalid ELF architecture (amd64/x86-64 required)"
+
+    actual_sha=$(server_sha256 "$path") || die "Не удалось вычислить SHA-256: $path"
+    if [ -n "$expected_sha" ]; then
+        case "$expected_sha" in
+            *[!0-9A-Fa-f]*|'') die "WDTT_SERVER_SHA256 должен быть SHA-256 в hex-формате." ;;
+        esac
+        [ "${#expected_sha}" -eq 64 ] || die "WDTT_SERVER_SHA256 должен содержать 64 hex-символа."
+        [ "$(printf '%s' "$expected_sha" | tr 'A-F' 'a-f')" = "$actual_sha" ] || \
+            die "server SHA256 mismatch"
+    fi
+    NEW_SERVER_SHA256="$actual_sha"
+    log_info "Новый wdtt-server проверен: ELF64 amd64, SHA-256 $actual_sha"
+}
+
 # ─── Проверка root ────────────────────────────────────────────────────────────
 check_root() {
     if [ "$(id -u)" -ne 0 ]; then
-        die "Скрипт должен быть запущен от root. Если sudo отсутствует, зайдите под root и запустите: bash $0 $*"
+        die "Скрипт должен быть запущен от root. Запустите установщик от root."
     fi
 }
 
@@ -81,11 +137,11 @@ pkg_update() {
     case "$PKG_MGR" in
         apt)
             export DEBIAN_FRONTEND=noninteractive
-            apt-get update -y >>"$LOG_FILE" 2>&1 || log_warn "apt update завершился с ошибкой, пробую продолжить"
+            apt-get update -y >>"$LOG_FILE" 2>&1 || die "apt package index update failed"
             ;;
-        dnf)    dnf makecache -y >>"$LOG_FILE" 2>&1 || true ;;
-        yum)    yum makecache -y >>"$LOG_FILE" 2>&1 || true ;;
-        pacman) pacman -Sy --noconfirm >>"$LOG_FILE" 2>&1 || true ;;
+        dnf)    dnf makecache -y >>"$LOG_FILE" 2>&1 || die "dnf package index update failed" ;;
+        yum)    yum makecache -y >>"$LOG_FILE" 2>&1 || die "yum package index update failed" ;;
+        pacman) pacman -Sy --noconfirm >>"$LOG_FILE" 2>&1 || die "pacman package index update failed" ;;
     esac
     pkg_update_done=1
 }
@@ -110,16 +166,13 @@ install_prerequisites() {
 
     case "$PKG_MGR" in
         apt)
-            pkg_install ca-certificates iproute2 iptables nftables procps psmisc || \
-                log_warn "Часть apt-пакетов не установилась, продолжаю с доступными утилитами"
+            pkg_install ca-certificates iproute2 iptables nftables procps psmisc
             ;;
         dnf|yum)
-            pkg_install ca-certificates iproute iptables nftables procps-ng psmisc || \
-                log_warn "Часть rpm-пакетов не установилась, продолжаю с доступными утилитами"
+            pkg_install ca-certificates iproute iptables nftables procps-ng psmisc
             ;;
         pacman)
-            pkg_install ca-certificates iproute2 iptables nftables procps-ng psmisc || \
-                log_warn "Часть pacman-пакетов не установилась, продолжаю с доступными утилитами"
+            pkg_install ca-certificates iproute2 iptables nftables procps-ng psmisc
             ;;
     esac
 }
@@ -149,8 +202,11 @@ iptables_add_input() {
         *) return 0 ;;
     esac
     [ "$port" -ge 1 ] 2>/dev/null && [ "$port" -le 65535 ] 2>/dev/null || return 0
-    iptables -C INPUT -p "$proto" --dport "$port" -m comment --comment "$comment" -j ACCEPT 2>/dev/null || \
-        iptables -I INPUT -p "$proto" --dport "$port" -m comment --comment "$comment" -j ACCEPT 2>/dev/null || true
+    if iptables -C INPUT -p "$proto" --dport "$port" -m comment --comment "$comment" -j ACCEPT 2>/dev/null; then
+        return 0
+    fi
+    iptables -I INPUT -p "$proto" --dport "$port" -m comment --comment "$comment" -j ACCEPT 2>/dev/null || \
+        die "failed to add firewall rule for $port/$proto"
 }
 
 mirror_port_to_iptables() {
@@ -166,12 +222,17 @@ mirror_existing_firewall_ports_to_iptables() {
 
     if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi "Status: active"; then
         log_info "UFW активен: переношу разрешённые tcp/udp порты в iptables"
-        ufw status 2>/dev/null | sed -nE 's#^([0-9]{1,5})/(tcp|udp)[[:space:]].*ALLOW IN.*#\2 \1 ufw#p' >> "$tmp" || true
+        if ! ufw status 2>/dev/null | sed -nE 's#^([0-9]{1,5})/(tcp|udp)[[:space:]].*ALLOW IN.*#\2 \1 ufw#p' >> "$tmp"; then
+            log_warn "Не удалось прочитать правила UFW; перенос пропущен"
+        fi
     fi
 
     if command -v nft >/dev/null 2>&1; then
         local nft_ports
-        nft_ports="$(nft -a list ruleset 2>/dev/null | sed -nE 's/.*(tcp|udp) dport ([0-9]{1,5}).*accept.*/\1 \2 nft/p' | sort -u || true)"
+        if ! nft_ports="$(nft -a list ruleset 2>/dev/null | sed -nE 's/.*(tcp|udp) dport ([0-9]{1,5}).*accept.*/\1 \2 nft/p' | sort -u)"; then
+            log_warn "Не удалось прочитать правила nftables; перенос пропущен"
+            nft_ports=""
+        fi
         if [ -n "$nft_ports" ]; then
             log_info "nftables найден: переношу простые accept dport правила в iptables"
             printf '%s\n' "$nft_ports" >> "$tmp"
@@ -192,7 +253,7 @@ detect_firewall() {
     if ! command -v iptables &>/dev/null; then
         log_warn "iptables не найден. Пытаюсь установить firewall-пакеты..."
         pkg_update
-        pkg_install iptables nftables || true
+        pkg_install iptables nftables
     fi
     if command -v iptables &>/dev/null; then
         FW_BACKEND="iptables"
@@ -209,12 +270,11 @@ fw_add_input_udp() {
     local port="$1"
     case "$FW_BACKEND" in
         iptables)
-            iptables -C INPUT -p udp --dport "$port" -m comment --comment "$IPT_COMMENT" -j ACCEPT 2>/dev/null || \
-                iptables -I INPUT -p udp --dport "$port" -m comment --comment "$IPT_COMMENT" -j ACCEPT 2>/dev/null || true
+            iptables_add_input udp "$port" "$IPT_COMMENT"
             ;;
         nft)
             ensure_nft_wdtt
-            nft add rule inet wdtt input udp dport "$port" accept 2>/dev/null || true
+            nft add rule inet wdtt input udp dport "$port" accept 2>/dev/null || die "failed to add nftables UDP input rule"
             ;;
         none) ;;
     esac
@@ -224,12 +284,11 @@ fw_add_input_tcp() {
     local port="$1"
     case "$FW_BACKEND" in
         iptables)
-            iptables -C INPUT -p tcp --dport "$port" -m comment --comment "$IPT_COMMENT" -j ACCEPT 2>/dev/null || \
-                iptables -I INPUT -p tcp --dport "$port" -m comment --comment "$IPT_COMMENT" -j ACCEPT 2>/dev/null || true
+            iptables_add_input tcp "$port" "$IPT_COMMENT"
             ;;
         nft)
             ensure_nft_wdtt
-            nft add rule inet wdtt input tcp dport "$port" accept 2>/dev/null || true
+            nft add rule inet wdtt input tcp dport "$port" accept 2>/dev/null || die "failed to add nftables TCP input rule"
             ;;
         none) ;;
     esac
@@ -246,15 +305,19 @@ fw_add_input_udp_range() {
 fw_add_forward() {
     case "$FW_BACKEND" in
         iptables)
-            iptables -C FORWARD -i "$WDTT_IFACE" -m comment --comment "$IPT_COMMENT" -j ACCEPT 2>/dev/null || \
-                iptables -I FORWARD -i "$WDTT_IFACE" -m comment --comment "$IPT_COMMENT" -j ACCEPT 2>/dev/null || true
-            iptables -C FORWARD -o "$WDTT_IFACE" -m comment --comment "$IPT_COMMENT" -j ACCEPT 2>/dev/null || \
-                iptables -I FORWARD -o "$WDTT_IFACE" -m comment --comment "$IPT_COMMENT" -j ACCEPT 2>/dev/null || true
+            if ! iptables -C FORWARD -i "$WDTT_IFACE" -m comment --comment "$IPT_COMMENT" -j ACCEPT 2>/dev/null; then
+                iptables -I FORWARD -i "$WDTT_IFACE" -m comment --comment "$IPT_COMMENT" -j ACCEPT 2>/dev/null || \
+                    die "failed to add WDTT forward rule (input)"
+            fi
+            if ! iptables -C FORWARD -o "$WDTT_IFACE" -m comment --comment "$IPT_COMMENT" -j ACCEPT 2>/dev/null; then
+                iptables -I FORWARD -o "$WDTT_IFACE" -m comment --comment "$IPT_COMMENT" -j ACCEPT 2>/dev/null || \
+                    die "failed to add WDTT forward rule (output)"
+            fi
             ;;
         nft)
             ensure_nft_wdtt
-            nft add rule inet wdtt forward iifname "$WDTT_IFACE" accept 2>/dev/null || true
-            nft add rule inet wdtt forward oifname "$WDTT_IFACE" accept 2>/dev/null || true
+            nft add rule inet wdtt forward iifname "$WDTT_IFACE" accept 2>/dev/null || die "failed to add nftables forward input rule"
+            nft add rule inet wdtt forward oifname "$WDTT_IFACE" accept 2>/dev/null || die "failed to add nftables forward output rule"
             ;;
         none) ;;
     esac
@@ -264,13 +327,19 @@ fw_add_masquerade() {
     local iface="$1" subnet="$2"
     case "$FW_BACKEND" in
         iptables)
-            iptables -t nat -C POSTROUTING -s "$subnet" -o "$iface" -m comment --comment "$IPT_COMMENT" -j MASQUERADE 2>/dev/null || \
-                iptables -t nat -A POSTROUTING -s "$subnet" -o "$iface" -m comment --comment "$IPT_COMMENT" -j MASQUERADE 2>/dev/null || true
+            if ! iptables -t nat -C POSTROUTING -s "$subnet" -o "$iface" -m comment --comment "$IPT_COMMENT" -j MASQUERADE 2>/dev/null; then
+                iptables -t nat -A POSTROUTING -s "$subnet" -o "$iface" -m comment --comment "$IPT_COMMENT" -j MASQUERADE 2>/dev/null || \
+                    die "failed to add WDTT masquerade rule"
+            fi
             ;;
         nft)
-            nft add table ip wdtt 2>/dev/null || true
-            nft add chain ip wdtt postrouting '{ type nat hook postrouting priority 100; }' 2>/dev/null || true
-            nft add rule ip wdtt postrouting ip saddr "$subnet" oifname "$iface" masquerade 2>/dev/null || true
+            if ! nft add table ip wdtt 2>/dev/null; then
+                nft list table ip wdtt >/dev/null 2>&1 || die "failed to create nftables NAT table"
+            fi
+            if ! nft add chain ip wdtt postrouting '{ type nat hook postrouting priority 100; }' 2>/dev/null; then
+                nft list chain ip wdtt postrouting >/dev/null 2>&1 || die "failed to create nftables NAT chain"
+            fi
+            nft add rule ip wdtt postrouting ip saddr "$subnet" oifname "$iface" masquerade 2>/dev/null || die "failed to add nftables masquerade rule"
             ;;
         none) ;;
     esac
@@ -281,16 +350,24 @@ fw_add_mss_clamping() {
     case "$FW_BACKEND" in
         iptables)
             # Применяем правило ТОЛЬКО к нашей подсети WDTT
-            iptables -t mangle -C FORWARD -s "$subnet" -p tcp -m tcp --tcp-flags SYN,RST SYN -m comment --comment "$IPT_COMMENT" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || \
-                iptables -t mangle -I FORWARD -s "$subnet" -p tcp -m tcp --tcp-flags SYN,RST SYN -m comment --comment "$IPT_COMMENT" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-            iptables -t mangle -C FORWARD -d "$subnet" -p tcp -m tcp --tcp-flags SYN,RST SYN -m comment --comment "$IPT_COMMENT" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || \
-                iptables -t mangle -I FORWARD -d "$subnet" -p tcp -m tcp --tcp-flags SYN,RST SYN -m comment --comment "$IPT_COMMENT" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+            if ! iptables -t mangle -C FORWARD -s "$subnet" -p tcp -m tcp --tcp-flags SYN,RST SYN -m comment --comment "$IPT_COMMENT" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; then
+                iptables -t mangle -I FORWARD -s "$subnet" -p tcp -m tcp --tcp-flags SYN,RST SYN -m comment --comment "$IPT_COMMENT" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || \
+                    die "failed to add TCPMSS rule (source)"
+            fi
+            if ! iptables -t mangle -C FORWARD -d "$subnet" -p tcp -m tcp --tcp-flags SYN,RST SYN -m comment --comment "$IPT_COMMENT" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; then
+                iptables -t mangle -I FORWARD -d "$subnet" -p tcp -m tcp --tcp-flags SYN,RST SYN -m comment --comment "$IPT_COMMENT" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || \
+                    die "failed to add TCPMSS rule (destination)"
+            fi
             ;;
         nft)
-            nft add table inet wdtt_mangle 2>/dev/null || true
-            nft add chain inet wdtt_mangle forward '{ type filter hook forward priority -150; policy accept; }' 2>/dev/null || true
-            nft add rule inet wdtt_mangle forward ip saddr "$subnet" tcp flags syn tcp option maxseg size set rt mtu 2>/dev/null || true
-            nft add rule inet wdtt_mangle forward ip daddr "$subnet" tcp flags syn tcp option maxseg size set rt mtu 2>/dev/null || true
+            if ! nft add table inet wdtt_mangle 2>/dev/null; then
+                nft list table inet wdtt_mangle >/dev/null 2>&1 || die "failed to create nftables mangle table"
+            fi
+            if ! nft add chain inet wdtt_mangle forward '{ type filter hook forward priority -150; policy accept; }' 2>/dev/null; then
+                nft list chain inet wdtt_mangle forward >/dev/null 2>&1 || die "failed to create nftables mangle chain"
+            fi
+            nft add rule inet wdtt_mangle forward ip saddr "$subnet" tcp flags syn tcp option maxseg size set rt mtu 2>/dev/null || die "failed to add nftables MSS source rule"
+            nft add rule inet wdtt_mangle forward ip daddr "$subnet" tcp flags syn tcp option maxseg size set rt mtu 2>/dev/null || die "failed to add nftables MSS destination rule"
             ;;
         none) ;;
     esac
@@ -312,6 +389,8 @@ fw_cleanup_wdtt_rules() {
             iptables -t mangle -D FORWARD -d 10.66.0.0/16 -p tcp -m tcp --tcp-flags SYN,RST SYN -m comment --comment "$IPT_COMMENT" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
             iptables -D INPUT -p udp --dport ${DTLS_PORT} -m comment --comment "$IPT_COMMENT" -j ACCEPT 2>/dev/null || true
             iptables -D INPUT -p tcp --dport ${DTLS_PORT} -m comment --comment "$IPT_COMMENT" -j ACCEPT 2>/dev/null || true
+            iptables -D INPUT -p udp --dport ${DIRECT_PORT} -m comment --comment "$IPT_COMMENT" -j ACCEPT 2>/dev/null || true
+            iptables -D INPUT -p udp --dport ${RAW_PORT} -m comment --comment "$IPT_COMMENT" -j ACCEPT 2>/dev/null || true
             iptables -D INPUT -p udp --dport ${WG_PORT} -m comment --comment "$IPT_COMMENT" -j ACCEPT 2>/dev/null || true
             iptables -D INPUT -p tcp --dport ${SSH_PORT} -m comment --comment "$IPT_COMMENT" -j ACCEPT 2>/dev/null || true
             iptables -D INPUT -p tcp --dport 22 -m comment --comment "$IPT_COMMENT" -j ACCEPT 2>/dev/null || true
@@ -327,9 +406,12 @@ fw_cleanup_wdtt_rules() {
 }
 
 cleanup_config_dir_keep_access_db() {
+    # Не удаляем существующую конфигурацию: неизвестные пользовательские
+    # файлы и каталоги должны переживать reinstall/uninstall.
     [ -d "$WDTT_CONFIG_DIR" ] || return 0
-    find "$WDTT_CONFIG_DIR" -mindepth 1 -maxdepth 1 ! -name "$WDTT_ACCESS_DB" -exec rm -rf {} + 2>/dev/null || true
-    [ -f "$WDTT_CONFIG_DIR/$WDTT_ACCESS_DB" ] && chmod 600 "$WDTT_CONFIG_DIR/$WDTT_ACCESS_DB" 2>/dev/null || true
+    if [ -f "$WDTT_CONFIG_DIR/$WDTT_ACCESS_DB" ]; then
+        chmod 600 "$WDTT_CONFIG_DIR/$WDTT_ACCESS_DB" || die "Не удалось защитить $WDTT_ACCESS_DB"
+    fi
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -341,20 +423,27 @@ wdtt_cleanup() {
     prog 0.05 "Очистка..."
     echo "🧹 Очистка старой установки Hoplet..."
 
-    systemctl unmask wdtt 2>/dev/null || true
-    systemctl stop wdtt 2>/dev/null || true
-    systemctl disable wdtt 2>/dev/null || true
-    rm -f /etc/systemd/system/wdtt.service 2>/dev/null || true
-    systemctl daemon-reload 2>/dev/null || true
-    pkill -x wdtt-server 2>/dev/null || killall wdtt-server 2>/dev/null || true
+    systemctl unmask wdtt >/dev/null 2>&1 || die "systemctl unmask failed"
+    if systemctl is-active --quiet wdtt 2>/dev/null; then
+        systemctl stop wdtt >/dev/null 2>&1 || die "systemctl stop failed"
+    fi
+    if systemctl is-enabled --quiet wdtt 2>/dev/null; then
+        systemctl disable wdtt >/dev/null 2>&1 || die "systemctl disable failed"
+    fi
+
+    # Оставляем существующий unit до успешной атомарной замены новым.
+    if pgrep -x wdtt-server >/dev/null 2>&1; then
+        pkill -x wdtt-server >/dev/null 2>&1 || die "failed to stop wdtt-server process"
+    fi
 
     # Удаляем только собственный интерфейс WDTT.
-    ip link show "$WDTT_IFACE" >/dev/null 2>&1 && ip link del "$WDTT_IFACE" 2>/dev/null || true
+    if ip link show "$WDTT_IFACE" >/dev/null 2>&1; then
+        ip link del "$WDTT_IFACE" >/dev/null 2>&1 || die "failed to remove existing WDTT interface"
+    fi
 
     # Удаляем старые правила NAT для WDTT подсети
     fw_cleanup_wdtt_rules "$(detect_wan_interface)"
 
-    rm -f /usr/local/bin/wdtt-server 2>/dev/null || true
     cleanup_config_dir_keep_access_db
 
     echo "✓ Очистка завершена (база доступа сохранена)"
@@ -365,13 +454,16 @@ setup_sysctl() {
     prog 0.20 "Sysctl..."
     echo "⚙️  Настройка сетевых параметров..."
 
-    echo 1 > /proc/sys/net/ipv4/ip_forward 2>/dev/null || true
-    mkdir -p /etc/sysctl.d
-    cat > /etc/sysctl.d/99-wdtt.conf << 'SYSEOF'
+    echo 1 > /proc/sys/net/ipv4/ip_forward 2>/dev/null || die "failed to enable IPv4 forwarding"
+    mkdir -p /etc/sysctl.d || die "failed to prepare sysctl directory"
+    if ! cat > /etc/sysctl.d/99-wdtt.conf << 'SYSEOF'
 net.ipv4.ip_forward = 1
 SYSEOF
+    then
+        die "failed to write sysctl configuration"
+    fi
 
-    sysctl -p /etc/sysctl.d/99-wdtt.conf >/dev/null 2>&1 || true
+    sysctl -p /etc/sysctl.d/99-wdtt.conf >/dev/null 2>&1 || die "failed to apply sysctl settings"
 
     echo "✓ Sysctl настроен"
 }
@@ -395,6 +487,8 @@ setup_nat_and_firewall() {
     # === WDTT порты ===
     fw_add_input_udp "$DTLS_PORT"   # 56000 — DTLS сервер
     fw_add_input_tcp "$DTLS_PORT"   # 56000 — API (TCP)
+    fw_add_input_udp "$DIRECT_PORT" # 56002 — Direct UDP
+    fw_add_input_udp "$RAW_PORT"    # 56003 — Raw TUN
     fw_add_input_udp "$WG_PORT"     # 56001 — WireGuard
     fw_add_input_tcp "$SSH_PORT"    # SSH порт, указанный пользователем в приложении
 
@@ -412,7 +506,7 @@ setup_nat_and_firewall() {
     else
         echo "✓ NAT: MASQUERADE на $iface для 10.66.0.0/16"
     fi
-    echo "✓ Порты: ${DTLS_PORT}/udp(DTLS), ${WG_PORT}/udp(WG), ${SSH_PORT}/tcp(SSH)"
+    echo "✓ Порты: ${DTLS_PORT}/udp(DTLS), ${DIRECT_PORT}/udp(Direct), ${RAW_PORT}/udp(Raw), ${WG_PORT}/udp(WG), ${SSH_PORT}/tcp(SSH)"
     echo "✓ TCP MSS Clamping включен"
 }
 
@@ -421,18 +515,20 @@ setup_wdtt_binary() {
     prog 0.60 "Бинарник..."
     echo "📦 Установка wdtt-server..."
 
-    if [ -f /tmp/wdtt-server ]; then
-        chmod +x /tmp/wdtt-server
-        install -m 0755 /tmp/wdtt-server /usr/local/bin/wdtt-server 2>/dev/null || mv /tmp/wdtt-server /usr/local/bin/wdtt-server
-        echo "✓ wdtt-server установлен"
-    elif [ -f /usr/local/bin/wdtt-server ]; then
-        echo "✓ wdtt-server уже установлен"
-    else
-        echo "⚠ wdtt-server не найден в /tmp/ — пропускаем"
-        echo "  Загрузите бинарник вручную в /usr/local/bin/wdtt-server"
-    fi
+    local staged_binary="/usr/local/bin/.wdtt-server.new"
+    STAGED_BINARY="$staged_binary"
+    rm -f -- "$staged_binary" || die "failed to prepare binary staging file"
+    install -m 0755 /tmp/wdtt-server "$staged_binary" || die "failed to stage server binary"
+    validate_server_binary "$staged_binary" "$NEW_SERVER_SHA256"
+    mv -f "$staged_binary" /usr/local/bin/wdtt-server || die "failed to install server binary"
+    STAGED_BINARY=""
+    chmod 0755 /usr/local/bin/wdtt-server || die "Не удалось установить права wdtt-server."
+    [ -f /usr/local/bin/wdtt-server ] || die "Установленный wdtt-server отсутствует."
+    [ "$(server_sha256 /usr/local/bin/wdtt-server)" = "$NEW_SERVER_SHA256" ] || \
+        die "post-install SHA mismatch"
+    echo "✓ wdtt-server установлен и проверен"
 
-    mkdir -p "$WDTT_CONFIG_DIR"
+    mkdir -p "$WDTT_CONFIG_DIR" || die "Не удалось подготовить каталог конфигурации"
 }
 
 # ─── Systemd-сервис WDTT ─────────────────────────────────────────────────────
@@ -440,7 +536,11 @@ setup_wdtt_service() {
     prog 0.75 "Сервис..."
     echo "🔧 Создание systemd-сервиса Hoplet..."
 
-    cat > /etc/systemd/system/wdtt.service << WDTTSVC
+    local unit_tmp="/etc/systemd/system/.wdtt.service.new"
+    STAGED_UNIT="$unit_tmp"
+    rm -f -- "$unit_tmp" || die "failed to prepare systemd unit staging file"
+
+    if ! cat > "$unit_tmp" << WDTTSVC
 [Unit]
 Description=Hoplet VPN Server
 After=network.target network-online.target
@@ -449,8 +549,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 ExecStartPre=-/usr/bin/env bash -c "ip link show ${WDTT_IFACE} >/dev/null 2>&1 && ip link del ${WDTT_IFACE} 2>/dev/null || true"
-ExecStartPre=-/usr/bin/env bash -c "if command -v iptables >/dev/null 2>&1; then iptables -C INPUT -p udp --dport ${DTLS_PORT} -m comment --comment ${IPT_COMMENT} -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport ${DTLS_PORT} -m comment --comment ${IPT_COMMENT} -j ACCEPT; iptables -C INPUT -p tcp --dport ${DTLS_PORT} -m comment --comment ${IPT_COMMENT} -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport ${DTLS_PORT} -m comment --comment ${IPT_COMMENT} -j ACCEPT; iptables -C INPUT -p udp --dport ${WG_PORT} -m comment --comment ${IPT_COMMENT} -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport ${WG_PORT} -m comment --comment ${IPT_COMMENT} -j ACCEPT; iptables -C INPUT -p tcp --dport ${SSH_PORT} -m comment --comment ${IPT_COMMENT} -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport ${SSH_PORT} -m comment --comment ${IPT_COMMENT} -j ACCEPT; fi"
-ExecStart=/usr/local/bin/wdtt-server -listen 0.0.0.0:${DTLS_PORT} -wg-port ${WG_PORT} -config-dir ${WDTT_CONFIG_DIR} ${WDTT_ARGS}
+ExecStartPre=-/usr/bin/env bash -c "if command -v iptables >/dev/null 2>&1; then iptables -C INPUT -p udp --dport ${DTLS_PORT} -m comment --comment ${IPT_COMMENT} -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport ${DTLS_PORT} -m comment --comment ${IPT_COMMENT} -j ACCEPT; iptables -C INPUT -p tcp --dport ${DTLS_PORT} -m comment --comment ${IPT_COMMENT} -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport ${DTLS_PORT} -m comment --comment ${IPT_COMMENT} -j ACCEPT; iptables -C INPUT -p udp --dport ${DIRECT_PORT} -m comment --comment ${IPT_COMMENT} -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport ${DIRECT_PORT} -m comment --comment ${IPT_COMMENT} -j ACCEPT; iptables -C INPUT -p udp --dport ${RAW_PORT} -m comment --comment ${IPT_COMMENT} -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport ${RAW_PORT} -m comment --comment ${IPT_COMMENT} -j ACCEPT; iptables -C INPUT -p udp --dport ${WG_PORT} -m comment --comment ${IPT_COMMENT} -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport ${WG_PORT} -m comment --comment ${IPT_COMMENT} -j ACCEPT; iptables -C INPUT -p tcp --dport ${SSH_PORT} -m comment --comment ${IPT_COMMENT} -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport ${SSH_PORT} -m comment --comment ${IPT_COMMENT} -j ACCEPT; fi"
+ExecStart=/usr/local/bin/wdtt-server -listen 0.0.0.0:${DTLS_PORT} -listen-direct 0.0.0.0:${DIRECT_PORT} -listen-raw 0.0.0.0:${RAW_PORT} -wg-port ${WG_PORT} -config-dir ${WDTT_CONFIG_DIR} ${WDTT_ARGS}
 Restart=always
 RestartSec=5
 LimitNOFILE=65535
@@ -458,10 +558,17 @@ LimitNOFILE=65535
 [Install]
 WantedBy=multi-user.target
 WDTTSVC
+    then
+        die "failed to create systemd unit"
+    fi
 
-    systemctl daemon-reload
-    systemctl unmask wdtt >/dev/null 2>&1 || true
-    systemctl enable wdtt >/dev/null 2>&1 || true
+    chmod 0644 "$unit_tmp" || die "failed to set systemd unit permissions"
+    mv -f -- "$unit_tmp" /etc/systemd/system/wdtt.service || die "failed to install systemd unit"
+    STAGED_UNIT=""
+
+    systemctl daemon-reload >>"$LOG_FILE" 2>&1 || die "systemctl daemon-reload failed"
+    systemctl unmask wdtt >/dev/null 2>&1 || die "systemctl unmask failed"
+    systemctl enable wdtt >/dev/null 2>&1 || die "systemctl enable failed"
     echo "✓ Сервис wdtt.service создан и включён"
 }
 
@@ -470,16 +577,31 @@ start_wdtt() {
     prog 0.90 "Запуск..."
     echo "🚀 Запуск Hoplet VPN Server..."
 
-    if [ ! -f /usr/local/bin/wdtt-server ]; then
-        echo "⚠ wdtt-server не установлен — запуск пропущен"
-        return 0
-    fi
+    [ -f /usr/local/bin/wdtt-server ] || die "wdtt-server не установлен."
+    [ "$(server_sha256 /usr/local/bin/wdtt-server)" = "$NEW_SERVER_SHA256" ] || \
+        die "SHA-256 установленного wdtt-server изменился до запуска."
 
-    systemctl restart wdtt
+    systemctl restart wdtt >>"$LOG_FILE" 2>&1 || die "systemctl restart failed"
 
     sleep 2
     local status
-    status=$(systemctl is-active wdtt 2>/dev/null || echo "unknown")
+    if ! status=$(systemctl is-active wdtt 2>/dev/null); then
+        case "$status" in
+            inactive|failed|activating|deactivating|unknown)
+                die "wdtt.service is not active"
+                ;;
+            *)
+                die "systemctl is-active failed"
+                ;;
+        esac
+    fi
+
+    [ "$(server_sha256 /usr/local/bin/wdtt-server)" = "$NEW_SERVER_SHA256" ] || \
+        die "post-start SHA mismatch"
+    [ "$status" = "active" ] || {
+        log_warn "wdtt.service неактивен; подробности доступны через journalctl -u wdtt"
+        die "wdtt.service is not active"
+    }
 
     prog 1.0 "Готово!"
 
@@ -490,12 +612,12 @@ start_wdtt() {
         echo "✅ Деплой успешно завершён!"
         echo "   NAT:  MASQUERADE (стандартный)"
         echo "   DTLS: порт ${DTLS_PORT}"
+        echo "   Direct: порт ${DIRECT_PORT}"
         echo "   WG:   порт ${WG_PORT}"
         echo "   SSH:  порт ${SSH_PORT}"
     else
         echo "⚠️ Сервис wdtt не запустился. Статус: $status"
-        echo "   Последние логи:"
-        journalctl -u wdtt -n 7 --no-pager 2>/dev/null | sed 's/^/   >> /'
+        echo "   Последние логи доступны через journalctl -u wdtt"
     fi
 
     echo "   Логи:   journalctl -u wdtt -f"
@@ -508,20 +630,30 @@ start_wdtt() {
 do_uninstall() {
     log_step "Удаление Hoplet..."
 
-    systemctl stop wdtt 2>/dev/null || true
-    systemctl disable wdtt 2>/dev/null || true
-    rm -f /etc/systemd/system/wdtt.service
-    systemctl daemon-reload
+    if systemctl is-active --quiet wdtt 2>/dev/null; then
+        systemctl stop wdtt >/dev/null 2>&1 || die "systemctl stop failed"
+    fi
+    if systemctl is-enabled --quiet wdtt 2>/dev/null; then
+        systemctl disable wdtt >/dev/null 2>&1 || die "systemctl disable failed"
+    fi
+    if [ -e /etc/systemd/system/wdtt.service ]; then
+        rm -f -- /etc/systemd/system/wdtt.service || die "failed to remove systemd unit"
+    fi
+    systemctl daemon-reload >>"$LOG_FILE" 2>&1 || die "systemctl daemon-reload failed"
 
-    ip link show "$WDTT_IFACE" >/dev/null 2>&1 && ip link del "$WDTT_IFACE" 2>/dev/null || true
-    pkill -x wdtt-server 2>/dev/null || true
+    if ip link show "$WDTT_IFACE" >/dev/null 2>&1; then
+        ip link del "$WDTT_IFACE" >/dev/null 2>&1 || die "failed to remove WDTT interface"
+    fi
+    if pgrep -x wdtt-server >/dev/null 2>&1; then
+        pkill -x wdtt-server >/dev/null 2>&1 || die "failed to stop wdtt-server process"
+    fi
 
     fw_cleanup_wdtt_rules "$(detect_wan_interface)"
 
     rm -f /usr/local/bin/wdtt-server
     cleanup_config_dir_keep_access_db
     rm -f /etc/sysctl.d/99-wdtt.conf
-    sysctl --system >/dev/null 2>&1 || true
+    sysctl --system >/dev/null 2>&1 || die "failed to reload sysctl settings"
 
     log_info "Hoplet удалён. База доступа сохранена: ${WDTT_CONFIG_DIR}/${WDTT_ACCESS_DB}"
 }
@@ -553,17 +685,27 @@ do_status() {
 main() {
     echo "╔══════════════════════════════════════════════════════════════╗"
     echo "║      Hoplet VPN Server — Installer v${SCRIPT_VERSION}                   ║"
-    echo "║       DTLS: ${DTLS_PORT}  |  WG: ${WG_PORT}  |  SSH: ${SSH_PORT}       ║"
+    echo "║   DTLS: ${DTLS_PORT}  |  Direct: ${DIRECT_PORT}  |  Raw: ${RAW_PORT}  |  WG: ${WG_PORT}  |  SSH: ${SSH_PORT}   ║"
     echo "╚══════════════════════════════════════════════════════════════╝"
 
     local action="${1:-install}"
     check_root
     validate_port "WDTT_DTLS_PORT" "$DTLS_PORT"
+    validate_port "WDTT_DIRECT_PORT" "$DIRECT_PORT"
+    validate_port "WDTT_RAW_PORT" "$RAW_PORT"
     validate_port "WDTT_WG_PORT" "$WG_PORT"
     validate_port "WDTT_SSH_PORT" "$SSH_PORT"
+    [ "$RAW_PORT" != "$DTLS_PORT" ] || die "WDTT_RAW_PORT должен отличаться от WDTT_DTLS_PORT"
+    [ "$RAW_PORT" != "$DIRECT_PORT" ] || die "WDTT_RAW_PORT должен отличаться от WDTT_DIRECT_PORT"
+    [ "$RAW_PORT" != "$WG_PORT" ] || die "WDTT_RAW_PORT должен отличаться от WDTT_WG_PORT"
 
-    mkdir -p "$(dirname "$LOG_FILE")"
-    echo "=== Hoplet Installer v${SCRIPT_VERSION} — $(date) ===" >> "$LOG_FILE"
+    mkdir -p "$(dirname "$LOG_FILE")" || die "failed to prepare installer log directory"
+    echo "=== Hoplet Installer v${SCRIPT_VERSION} — $(date) ===" >> "$LOG_FILE" || die "failed to write installer log"
+
+    case "$action" in
+        status|--status|-s|uninstall|--uninstall|-u) ;;
+        *) validate_server_binary /tmp/wdtt-server "$WDTT_SERVER_SHA256" ;;
+    esac
 
     detect_os
     install_prerequisites

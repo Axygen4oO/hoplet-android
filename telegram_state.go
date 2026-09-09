@@ -6,10 +6,14 @@ type TelegramState struct {
 	WaitingForLabel   bool
 	WaitingForPlan    bool
 
-	WaitingExtendDays bool
-	WaitingSetDays    bool
+	WaitingExtendDays     bool
+	WaitingSetDays        bool
+	WaitingUserExtendDays bool
+	WaitingUserMessage    bool
+	WaitingBulkExtendDays bool
 
-	TargetPassword string
+	TargetPassword           string
+	TargetUserSubscriptionID string
 
 	TempMaxDevs int
 	TempPorts   string
@@ -18,6 +22,12 @@ type TelegramState struct {
 
 	WizardDays    int
 	WizardDevices int
+
+	BulkExtendMessageID      int
+	BulkExtendDays           int64
+	BulkExtendIncludeActive  bool
+	BulkExtendIncludeBlocked bool
+	BulkExtendIncludeExpired bool
 
 	NotificationStage                      string
 	NotificationTitle                      string

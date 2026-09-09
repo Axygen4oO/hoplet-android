@@ -27,7 +27,9 @@ data class ConnectionProfile(
     val password: String,
     val trafficMb: Double = 0.0,
     val groupId: String = "",
-    val useGlobalHashes: Boolean = vkHashes.isBlank()
+    val useGlobalHashes: Boolean = vkHashes.isBlank(),
+    val directPort: Int = 56002,
+    val transportMode: TransportMode = TransportMode.NORMAL
 )
 
 data class ProfileGroup(
@@ -62,8 +64,10 @@ class ProfilesStore(context: Context) {
         private fun hashesKey(id: String) = stringPreferencesKey("profile_hashes_$id")
         private fun workersKey(id: String) = intPreferencesKey("profile_workers_$id")
         private fun portKey(id: String) = intPreferencesKey("profile_port_$id")
+        private fun directPortKey(id: String) = intPreferencesKey("profile_direct_port_$id")
         private fun passKey(id: String) = stringPreferencesKey("profile_pass_enc_$id")
         private fun useGlobalHashesKey(id: String) = booleanPreferencesKey("profile_use_global_hashes_$id")
+        private fun transportModeKey(id: String) = stringPreferencesKey("profile_transport_mode_$id")
         private fun trafficKey(id: String) = androidx.datastore.preferences.core.doublePreferencesKey("profile_traffic_$id")
         private fun groupIdKey(id: String) = stringPreferencesKey("profile_group_id_$id")
 
@@ -100,12 +104,18 @@ class ProfilesStore(context: Context) {
                 val hashes = prefs[hashesKey(id)] ?: ""
                 val workers = prefs[workersKey(id)] ?: 16
                 val port = prefs[portKey(id)] ?: 9000
+                val directPort = prefs[directPortKey(id)] ?: 56002
                 val enc = prefs[passKey(id)] ?: ""
                 val pass = secureStore.decrypt(enc) ?: ""
                 val traffic = prefs[trafficKey(id)] ?: 0.0
                 val groupId = prefs[groupIdKey(id)] ?: ""
                 val useGlobal = prefs[useGlobalHashesKey(id)] ?: true
-                list.add(ConnectionProfile(id, name, peer, hashes, workers, port, pass, traffic, groupId, useGlobal))
+                val transportMode = prefs[transportModeKey(id)]?.let(::normalizeTransportMode)
+                    ?: transportModeFromLegacy(
+                        prefs[booleanPreferencesKey("profile_direct_mode_$id")] == true,
+                        prefs[booleanPreferencesKey("profile_turn_tcp_$id")] == true
+                    )
+                list.add(ConnectionProfile(id, name, peer, hashes, workers, port, pass, traffic, groupId, useGlobal, directPort, transportMode))
             }
             list
         }
@@ -349,10 +359,14 @@ class ProfilesStore(context: Context) {
             prefs[hashesKey(profile.id)] = profile.vkHashes
             prefs[workersKey(profile.id)] = profile.workersPerHash
             prefs[portKey(profile.id)] = profile.listenPort
+            prefs[directPortKey(profile.id)] = profile.directPort
             prefs[passKey(profile.id)] = secureStore.encrypt(profile.password)
             prefs[trafficKey(profile.id)] = profile.trafficMb
             prefs[groupIdKey(profile.id)] = profile.groupId
             prefs[useGlobalHashesKey(profile.id)] = profile.useGlobalHashes
+            prefs[transportModeKey(profile.id)] = profile.transportMode.toPersistedValue()
+            prefs.remove(booleanPreferencesKey("profile_direct_mode_${profile.id}"))
+            prefs.remove(booleanPreferencesKey("profile_turn_tcp_${profile.id}"))
         }
     }
 
@@ -377,8 +391,12 @@ class ProfilesStore(context: Context) {
             prefs.remove(hashesKey(id))
             prefs.remove(workersKey(id))
             prefs.remove(portKey(id))
+            prefs.remove(directPortKey(id))
             prefs.remove(passKey(id))
             prefs.remove(useGlobalHashesKey(id))
+            prefs.remove(transportModeKey(id))
+            prefs.remove(booleanPreferencesKey("profile_direct_mode_$id"))
+            prefs.remove(booleanPreferencesKey("profile_turn_tcp_$id"))
             prefs.remove(trafficKey(id))
             prefs.remove(groupIdKey(id))
         }
@@ -439,7 +457,7 @@ class ProfilesStore(context: Context) {
 
     suspend fun createProfile(name: String, peer: String, vkHashes: String, workers: Int, listenPort: Int, password: String, groupId: String = ""): ConnectionProfile {
         val id = UUID.randomUUID().toString()
-        val p = ConnectionProfile(id, name, peer, vkHashes, workers, listenPort, password, 0.0, groupId)
+        val p = ConnectionProfile(id, name, peer, vkHashes, workers, listenPort, password, 0.0, groupId, transportMode = settings.transportMode.first())
         saveProfile(p)
         return p
     }
@@ -451,12 +469,18 @@ class ProfilesStore(context: Context) {
         val hashes = prefs[hashesKey(id)] ?: ""
         val workers = prefs[workersKey(id)] ?: 16
         val port = prefs[portKey(id)] ?: 9000
+        val directPort = prefs[directPortKey(id)] ?: 56002
         val enc = prefs[passKey(id)] ?: ""
         val pass = secureStore.decrypt(enc) ?: ""
         val traffic = prefs[trafficKey(id)] ?: 0.0
         val groupId = prefs[groupIdKey(id)] ?: ""
         val useGlobal = prefs[useGlobalHashesKey(id)] ?: hashes.isBlank()
-        return ConnectionProfile(id, name, peer, hashes, workers, port, pass, traffic, groupId, useGlobal)
+        val transportMode = prefs[transportModeKey(id)]?.let(::normalizeTransportMode)
+            ?: transportModeFromLegacy(
+                prefs[booleanPreferencesKey("profile_direct_mode_$id")] == true,
+                prefs[booleanPreferencesKey("profile_turn_tcp_$id")] == true
+            )
+        return ConnectionProfile(id, name, peer, hashes, workers, port, pass, traffic, groupId, useGlobal, directPort, transportMode)
     }
 
     suspend fun incrementProfileTraffic(id: String, additionalTrafficMb: Double) = withContext(Dispatchers.IO) {
@@ -503,9 +527,31 @@ class ProfilesStore(context: Context) {
         }
         val manualPorts = settings.manualPortsEnabled.first()
         val serverDtlsPort = if (manualPorts) settings.serverDtlsPort.first() else 56000
-        val peerWithPort = PeerAddress.ensurePort(p.peer, serverDtlsPort)
-        settings.save(peerWithPort, finalHashes, "", p.workersPerHash, "udp", p.listenPort)
+        val serverDirectPort = if (manualPorts) settings.serverDirectPort.first() else p.directPort
+        val activeMode = p.transportMode.resolveForRuntime()
+        val activeServerPort = if (activeMode.isDirect()) serverDirectPort else serverDtlsPort
+        val peerWithPort = PeerAddress.ensurePort(p.peer, activeServerPort)
+        settings.save(
+            peerWithPort,
+            finalHashes,
+            "",
+            p.workersPerHash,
+            "udp",
+            p.listenPort,
+            transportMode = p.transportMode
+        )
+        settings.savePorts(
+            serverDtlsPort,
+            settings.serverWgPort.first(),
+            serverDirectPort,
+            settings.serverRawPort.first(),
+            p.listenPort
+        )
+        // Пароль привязан к выбранному профилю. Пустое значение также
+        // сохраняем: после потери Keystore нельзя отправлять серверу пароль
+        // от предыдущего профиля.
         settings.saveConnectionPassword(p.password)
+        settings.saveTransportMode(p.transportMode)
         settings.saveCurrentProfile(p.id, p.name)
     }
 }

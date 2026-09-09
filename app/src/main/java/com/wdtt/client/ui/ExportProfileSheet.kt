@@ -52,7 +52,7 @@ fun ExportProfileSheet(
         val peerEsc = URLEncoder.encode(exportPeer, "UTF-8")
         val hashesEsc = URLEncoder.encode(profile.vkHashes, "UTF-8")
         val passEsc = URLEncoder.encode(profile.password, "UTF-8")
-        "qwdtt://config?name=$nameEsc&peer=$peerEsc&hashes=$hashesEsc&workers=${profile.workersPerHash}&port=${profile.listenPort}&pass=$passEsc"
+        "qwdtt://config?name=$nameEsc&peer=$peerEsc&hashes=$hashesEsc&workers=${profile.workersPerHash}&port=${profile.listenPort}&directPort=${profile.directPort}&pass=$passEsc"
     }
 
     LaunchedEffect(link) {
@@ -76,6 +76,7 @@ fun ExportProfileSheet(
                         "vkHashes": "${profile.vkHashes.replace("\"", "\\\"")}",
                         "workersPerHash": ${profile.workersPerHash},
                         "listenPort": ${profile.listenPort},
+                        "directPort": ${profile.directPort},
                         "password": "${profile.password.replace("\"", "\\\"")}"
                     }
                 """.trimIndent()

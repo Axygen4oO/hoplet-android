@@ -40,11 +40,11 @@ var (
 	reCaptchaV2DebugInfo  = regexp.MustCompile(`debug_info:(?:[^"]*\|\|)?"([a-fA-F0-9]{64})"`)
 	reCaptchaV2Version    = regexp.MustCompile(`vkid/([0-9.]*)/not_robot_captcha\.js`)
 
-	errCaptchaV2RateLimit      = errors.New("captcha session rate limit reached")
-	errCaptchaV2Bot            = errors.New("captcha bot challenge")
-	errCaptchaSessionExpired     = errors.New("captcha session expired, need fresh challenge")
+	errCaptchaV2RateLimit    = errors.New("captcha session rate limit reached")
+	errCaptchaV2Bot          = errors.New("captcha bot challenge")
+	errCaptchaSessionExpired = errors.New("captcha session expired, need fresh challenge")
 
-	captchaV2MaxAttempts = 2
+	captchaV2MaxAttempts     = 2
 	captchaV2MaxSliderChecks = 2
 
 	captchaV2DebugCache  sync.Map // scriptURL -> string
@@ -546,7 +546,7 @@ func (s *captchaV2Session) performCaptchaCheck(
 func parseCaptchaV2Check(raw map[string]any) (*captchaV2Check, error) {
 	resp, ok := raw["response"].(map[string]any)
 	if !ok {
-		return nil, fmt.Errorf("invalid captcha check response: %v", raw)
+		return nil, errors.New("invalid captcha check response")
 	}
 	out := &captchaV2Check{
 		Status:       captchaV2StringifyAny(resp["status"]),
@@ -554,7 +554,7 @@ func parseCaptchaV2Check(raw map[string]any) (*captchaV2Check, error) {
 		ShowType:     captchaV2StringifyAny(resp["show_captcha_type"]),
 	}
 	if out.Status == "" {
-		return nil, fmt.Errorf("captcha check status missing: %v", raw)
+		return nil, errors.New("captcha check status missing")
 	}
 	return out, nil
 }
@@ -758,13 +758,13 @@ func (e *VkCaptchaError) Error() string {
 		return fmt.Sprintf("VK API error %d", e.ErrorCode)
 	}
 	if e.RedirectURI != "" {
-		return fmt.Sprintf("VK captcha required: redirect_uri, sid=%q", e.CaptchaSid)
+		return "VK captcha required: redirect_uri, sid_present=true"
 	}
 	if e.CaptchaImg != "" {
-		return fmt.Sprintf("VK captcha required: captcha_img, sid=%q", e.CaptchaSid)
+		return "VK captcha required: captcha_img, sid_present=true"
 	}
 	if e.CaptchaSid != "" {
-		return fmt.Sprintf("VK captcha required: sid=%q", e.CaptchaSid)
+		return "VK captcha required: sid_present=true"
 	}
 	if e.ErrorMsg != "" {
 		return fmt.Sprintf("VK captcha required: %s", e.ErrorMsg)

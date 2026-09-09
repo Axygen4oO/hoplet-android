@@ -1,9 +1,17 @@
 import java.util.Properties
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import org.gradle.api.tasks.Exec
+import org.gradle.api.GradleException
 
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
+}
+
+val isWindows = System.getProperty("os.name").startsWith("Windows", ignoreCase = true)
+val isBundleBuild = gradle.startParameter.taskNames.any {
+    it.substringAfterLast(':').startsWith("bundle", ignoreCase = true)
 }
 
 android {
@@ -14,8 +22,8 @@ android {
         applicationId = "net.qwdtt.client"
         minSdk = 28
         targetSdk = 35
-        versionCode = 42
-        versionName = "1.4.5"
+        versionCode = 46
+        versionName = "1.4.9"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -29,7 +37,9 @@ android {
 
     splits {
         abi {
-            isEnable = true
+            // AAB already splits native libraries by ABI. AGP cannot consume the
+            // multiple shrink-resource outputs produced by APK ABI splits here.
+            isEnable = !isBundleBuild
             reset()
             include("arm64-v8a", "armeabi-v7a", "x86_64")
             isUniversalApk = true
@@ -53,19 +63,26 @@ android {
                 } else {
                     file(keyFile)
                 }
-                if (resolvedFile.exists()) {
-                    storeFile = resolvedFile
-                    storePassword = localProperties.getProperty("KEYSTORE_PASSWORD")
-                    keyAlias = localProperties.getProperty("KEY_ALIAS")
-                    keyPassword = localProperties.getProperty("KEY_PASSWORD")
-                } else {
-                    println("WARNING: Keystore file not found: $keyFile (resolved: ${resolvedFile.absolutePath})")
-                }
+                storeFile = resolvedFile
             }
+            storePassword = localProperties.getProperty("KEYSTORE_PASSWORD")
+            keyAlias = localProperties.getProperty("KEY_ALIAS")
+            keyPassword = localProperties.getProperty("KEY_PASSWORD")
             enableV1Signing = true
             enableV2Signing = true
             enableV3Signing = true
         }
+    }
+
+    val releaseSigningReady = run {
+        val keyFile = localProperties.getProperty("KEYSTORE_FILE")
+        val resolvedFile = keyFile?.let {
+            if (it.startsWith("..")) file(rootDir.resolve(it.substring(3))) else file(it)
+        }
+        resolvedFile?.exists() == true &&
+            !localProperties.getProperty("KEYSTORE_PASSWORD").isNullOrBlank() &&
+            !localProperties.getProperty("KEY_ALIAS").isNullOrBlank() &&
+            !localProperties.getProperty("KEY_PASSWORD").isNullOrBlank()
     }
 
     buildTypes {
@@ -77,18 +94,13 @@ android {
                 "proguard-rules.pro"
             )
             val keyFile = localProperties.getProperty("KEYSTORE_FILE")
-            val resolvedFile = if (keyFile != null && keyFile.startsWith("..")) {
-                file(rootDir.resolve(keyFile.substring(3)))
-            } else if (keyFile != null) {
-                file(keyFile)
-            } else null
-            
-            if (resolvedFile != null && resolvedFile.exists()) {
+            val resolvedFile = keyFile?.let {
+                if (it.startsWith("..")) file(rootDir.resolve(it.substring(3))) else file(it)
+            }
+            if (releaseSigningReady) {
                 signingConfig = signingConfigs.getByName("release")
-                println("✅ Signing config applied: ${resolvedFile.absolutePath}")
-            } else {
-                println("⚠️ WARNING: Keystore not found, using debug signing")
-                println("   Looked for: ${resolvedFile?.absolutePath ?: keyFile}")
+            } else if (gradle.startParameter.taskNames.any { it.contains("Release", ignoreCase = true) }) {
+                throw GradleException("Release signing keystore or credentials are missing")
             }
         }
     }
@@ -130,15 +142,64 @@ tasks.register<Exec>("buildNativeLibs") {
     group = "build"
     description = "Build Go client binaries for Android ABIs and copy them into app/src/main/jniLibs"
     workingDir = rootDir
-    commandLine("bash", rootDir.resolve("scripts/build-native-libs.sh").absolutePath)
+    if (isWindows) {
+        commandLine(
+            "powershell",
+            "-NoLogo",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            rootDir.resolve("scripts/build-native-libs.ps1").absolutePath
+        )
+    } else {
+        commandLine("bash", rootDir.resolve("scripts/build-native-libs.sh").absolutePath)
+    }
 }
 
-val isWindows = System.getProperty("os.name").startsWith("Windows", ignoreCase = true)
+tasks.register<Exec>("buildServerAsset") {
+    group = "build"
+    description = "Build Linux amd64 server binary and place it into app/src/main/assets/server"
+    workingDir = rootDir
 
-if (!isWindows) {
-    tasks.named("preBuild").configure {
-        dependsOn("buildNativeLibs")
+    val assetDir = rootProject.file("app/src/main/assets")
+    val serverTmp = assetDir.resolve("server.tmp")
+    val serverAsset = assetDir.resolve("server")
+
+    doFirst {
+        assetDir.mkdirs()
+        if (serverTmp.exists()) serverTmp.delete()
+        if (serverAsset.exists()) serverAsset.delete()
     }
+
+    commandLine(
+        "go",
+        "build",
+        "-trimpath",
+        "-buildvcs=false",
+        "-o",
+        serverTmp.absolutePath,
+        "."
+    )
+
+    environment("GOOS", "linux")
+    environment("GOARCH", "amd64")
+    environment("CGO_ENABLED", "0")
+
+    doLast {
+        if (!serverTmp.exists()) {
+            throw GradleException("buildServerAsset did not produce ${serverTmp.absolutePath}")
+        }
+        Files.move(
+            serverTmp.toPath(),
+            serverAsset.toPath(),
+            StandardCopyOption.REPLACE_EXISTING
+        )
+    }
+}
+
+tasks.named("preBuild").configure {
+    dependsOn("buildNativeLibs", "buildServerAsset")
 }
 
 dependencies {

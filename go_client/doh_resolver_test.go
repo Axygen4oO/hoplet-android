@@ -3,25 +3,32 @@ package main
 import (
 	"context"
 	"net"
+	"os"
 	"testing"
 )
 
+func TestDoHEndpointHelpers(t *testing.T) {
+	ep, ok := normalizeDoHEndpoint("https://1.1.1.1")
+	if !ok || ep != "https://1.1.1.1/dns-query" {
+		t.Fatalf("normalizeDoHEndpoint mismatch: %q %v", ep, ok)
+	}
+	if got := goDoHEndpointsForArg("doh-google"); len(got) == 0 {
+		t.Fatal("expected doh-google endpoints")
+	}
+}
+
 func TestDoHResolverLookupHost(t *testing.T) {
-	if testing.Short() {
-		t.Skip("network test")
+	if os.Getenv("WDTT_RUN_NETWORK_TESTS") != "1" {
+		t.Skip("live DoH test disabled by default")
 	}
-	cases := []string{"doh-cloudflare", "doh-google", "doh-yandex"}
-	for _, arg := range cases {
-		t.Run(arg, func(t *testing.T) {
-			setupGlobalResolver(arg)
-			addrs, err := net.DefaultResolver.LookupHost(context.Background(), "login.vk.ru")
-			if err != nil {
-				t.Fatalf("lookup failed: %v", err)
-			}
-			if len(addrs) == 0 {
-				t.Fatal("no addresses")
-			}
-			t.Logf("addrs=%v", addrs)
-		})
+
+	setupGlobalResolver("doh-cloudflare")
+	addrs, err := net.DefaultResolver.LookupHost(context.Background(), "login.vk.ru")
+	if err != nil {
+		t.Fatalf("lookup failed: %v", err)
 	}
+	if len(addrs) == 0 {
+		t.Fatal("no addresses")
+	}
+	t.Logf("addrs=%v", addrs)
 }

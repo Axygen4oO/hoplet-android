@@ -39,4 +39,36 @@ class AppUpdateTest {
     fun returnsNullWhenSha256IsMissing() {
         assertNull(extractSha256FromText("release notes without checksum", "hoplet-universal.apk"))
     }
+
+    @Test
+    fun comparesVersionCodeBeforeVersionName() {
+        val release = AppReleaseInfo(
+            versionTag = "v1.5.0",
+            releaseUrl = "https://example.test/release",
+            source = RemoteVersionSource.Release,
+            versionName = "1.5.0",
+            versionCode = 47L,
+        )
+        assertTrue(isNewerRelease("1.4.9", 46L, release))
+        assertFalse(isNewerRelease("9.9.9", 47L, release))
+    }
+
+    @Test
+    fun parsesUpdateManifestAndRejectsMalformedJson() {
+        val hash = "a".repeat(64)
+        val manifest = parseUpdateManifest(
+            """{"versionName":"1.5.0","versionCode":47,"tag":"v1.5.0","apk":"app-release.apk","sha256":"$hash","mandatory":false}"""
+        )
+        assertEquals(47L, manifest?.versionCode)
+        assertEquals(hash, manifest?.sha256)
+        assertNull(parseUpdateManifest("{broken"))
+    }
+
+    @Test
+    fun invalidManifestHashIsNotTrusted() {
+        val manifest = parseUpdateManifest(
+            """{"versionName":"1.5.0","versionCode":47,"sha256":"not-a-hash"}"""
+        )
+        assertNull(manifest)
+    }
 }

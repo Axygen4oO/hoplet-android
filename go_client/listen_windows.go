@@ -1,3 +1,5 @@
+//go:build windows
+
 package main
 
 import (
@@ -13,7 +15,7 @@ func listenUDP(addr string) (net.PacketConn, error) {
 		Control: func(network, address string, c syscall.RawConn) error {
 			var setErr error
 			if err := c.Control(func(fd uintptr) {
-				setErr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
+				setErr = syscall.SetsockoptInt(syscall.Handle(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
 			}); err != nil {
 				return err
 			}

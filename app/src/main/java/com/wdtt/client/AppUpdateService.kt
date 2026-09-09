@@ -614,6 +614,8 @@ class AppUpdateService : Service() {
             },
             versionTag = release.versionTag,
             releaseUrl = release.releaseUrl,
+            versionName = release.versionName.orEmpty(),
+            versionCode = release.versionCode ?: -1L,
             downloadUrl = release.downloadUrl.orEmpty(),
             releaseNotes = release.releaseNotes,
             isPrerelease = release.isPrerelease,
@@ -621,6 +623,7 @@ class AppUpdateService : Service() {
             downloadSizeBytes = release.downloadSizeBytes.coerceAtLeast(0L),
             expectedSha256 = release.expectedSha256.orEmpty(),
             sha256AssetUrl = release.sha256AssetUrl.orEmpty(),
+            updateManifestUrl = release.updateManifestUrl.orEmpty(),
             filePath = apkFile.absolutePath,
             tempFilePath = partFile.absolutePath,
             downloadedBytes = downloadedBytes,
@@ -1015,13 +1018,17 @@ class AppUpdateService : Service() {
         if (snapshot.expectedSha256.isNotBlank() &&
             !actualSha256.equals(snapshot.expectedSha256, ignoreCase = true)
         ) {
-            return VerificationResult.Failure("Контрольная сумма APK не совпала, файл удален")
+            return VerificationResult.Failure("Не удалось проверить обновление. Файл поврежден или отличается от опубликованной версии.")
         }
 
         val archiveInfo = readArchivePackageInfo(apkFile)
             ?: return VerificationResult.Failure("Загруженный файл не распознан как корректный APK")
         if (archiveInfo.packageName != packageName) {
             return VerificationResult.Failure("Загруженный APK принадлежит другому приложению")
+        }
+
+        if (!hasMatchingSigningCertificate(apkFile)) {
+            return VerificationResult.Failure("Не удалось проверить подпись обновления")
         }
 
         val installedInfo = readInstalledPackageInfo()
@@ -1033,6 +1040,53 @@ class AppUpdateService : Service() {
         }
 
         return VerificationResult.Success(actualSha256)
+    }
+
+    /** Проверяет подпись APK через PackageManager (v2/v3 на API 28+). */
+    private fun hasMatchingSigningCertificate(apkFile: File): Boolean {
+        return runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                val archive = packageManager.getPackageArchiveInfo(
+                    apkFile.absolutePath,
+                    PackageManager.GET_SIGNING_CERTIFICATES
+                ) ?: return@runCatching false
+                val installed = packageManager.getPackageInfo(
+                    packageName,
+                    PackageManager.GET_SIGNING_CERTIFICATES
+                )
+                val remoteInfo = archive.signingInfo ?: return@runCatching false
+                val installedInfo = installed.signingInfo ?: return@runCatching false
+                val remoteSignatures = if (remoteInfo.hasMultipleSigners()) {
+                    remoteInfo.apkContentsSigners
+                } else {
+                    remoteInfo.signingCertificateHistory
+                }
+                val installedSignatures = if (installedInfo.hasMultipleSigners()) {
+                    installedInfo.apkContentsSigners
+                } else {
+                    installedInfo.signingCertificateHistory
+                }
+                remoteSignatures.any { remote ->
+                    installedSignatures.any { current ->
+                        remote.toByteArray().contentEquals(current.toByteArray())
+                    }
+                }
+            } else {
+                @Suppress("DEPRECATION")
+                val archive = packageManager.getPackageArchiveInfo(
+                    apkFile.absolutePath,
+                    PackageManager.GET_SIGNATURES
+                ) ?: return@runCatching false
+                @Suppress("DEPRECATION")
+                val installed = packageManager.getPackageInfo(packageName, PackageManager.GET_SIGNATURES)
+                @Suppress("DEPRECATION")
+                archive.signatures.orEmpty().any { remote ->
+                    installed.signatures.orEmpty().any { current ->
+                        remote.toByteArray().contentEquals(current.toByteArray())
+                    }
+                }
+            }
+        }.getOrDefault(false)
     }
 
     private fun readArchivePackageInfo(apkFile: File): PackageInfo? {

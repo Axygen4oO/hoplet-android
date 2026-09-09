@@ -84,6 +84,7 @@ fun DeployTab() {
     val savedManualPorts by settingsStore.manualPortsEnabled.collectAsStateWithLifecycle(initialValue = false)
     val savedServerDtlsPort by settingsStore.serverDtlsPort.collectAsStateWithLifecycle(initialValue = 56000)
     val savedServerWgPort by settingsStore.serverWgPort.collectAsStateWithLifecycle(initialValue = 56001)
+    val savedServerDirectPort by settingsStore.serverDirectPort.collectAsStateWithLifecycle(initialValue = 56002)
 
     var showSecretsDialog by remember { mutableStateOf(false) }
     var showUninstallDialog by remember { mutableStateOf(false) }
@@ -315,6 +316,7 @@ fun DeployTab() {
                                 botToken = savedBotToken,
                                 dtlsPort = effectiveDtlsPort,
                                 wgPort = effectiveWgPort,
+                                directPort = if (savedManualPorts) savedServerDirectPort.coerceIn(1, 65535) else 56002,
                                 dns1 = dns1,
                                 dns2 = dns2,
                                 onProgress = { p, s -> DeployManager.updateProgress(p, s) }
@@ -656,7 +658,8 @@ fun DeployTab() {
                 manualPortsEnabled = savedManualPorts,
                 initialServerDtlsPort = savedServerDtlsPort.toString(),
                 initialServerWgPort = savedServerWgPort.toString(),
-                onSaved = { _, _ -> },
+                initialServerDirectPort = savedServerDirectPort.toString(),
+                onSaved = { _, _, _ -> },
                 onDismiss = { showSecretsDialog = false }
             )
         }
@@ -685,6 +688,7 @@ fun DeployTab() {
                                 sshAuth = sshAuth,
                                 dtlsPort = effectiveDtlsPort,
                                 wgPort = effectiveWgPort,
+                                directPort = if (savedManualPorts) savedServerDirectPort.coerceIn(1, 65535) else 56002,
                                 onProgress = { p, s -> DeployManager.updateProgress(p, s) }
                             )
                         } catch (_: Exception) {}
@@ -894,7 +898,7 @@ private suspend fun performDeploy(
     host: String, user: String, port: Int,
     sshAuth: SshAuth,
     mainPass: String, adminId: String, botToken: String,
-    dtlsPort: Int, wgPort: Int, dns1: String, dns2: String,
+    dtlsPort: Int, wgPort: Int, directPort: Int, dns1: String, dns2: String,
     onProgress: (Float, String) -> Unit
 ): Boolean = withContext(Dispatchers.IO) {
     var session: Session? = null
@@ -937,7 +941,7 @@ private suspend fun performDeploy(
 
         onProgress(0.08f, "Установка...")
         val output = ssh.exec(
-            rootCommand("env WDTT_ARGS=${shellQuote(args)} WDTT_DTLS_PORT=$dtlsPort WDTT_WG_PORT=$wgPort WDTT_SSH_PORT=$port bash /tmp/deploy.sh"),
+            rootCommand("env WDTT_ARGS=${shellQuote(args)} WDTT_DTLS_PORT=$dtlsPort WDTT_WG_PORT=$wgPort WDTT_DIRECT_PORT=$directPort WDTT_SSH_PORT=$port bash /tmp/deploy.sh"),
             timeout = CMD_TIMEOUT
         )
 
@@ -971,7 +975,7 @@ private suspend fun performDeploy(
 private suspend fun performUninstall(
     host: String, user: String, port: Int,
     sshAuth: SshAuth,
-    dtlsPort: Int, wgPort: Int,
+    dtlsPort: Int, wgPort: Int, directPort: Int,
     onProgress: (Float, String) -> Unit
 ) = withContext(Dispatchers.IO) {
     var session: Session? = null
@@ -994,7 +998,7 @@ private suspend fun performUninstall(
         )
 
         onProgress(0.30f, "Удаление через deploy.sh...")
-        ssh.exec(rootCommand("[ -f /tmp/deploy.sh ] && env WDTT_DTLS_PORT=$dtlsPort WDTT_WG_PORT=$wgPort WDTT_SSH_PORT=$port bash /tmp/deploy.sh uninstall 2>/dev/null || true"), timeout = 30000L)
+        ssh.exec(rootCommand("[ -f /tmp/deploy.sh ] && env WDTT_DTLS_PORT=$dtlsPort WDTT_WG_PORT=$wgPort WDTT_DIRECT_PORT=$directPort WDTT_SSH_PORT=$port bash /tmp/deploy.sh uninstall 2>/dev/null || true"), timeout = 30000L)
 
         onProgress(0.45f, "Удаление бинарника...")
         ssh.exec(rootCommand("pkill -x wdtt-server 2>/dev/null || true; rm -f /usr/local/bin/wdtt-server"), timeout = 10000L)
@@ -1008,6 +1012,7 @@ private suspend fun performUninstall(
                         "iptables -t nat -D POSTROUTING -s 10.66.0.0/16 -o \"${'$'}iface\" -m comment --comment WDTT_MANAGED -j MASQUERADE 2>/dev/null || true; " +
                         "done; " +
                         "iptables -D INPUT -p udp --dport $dtlsPort -m comment --comment WDTT_MANAGED -j ACCEPT 2>/dev/null || true; " +
+                        "iptables -D INPUT -p udp --dport $directPort -m comment --comment WDTT_MANAGED -j ACCEPT 2>/dev/null || true; " +
                         "iptables -D INPUT -p udp --dport $wgPort -m comment --comment WDTT_MANAGED -j ACCEPT 2>/dev/null || true; " +
                         "iptables -D INPUT -p udp --dport 56000 -m comment --comment WDTT_MANAGED -j ACCEPT 2>/dev/null || true; " +
                         "iptables -D INPUT -p udp --dport 56001 -m comment --comment WDTT_MANAGED -j ACCEPT 2>/dev/null || true; " +
@@ -1063,7 +1068,8 @@ fun DeploySecretsDialog(
     manualPortsEnabled: Boolean,
     initialServerDtlsPort: String,
     initialServerWgPort: String,
-    onSaved: (String, String) -> Unit,
+    initialServerDirectPort: String,
+    onSaved: (String, String, String) -> Unit,
     onDismiss: () -> Unit
 ) {
     val scope = rememberCoroutineScope()
@@ -1073,6 +1079,7 @@ fun DeploySecretsDialog(
     var sshPortInput by rememberSaveable { mutableStateOf(if (initialSshPort.isBlank()) "22" else initialSshPort) }
     var dtlsPortInput by rememberSaveable { mutableStateOf(initialServerDtlsPort.ifBlank { "56000" }) }
     var wgPortInput by rememberSaveable { mutableStateOf(initialServerWgPort.ifBlank { "56001" }) }
+    var directPortInput by rememberSaveable { mutableStateOf(initialServerDirectPort.ifBlank { "56002" }) }
 
     fun normalizePort(value: String, fallback: String): String {
         return value.toIntOrNull()?.takeIf { it in 1..65535 }?.toString() ?: fallback
@@ -1185,6 +1192,19 @@ fun DeploySecretsDialog(
                         ),
                         colors = hopletOutlinedTextFieldColors()
                     )
+                    OutlinedTextField(
+                        value = directPortInput,
+                        onValueChange = { directPortInput = it.filter(Char::isDigit).take(5) },
+                        label = { Text("Порт Direct сервера") },
+                        placeholder = { Text("56002") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = HopletModalDefaults.fieldShape,
+                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                            keyboardType = androidx.compose.ui.text.input.KeyboardType.Number
+                        ),
+                        colors = hopletOutlinedTextFieldColors()
+                    )
                 }
 
                 HopletPrimaryButton(
@@ -1192,10 +1212,17 @@ fun DeploySecretsDialog(
                         val finalPort = if (sshPortInput.isBlank()) "22" else sshPortInput
                         val finalDtls = normalizePort(dtlsPortInput, "56000")
                         val finalWg = normalizePort(wgPortInput, "56001")
+                        val finalDirect = normalizePort(directPortInput, "56002")
                         scope.launch {
                             settingsStore.saveDeploySecrets(passInput, adminIdInput, botTokenInput, finalPort)
-                            settingsStore.savePorts(finalDtls.toInt(), finalWg.toInt(), settingsStore.listenPort.first())
-                            onSaved(finalDtls, finalWg)
+                            settingsStore.savePorts(
+                                finalDtls.toInt(),
+                                finalWg.toInt(),
+                                finalDirect.toInt(),
+                                settingsStore.serverRawPort.first(),
+                                settingsStore.listenPort.first()
+                            )
+                            onSaved(finalDtls, finalWg, finalDirect)
                             onDismiss()
                         }
                     },

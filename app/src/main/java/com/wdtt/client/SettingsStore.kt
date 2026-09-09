@@ -49,6 +49,7 @@ class SettingsStore(context: Context) {
         private val VK_HASHES = stringPreferencesKey("vk_hashes")
         private val LOCAL_VK_HASHES = stringPreferencesKey("local_vk_hashes")
         private val SERVER_VK_HASHES_CACHE = stringPreferencesKey("server_vk_hashes_cache")
+        private val SERVER_VK_HASHES_CACHE_UPDATED_AT = longPreferencesKey("server_vk_hashes_cache_updated_at")
         private val VK_HASH_SOURCE = stringPreferencesKey("vk_hash_source")
         private val VK_HASH_SOURCE_SPLIT_MIGRATED = booleanPreferencesKey("vk_hash_source_split_migrated")
         private val GLOBAL_VK_HASHES = stringPreferencesKey("global_vk_hashes")
@@ -59,9 +60,14 @@ class SettingsStore(context: Context) {
         private val MANUAL_PORTS_ENABLED = booleanPreferencesKey("manual_ports_enabled")
         private val SERVER_DTLS_PORT = intPreferencesKey("server_dtls_port")
         private val SERVER_WG_PORT = intPreferencesKey("server_wg_port")
+        private val SERVER_DIRECT_PORT = intPreferencesKey("server_direct_port")
+        private val SERVER_RAW_PORT = intPreferencesKey("server_raw_port")
         private val SNI = stringPreferencesKey("sni")
         private val NO_DTLS = booleanPreferencesKey("no_dtls")
         private val NO_DNS = booleanPreferencesKey("no_dns")
+        private val TRANSPORT_MODE = stringPreferencesKey("transport_mode")
+        private val DIRECT_MODE_ENABLED = booleanPreferencesKey("direct_mode_enabled")
+        private val TURN_TCP_ENABLED = booleanPreferencesKey("turn_tcp_enabled")
 
         private val USER_AGENT = stringPreferencesKey("user_agent")
 
@@ -83,6 +89,7 @@ class SettingsStore(context: Context) {
         private val DEPLOY_DNS1 = stringPreferencesKey("deploy_dns1")
         private val DEPLOY_DNS2 = stringPreferencesKey("deploy_dns2")
         private val EXCLUDED_APPS = stringPreferencesKey("excluded_apps")
+        private val BYPASS_ROUTES = stringPreferencesKey("bypass_routes")
         private val BLACKLISTED_APPS = stringPreferencesKey("blacklisted_apps")
         private val WHITELISTED_APPS = stringPreferencesKey("whitelisted_apps")
         
@@ -118,6 +125,7 @@ class SettingsStore(context: Context) {
         
         // ═══ VPN Exclusions Mode ═══
         private val IS_WHITELIST = booleanPreferencesKey("is_whitelist")
+        private val BYPASS_AUTO_REFRESH = booleanPreferencesKey("bypass_auto_refresh")
         private val SPLIT_TUNNEL_WHITELIST_MIGRATED = booleanPreferencesKey("split_tunnel_whitelist_migrated")
         private val SPLIT_TUNNEL_MODE_LISTS_MIGRATED = booleanPreferencesKey("split_tunnel_mode_lists_migrated")
 
@@ -133,6 +141,7 @@ class SettingsStore(context: Context) {
         private val UPDATE_LATEST_VERSION = stringPreferencesKey("update_latest_version")
         private val UPDATE_LAST_ERROR = stringPreferencesKey("update_last_error")
         private val UPDATE_CHECK_INTERVAL_HOURS = intPreferencesKey("update_check_interval_hours")
+        private val UPDATE_INCLUDE_BETA = booleanPreferencesKey("update_include_beta")
         private val UPDATE_POSTPONE_UNTIL = longPreferencesKey("update_postpone_until")
         private val UPDATE_POSTPONE_VERSION = stringPreferencesKey("update_postpone_version")
         private val UPDATE_DIALOG_LAST_SHOWN_VERSION = stringPreferencesKey("update_dialog_last_shown_version")
@@ -352,6 +361,7 @@ class SettingsStore(context: Context) {
     val vkHashes: Flow<String> = dataStore.data.map { it[VK_HASHES] ?: "" }
     val localVkHashes: Flow<String> = dataStore.data.map { normalizeVkHashes(it[LOCAL_VK_HASHES] ?: "") }
     val serverVkHashesCache: Flow<String> = dataStore.data.map { normalizeVkHashes(it[SERVER_VK_HASHES_CACHE] ?: "") }
+    val serverVkHashesCacheUpdatedAt: Flow<Long> = dataStore.data.map { it[SERVER_VK_HASHES_CACHE_UPDATED_AT] ?: 0L }
     val vkHashSource: Flow<String> = dataStore.data.map { normalizeVkHashSource(it[VK_HASH_SOURCE]) }
     val globalVkHashes: Flow<String> = appContext.dataStore.data.map { it[GLOBAL_VK_HASHES] ?: "" }
     val secondaryVkHash: Flow<String> = appContext.dataStore.data.map { it[SECONDARY_VK_HASH] ?: "" }
@@ -361,8 +371,25 @@ class SettingsStore(context: Context) {
     val manualPortsEnabled: Flow<Boolean> = dataStore.data.map { it[MANUAL_PORTS_ENABLED] ?: false }
     val serverDtlsPort: Flow<Int> = dataStore.data.map { it[SERVER_DTLS_PORT] ?: 56000 }
     val serverWgPort: Flow<Int> = dataStore.data.map { it[SERVER_WG_PORT] ?: 56001 }
+    val serverDirectPort: Flow<Int> = dataStore.data.map { it[SERVER_DIRECT_PORT] ?: 56002 }
+    val serverRawPort: Flow<Int> = dataStore.data.map { it[SERVER_RAW_PORT] ?: 56003 }
     val sni: Flow<String> = dataStore.data.map { it[SNI] ?: "" }
     val noDns: Flow<Boolean> = dataStore.data.map { it[NO_DNS] ?: false }
+    val transportMode: Flow<TransportMode> = dataStore.data.map { prefs ->
+        prefs[TRANSPORT_MODE]?.let(::normalizeTransportMode) ?: run {
+            val hasLegacy = prefs[DIRECT_MODE_ENABLED] != null || prefs[TURN_TCP_ENABLED] != null
+            if (!hasLegacy) {
+                TransportMode.NORMAL
+            } else {
+                transportModeFromLegacy(
+                    prefs[DIRECT_MODE_ENABLED] == true,
+                    prefs[TURN_TCP_ENABLED] == true
+                )
+            }
+        }
+    }
+    val directModeEnabled: Flow<Boolean> = transportMode.map { it.resolveForRuntime().isDirect() }
+    val turnTcpEnabled: Flow<Boolean> = transportMode.map { it.resolveForRuntime().isTurnTcp() }
     val userAgent: Flow<String> = dataStore.data.map { it[USER_AGENT] ?: "" }
 
     val deployIp: Flow<String> = dataStore.data.map { it[DEPLOY_IP] ?: "" }
@@ -426,6 +453,8 @@ class SettingsStore(context: Context) {
 
     // ═══ VPN Exclusions Mode ═══
     val isWhitelist: Flow<Boolean> = dataStore.data.map { it[IS_WHITELIST] ?: false }
+    val bypassRoutes: Flow<String> = dataStore.data.map { it[BYPASS_ROUTES] ?: "" }
+    val bypassAutoRefresh: Flow<Boolean> = dataStore.data.map { it[BYPASS_AUTO_REFRESH] ?: true }
 
     // ═══ Theme Mode ═══
     val hasSeenWelcomeDialog: Flow<Boolean> = dataStore.data
@@ -450,6 +479,7 @@ class SettingsStore(context: Context) {
     val updateLatestVersion: Flow<String> = dataStore.data.map { it[UPDATE_LATEST_VERSION] ?: "" }
     val updateLastError: Flow<String> = dataStore.data.map { it[UPDATE_LAST_ERROR] ?: "" }
     val updateCheckIntervalHours: Flow<Int> = dataStore.data.map { it[UPDATE_CHECK_INTERVAL_HOURS] ?: 24 }
+    val includeBetaUpdates: Flow<Boolean> = dataStore.data.map { it[UPDATE_INCLUDE_BETA] ?: false }
     val updatePostponeUntil: Flow<Long> = dataStore.data.map { it[UPDATE_POSTPONE_UNTIL] ?: 0L }
     val updatePostponeVersion: Flow<String> = dataStore.data.map { it[UPDATE_POSTPONE_VERSION] ?: "" }
     val updateDialogLastShownVersion: Flow<String> = dataStore.data.map { it[UPDATE_DIALOG_LAST_SHOWN_VERSION] ?: "" }
@@ -480,6 +510,14 @@ class SettingsStore(context: Context) {
 
     suspend fun saveAutoSwitchToLogs(enabled: Boolean) {
         dataStore.edit { prefs -> prefs[AUTO_SWITCH_TO_LOGS] = enabled }
+    }
+
+    suspend fun saveBypassAutoRefresh(enabled: Boolean) {
+        dataStore.edit { prefs -> prefs[BYPASS_AUTO_REFRESH] = enabled }
+    }
+
+    suspend fun saveBypassRoutes(raw: String) {
+        dataStore.edit { prefs -> prefs[BYPASS_ROUTES] = raw.trim() }
     }
 
     suspend fun saveStopOnWifi(enabled: Boolean) {
@@ -547,6 +585,10 @@ class SettingsStore(context: Context) {
         }
     }
 
+    suspend fun saveIncludeBetaUpdates(enabled: Boolean) {
+        dataStore.edit { prefs -> prefs[UPDATE_INCLUDE_BETA] = enabled }
+    }
+
 
     suspend fun saveChangelogShownVersionCode(versionCode: Int) {
         dataStore.edit { prefs ->
@@ -612,7 +654,8 @@ class SettingsStore(context: Context) {
         protocol: String,
         listenPort: Int,
         sni: String = "",
-        noDns: Boolean = false
+        noDns: Boolean = false,
+        transportMode: TransportMode? = null
     ) {
         dataStore.edit { prefs ->
             val cleanVkHashes = normalizeVkHashes(vkHashes)
@@ -625,6 +668,11 @@ class SettingsStore(context: Context) {
             prefs[LISTEN_PORT] = listenPort
             prefs[SNI] = sni
             prefs[NO_DNS] = noDns
+            transportMode?.let { mode ->
+                prefs[TRANSPORT_MODE] = mode.toPersistedValue()
+                prefs[DIRECT_MODE_ENABLED] = mode == TransportMode.DIRECT
+                prefs[TURN_TCP_ENABLED] = mode == TransportMode.TURN_TCP
+            }
         }
     }
 
@@ -634,11 +682,31 @@ class SettingsStore(context: Context) {
         }
     }
 
-    suspend fun savePorts(serverDtlsPort: Int, serverWgPort: Int, listenPort: Int) {
+    suspend fun savePorts(serverDtlsPort: Int, serverWgPort: Int, serverDirectPort: Int, serverRawPort: Int, listenPort: Int) {
         dataStore.edit { prefs ->
             prefs[SERVER_DTLS_PORT] = serverDtlsPort
             prefs[SERVER_WG_PORT] = serverWgPort
+            prefs[SERVER_DIRECT_PORT] = serverDirectPort
+            prefs[SERVER_RAW_PORT] = serverRawPort
             prefs[LISTEN_PORT] = listenPort
+        }
+    }
+
+    suspend fun saveDirectModeEnabled(enabled: Boolean) {
+        saveTransportMode(if (enabled) TransportMode.DIRECT else TransportMode.NORMAL)
+    }
+
+    suspend fun saveTurnTcpEnabled(enabled: Boolean) {
+        saveTransportMode(if (enabled) TransportMode.TURN_TCP else TransportMode.NORMAL)
+    }
+
+    suspend fun saveTransportMode(mode: TransportMode) {
+        val normalized = mode.resolveForRuntime().let { if (mode == TransportMode.AUTO) TransportMode.AUTO else it }
+        dataStore.edit { prefs ->
+            prefs[TRANSPORT_MODE] = normalized.toPersistedValue()
+            val runtimeMode = normalized.resolveForRuntime()
+            prefs[DIRECT_MODE_ENABLED] = runtimeMode == TransportMode.DIRECT
+            prefs[TURN_TCP_ENABLED] = runtimeMode == TransportMode.TURN_TCP
         }
     }
 
@@ -664,6 +732,19 @@ class SettingsStore(context: Context) {
         dataStore.edit { prefs ->
             prefs[SERVER_VK_HASHES_CACHE] = normalizeVkHashes(hashes)
         }
+    }
+
+    suspend fun saveServerVkHashesCacheSnapshot(
+        hashes: String,
+        updatedAt: Long = System.currentTimeMillis(),
+    ): Boolean {
+        val normalized = normalizeVkHashes(hashes)
+        if (normalized.isBlank()) return false
+        dataStore.edit { prefs ->
+            prefs[SERVER_VK_HASHES_CACHE] = normalized
+            prefs[SERVER_VK_HASHES_CACHE_UPDATED_AT] = updatedAt
+        }
+        return true
     }
 
     suspend fun saveVkHashSource(source: String) {
@@ -970,6 +1051,35 @@ class SettingsStore(context: Context) {
                     prefs[LOCAL_VK_HASHES] = legacyHashes
                 }
                 prefs[VK_HASH_SOURCE_SPLIT_MIGRATED] = true
+            }
+            if (prefs[TRANSPORT_MODE].isNullOrBlank()) {
+                val hasLegacy = prefs[DIRECT_MODE_ENABLED] != null || prefs[TURN_TCP_ENABLED] != null
+                prefs[TRANSPORT_MODE] = if (!hasLegacy) {
+                    TransportMode.NORMAL.toPersistedValue()
+                } else {
+                    transportModeFromLegacy(
+                        prefs[DIRECT_MODE_ENABLED] == true,
+                        prefs[TURN_TCP_ENABLED] == true
+                    ).toPersistedValue()
+                }
+            }
+            when (normalizeTransportMode(prefs[TRANSPORT_MODE])) {
+                TransportMode.DIRECT -> {
+                    prefs[DIRECT_MODE_ENABLED] = true
+                    prefs[TURN_TCP_ENABLED] = false
+                }
+                TransportMode.TURN_TCP -> {
+                    prefs[DIRECT_MODE_ENABLED] = false
+                    prefs[TURN_TCP_ENABLED] = true
+                }
+                TransportMode.RAW_TUN -> {
+                    prefs[DIRECT_MODE_ENABLED] = false
+                    prefs[TURN_TCP_ENABLED] = false
+                }
+                TransportMode.AUTO, TransportMode.NORMAL -> {
+                    prefs[DIRECT_MODE_ENABLED] = false
+                    prefs[TURN_TCP_ENABLED] = false
+                }
             }
             val lastSeen = prefs[LAST_SEEN_VERSION_CODE] ?: 0
             if (currentCode <= lastSeen) {

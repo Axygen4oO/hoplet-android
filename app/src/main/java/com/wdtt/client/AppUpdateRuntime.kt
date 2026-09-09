@@ -25,6 +25,8 @@ internal const val ACTION_RESTORE_APP_UPDATE = "com.wdtt.client.action.RESTORE_A
 private const val UPDATE_SNAPSHOT_LOG_TAG = "qWDTT"
 private const val EXTRA_VERSION_TAG = "extra_version_tag"
 private const val EXTRA_RELEASE_URL = "extra_release_url"
+private const val EXTRA_VERSION_NAME = "extra_version_name"
+private const val EXTRA_VERSION_CODE = "extra_version_code"
 private const val EXTRA_DOWNLOAD_URL = "extra_download_url"
 private const val EXTRA_RELEASE_NOTES = "extra_release_notes"
 private const val EXTRA_IS_PRERELEASE = "extra_is_prerelease"
@@ -32,6 +34,7 @@ private const val EXTRA_DOWNLOAD_FILE_NAME = "extra_download_file_name"
 private const val EXTRA_DOWNLOAD_SIZE_BYTES = "extra_download_size_bytes"
 private const val EXTRA_EXPECTED_SHA256 = "extra_expected_sha256"
 private const val EXTRA_SHA256_ASSET_URL = "extra_sha256_asset_url"
+private const val EXTRA_UPDATE_MANIFEST_URL = "extra_update_manifest_url"
 
 enum class AppUpdatePhase {
     IDLE,
@@ -48,6 +51,8 @@ data class AppUpdateDownloadSnapshot(
     val phase: AppUpdatePhase = AppUpdatePhase.IDLE,
     val versionTag: String = "",
     val releaseUrl: String = "",
+    val versionName: String = "",
+    val versionCode: Long = -1L,
     val downloadUrl: String = "",
     val releaseNotes: String = "",
     val isPrerelease: Boolean = false,
@@ -55,6 +60,7 @@ data class AppUpdateDownloadSnapshot(
     val downloadSizeBytes: Long = 0L,
     val expectedSha256: String = "",
     val sha256AssetUrl: String = "",
+    val updateManifestUrl: String = "",
     val filePath: String = "",
     val tempFilePath: String = "",
     val downloadedBytes: Long = 0L,
@@ -113,6 +119,8 @@ data class AppUpdateDownloadSnapshot(
             versionTag = versionTag,
             releaseUrl = releaseUrl,
             source = RemoteVersionSource.Release,
+            versionName = versionName.ifBlank { null },
+            versionCode = versionCode.takeIf { it >= 0L },
             downloadUrl = downloadUrl.ifBlank { null },
             releaseNotes = releaseNotes,
             isPrerelease = isPrerelease,
@@ -120,6 +128,7 @@ data class AppUpdateDownloadSnapshot(
             downloadSizeBytes = downloadSizeBytes,
             expectedSha256 = expectedSha256.ifBlank { null },
             sha256AssetUrl = sha256AssetUrl.ifBlank { null },
+            updateManifestUrl = updateManifestUrl.ifBlank { null },
         )
     }
 }
@@ -173,6 +182,8 @@ private fun startAppUpdateService(context: Context, action: String, release: App
 internal fun Intent.putAppReleaseInfo(release: AppReleaseInfo): Intent = apply {
     putExtra(EXTRA_VERSION_TAG, release.versionTag)
     putExtra(EXTRA_RELEASE_URL, release.releaseUrl)
+    putExtra(EXTRA_VERSION_NAME, release.versionName)
+    putExtra(EXTRA_VERSION_CODE, release.versionCode ?: -1L)
     putExtra(EXTRA_DOWNLOAD_URL, release.downloadUrl)
     putExtra(EXTRA_RELEASE_NOTES, release.releaseNotes)
     putExtra(EXTRA_IS_PRERELEASE, release.isPrerelease)
@@ -180,6 +191,7 @@ internal fun Intent.putAppReleaseInfo(release: AppReleaseInfo): Intent = apply {
     putExtra(EXTRA_DOWNLOAD_SIZE_BYTES, release.downloadSizeBytes)
     putExtra(EXTRA_EXPECTED_SHA256, release.expectedSha256)
     putExtra(EXTRA_SHA256_ASSET_URL, release.sha256AssetUrl)
+    putExtra(EXTRA_UPDATE_MANIFEST_URL, release.updateManifestUrl)
 }
 
 internal fun Intent.readAppReleaseInfo(): AppReleaseInfo? {
@@ -190,6 +202,8 @@ internal fun Intent.readAppReleaseInfo(): AppReleaseInfo? {
         versionTag = normalizeVersionTag(versionTag),
         releaseUrl = releaseUrl,
         source = RemoteVersionSource.Release,
+        versionName = getStringExtra(EXTRA_VERSION_NAME)?.trim()?.ifBlank { null },
+        versionCode = getLongExtra(EXTRA_VERSION_CODE, -1L).takeIf { it >= 0L },
         downloadUrl = getStringExtra(EXTRA_DOWNLOAD_URL)?.trim()?.ifBlank { null },
         releaseNotes = getStringExtra(EXTRA_RELEASE_NOTES).orEmpty(),
         isPrerelease = getBooleanExtra(EXTRA_IS_PRERELEASE, false),
@@ -197,6 +211,7 @@ internal fun Intent.readAppReleaseInfo(): AppReleaseInfo? {
         downloadSizeBytes = getLongExtra(EXTRA_DOWNLOAD_SIZE_BYTES, 0L),
         expectedSha256 = getStringExtra(EXTRA_EXPECTED_SHA256)?.trim()?.ifBlank { null },
         sha256AssetUrl = getStringExtra(EXTRA_SHA256_ASSET_URL)?.trim()?.ifBlank { null },
+        updateManifestUrl = getStringExtra(EXTRA_UPDATE_MANIFEST_URL)?.trim()?.ifBlank { null },
     )
 }
 
@@ -204,6 +219,8 @@ internal fun encodeAppUpdateSnapshot(snapshot: AppUpdateDownloadSnapshot): Strin
     put("phase", snapshot.phase.name)
     put("versionTag", snapshot.versionTag)
     put("releaseUrl", snapshot.releaseUrl)
+    put("versionName", snapshot.versionName)
+    put("versionCode", snapshot.versionCode)
     put("downloadUrl", snapshot.downloadUrl)
     put("releaseNotes", snapshot.releaseNotes)
     put("isPrerelease", snapshot.isPrerelease)
@@ -211,6 +228,7 @@ internal fun encodeAppUpdateSnapshot(snapshot: AppUpdateDownloadSnapshot): Strin
     put("downloadSizeBytes", snapshot.downloadSizeBytes)
     put("expectedSha256", snapshot.expectedSha256)
     put("sha256AssetUrl", snapshot.sha256AssetUrl)
+    put("updateManifestUrl", snapshot.updateManifestUrl)
     put("filePath", snapshot.filePath)
     put("tempFilePath", snapshot.tempFilePath)
     put("downloadedBytes", snapshot.downloadedBytes)
@@ -237,6 +255,8 @@ internal fun decodeAppUpdateSnapshot(raw: String?): AppUpdateDownloadSnapshot {
                 ?: AppUpdatePhase.IDLE,
             versionTag = json.optString("versionTag"),
             releaseUrl = json.optString("releaseUrl"),
+            versionName = json.optString("versionName"),
+            versionCode = json.optLong("versionCode", -1L),
             downloadUrl = json.optString("downloadUrl"),
             releaseNotes = json.optString("releaseNotes"),
             isPrerelease = json.optBoolean("isPrerelease"),
@@ -244,6 +264,7 @@ internal fun decodeAppUpdateSnapshot(raw: String?): AppUpdateDownloadSnapshot {
             downloadSizeBytes = json.optLong("downloadSizeBytes"),
             expectedSha256 = json.optString("expectedSha256"),
             sha256AssetUrl = json.optString("sha256AssetUrl"),
+            updateManifestUrl = json.optString("updateManifestUrl"),
             filePath = json.optString("filePath"),
             tempFilePath = json.optString("tempFilePath"),
             downloadedBytes = json.optLong("downloadedBytes"),
@@ -355,7 +376,11 @@ internal suspend fun reconcileAppUpdateState(context: Context) {
     if (snapshot.phase == AppUpdatePhase.IDLE) return
 
     val currentVersion = "v${BuildConfig.VERSION_NAME.removePrefix("v")}"
-    val updateStillNeeded = isNewerVersion(currentVersion, snapshot.versionTag)
+    val updateStillNeeded = if (snapshot.versionCode >= 0L) {
+        snapshot.versionCode > BuildConfig.VERSION_CODE.toLong()
+    } else {
+        isNewerVersion(currentVersion, snapshot.versionName.ifBlank { snapshot.versionTag })
+    }
     if (updateStillNeeded) return
 
     deleteFileIfExists(snapshot.filePath)

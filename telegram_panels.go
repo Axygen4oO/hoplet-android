@@ -63,6 +63,10 @@ func showSubscriptionsPanel(
 			"callback_data": "subs_new",
 		}},
 		{{
+			"text":          "➕ Массовое продление",
+			"callback_data": adminBulkExtendStartCallback,
+		}},
+		{{
 			"text":          "📋 Список подписок",
 			"callback_data": "subs_list",
 		}},

@@ -55,6 +55,9 @@ import androidx.compose.material.icons.filled.CheckCircle
 import com.wdtt.client.PeerAddress
 import com.wdtt.client.ConnectionProfile
 import com.wdtt.client.ProfilesStore
+import com.wdtt.client.TransportMode
+import com.wdtt.client.normalizeTransportMode
+import com.wdtt.client.toPersistedValue
 import android.widget.Toast
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -84,6 +87,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.SnackbarDuration
 import com.wdtt.client.ui.components.HopletSubscriptionCard
+import com.wdtt.client.ui.components.AdminContactCard
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.net.InetSocketAddress
@@ -98,6 +102,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material.icons.filled.Bolt
+import androidx.compose.material.icons.filled.Block
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material3.ButtonDefaults
@@ -210,6 +215,7 @@ fun ProfilesTab(
                             obj.put("workersPerHash", p.workersPerHash)
                             obj.put("listenPort", p.listenPort)
                             obj.put("password", p.password)
+                            obj.put("transportMode", p.transportMode.toPersistedValue())
                             val groupName = groups.find { it.id == p.groupId }?.name ?: ""
                             obj.put("groupName", groupName)
                             jsonArray.put(obj)
@@ -247,6 +253,7 @@ fun ProfilesTab(
                             obj.put("workersPerHash", p.workersPerHash)
                             obj.put("listenPort", p.listenPort)
                             obj.put("password", p.password)
+                            obj.put("transportMode", p.transportMode.toPersistedValue())
                             jsonArray.put(obj)
                         }
                         context.contentResolver.openOutputStream(uri)?.use { os ->
@@ -454,7 +461,9 @@ fun ProfilesTab(
             val status = fetchProfileStatus(profile.peer, dtlsPort, profile.password, androidId)
             if (status != null) {
                 deviceStatuses = deviceStatuses + (profile.id to status)
-            } else {
+            } else if (deviceStatuses[profile.id] == null) {
+                // Не затираем последний подтверждённый статус при временной
+                // недоступности /api/profile/status.
                 deviceStatuses = deviceStatuses + (profile.id to ProfileDeviceStatus(isError = true))
             }
         }
@@ -494,7 +503,7 @@ fun ProfilesTab(
 
                         if (status != null) {
                             deviceStatuses = deviceStatuses + (profile.id to status)
-                        } else {
+                        } else if (deviceStatuses[profile.id] == null) {
                             deviceStatuses = deviceStatuses + (
                                     profile.id to ProfileDeviceStatus(isError = true)
                                     )
@@ -557,7 +566,9 @@ fun ProfilesTab(
                         password = password,
                         trafficMb = existingTraffic,
                         groupId = existingGroupId,
-                        useGlobalHashes = useGlobal
+                        useGlobalHashes = useGlobal,
+                        directPort = existingProfile?.directPort ?: 56002,
+                        transportMode = existingProfile?.transportMode ?: TransportMode.NORMAL
                     )
                 )
             }
@@ -1212,7 +1223,7 @@ fun ProfilesTab(
 
     Box(modifier = Modifier.fillMaxSize()) {
         val currentFilterLabel = when (selectedFilterGroup) {
-            null -> "Все профили"
+            null -> "Профили"
             "" -> "Без папки"
             else -> groups.firstOrNull { it.id == selectedFilterGroup }?.name ?: "Фильтр"
         }
@@ -1228,7 +1239,7 @@ fun ProfilesTab(
 
         val activeStatus = profiles
             .mapNotNull { deviceStatuses[it.id] }
-            .firstOrNull { !it.isError && it.expiresAt > 0L }
+            .firstOrNull { !it.isError && it.subscriptionStatus != SubscriptionStatus.MISSING }
 
         val subscriptionStatus: String
         val subscriptionSubtitle: String
@@ -1242,7 +1253,14 @@ fun ProfilesTab(
             subscriptionIcon = Icons.Filled.Info
         } else {
             val now = currentTime
-            if (now >= activeStatus.expiresAt) {
+            if (activeStatus.subscriptionStatus == SubscriptionStatus.BLOCKED) {
+                subscriptionStatus = "Подписка заблокирована"
+                subscriptionSubtitle = "Свяжитесь с администратором"
+                subscriptionColor = MaterialTheme.colorScheme.error
+                subscriptionIcon = Icons.Filled.Block
+            } else if (activeStatus.subscriptionStatus == SubscriptionStatus.EXPIRED ||
+                (activeStatus.expiresAt > 0L && now >= activeStatus.expiresAt)
+            ) {
                 subscriptionStatus = "Подписка истекла"
                 subscriptionSubtitle = "Требуется продление"
                 subscriptionColor = MaterialTheme.colorScheme.error
@@ -1345,14 +1363,15 @@ fun ProfilesTab(
                     accentColor = subscriptionColor,
                     icon = subscriptionIcon
                 )
+                AdminContactCard(context = context)
             }
 
             when {
                 profiles.isEmpty() -> {
                     ProfilesEmptyStateCard(
-                        title = "Пока нет сохранённых профилей",
-                        description = "Добавьте первый профиль вручную, из файла, по подписке или через QR-код.",
-                        primaryActionLabel = "Добавить профиль",
+                        title = "Пока нет добавленных подписок",
+                        description = "Добавьте подписку из буфера, из файла или через QR-код.",
+                        primaryActionLabel = "Добавить подписку",
                         onPrimaryAction = { showCreateSheet = true }
                     )
                 }
@@ -1544,7 +1563,7 @@ fun ProfilesTab(
                         }
 
                         Text(
-                            text = "Смахните профиль влево для удаления. Удерживайте карточку для перестановки.",
+                            text = "Смахните подписку влево для удаления. Удерживайте карточку для перестановки.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f),
                             modifier = Modifier.padding(horizontal = 4.dp, vertical = 6.dp)
@@ -1652,12 +1671,12 @@ fun ProfilesTab(
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Text(
-                    text = "Добавить профиль",
+                    text = "Добавить подписку",
                     style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
                     color = MaterialTheme.colorScheme.onSurface
                 )
                 Text(
-                    text = "Выберите источник импорта или создайте профиль вручную.",
+                    text = "Выберите из списка способ добавления подписки",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -1920,12 +1939,12 @@ private fun ProfilesHeaderCard(
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     Text(
-                        text = "Профили",
+                        text = "Подписка",
                         style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
                         color = colors.onSurface
                     )
                     Text(
-                        text = "Быстрый доступ к профилям, фильтрам и импорту без лишнего шума.",
+                        text = "Быстрый доступ к подпискам",
                         style = MaterialTheme.typography.bodySmall,
                         color = colors.onSurfaceVariant
                     )
@@ -2605,12 +2624,12 @@ private fun ProfilesProfileCardContent(
                         }
                     )
                 } else {
-                    val isExpired = status.expiresAt > 0L && System.currentTimeMillis() > status.expiresAt * 1000L
-                    if (isExpired) {
-                        ProfilesCompactChip(
-                            text = "Пароль истёк",
-                            color = colors.error
-                        )
+                    if (status.subscriptionStatus == SubscriptionStatus.BLOCKED) {
+                        ProfilesCompactChip(text = "Подписка заблокирована", color = colors.error)
+                    } else if (status.subscriptionStatus == SubscriptionStatus.EXPIRED ||
+                        (status.expiresAt > 0L && System.currentTimeMillis() > status.expiresAt * 1000L)
+                    ) {
+                        ProfilesCompactChip(text = "Подписка истекла", color = colors.error)
                     } else {
                         val isFull = status.boundDevices >= status.maxDevices && !status.isCurrentBound
                         ProfilesCompactChip(
@@ -2677,7 +2696,9 @@ private fun parseQrConfig(rawText: String): ConnectionProfile? {
                     vkHashes = hash,
                     workersPerHash = 16,
                     listenPort = localPort,
-                    password = pass
+                    password = pass,
+                    directPort = 56002,
+                    transportMode = TransportMode.NORMAL
                 )
             }
         } catch (e: Exception) {
@@ -2701,6 +2722,9 @@ private fun parseQrConfig(rawText: String): ConnectionProfile? {
             val workers = uri.getQueryParameter("workers")?.toIntOrNull() ?: 18
             val port = uri.getQueryParameter("port")?.toIntOrNull() ?: 9000
             val pass = uri.getQueryParameter("pass") ?: ""
+            val directPort = uri.getQueryParameter("directPort")?.toIntOrNull()
+                ?: uri.getQueryParameter("direct_port")?.toIntOrNull()
+                ?: 56002
             return ConnectionProfile(
                 id = java.util.UUID.randomUUID().toString(),
                 name = name,
@@ -2708,7 +2732,14 @@ private fun parseQrConfig(rawText: String): ConnectionProfile? {
                 vkHashes = hashes,
                 workersPerHash = workers,
                 listenPort = port,
-                password = pass
+                password = pass,
+                directPort = directPort,
+                transportMode = when {
+                    uri.getBooleanQueryParameter("directModeEnabled", false) -> TransportMode.DIRECT
+                    uri.getBooleanQueryParameter("turnTcpEnabled", false) ||
+                        uri.getBooleanQueryParameter("turn_tcp_enabled", false) -> TransportMode.TURN_TCP
+                    else -> TransportMode.NORMAL
+                }
             )
         } catch (e: Exception) {
             // fallback
@@ -2735,6 +2766,7 @@ private fun parseQrConfig(rawText: String): ConnectionProfile? {
             val workers = jsonObj.optInt("workers", jsonObj.optInt("workersPerHash", 18))
             val port = jsonObj.optInt("port", jsonObj.optInt("listenPort", 9000))
             val pass = jsonObj.optString("password", jsonObj.optString("pass", ""))
+            val directPort = jsonObj.optInt("directPort", jsonObj.optInt("direct_port", 56002))
             return ConnectionProfile(
                 id = java.util.UUID.randomUUID().toString(),
                 name = name,
@@ -2742,7 +2774,14 @@ private fun parseQrConfig(rawText: String): ConnectionProfile? {
                 vkHashes = hashes,
                 workersPerHash = workers,
                 listenPort = port,
-                password = pass
+                password = pass,
+                directPort = directPort,
+                transportMode = when {
+                    jsonObj.optString("transportMode").isNotBlank() -> normalizeTransportMode(jsonObj.optString("transportMode"))
+                    jsonObj.optBoolean("directModeEnabled", false) -> TransportMode.DIRECT
+                    jsonObj.optBoolean("turnTcpEnabled", jsonObj.optBoolean("turn_tcp_enabled", false)) -> TransportMode.TURN_TCP
+                    else -> TransportMode.NORMAL
+                }
             )
         } catch (e: Exception) {
             // invalid json
@@ -2784,9 +2823,12 @@ data class ProfileDeviceStatus(
     val activeDevices: Int = 0,
     val isCurrentBound: Boolean = false,
     val expiresAt: Long = 0L,
+    val subscriptionStatus: SubscriptionStatus = SubscriptionStatus.MISSING,
     val isError: Boolean = false,
     val isLoading: Boolean = false
 )
+
+enum class SubscriptionStatus { ACTIVE, EXPIRED, BLOCKED, MISSING }
 
 private suspend fun fetchProfileStatus(
     peer: String,
@@ -2796,15 +2838,18 @@ private suspend fun fetchProfileStatus(
 ): ProfileDeviceStatus? = withContext(Dispatchers.IO) {
     var conn: HttpURLConnection? = null
     try {
-        val encodedPass = URLEncoder.encode(password, "UTF-8")
         val encodedDevice = URLEncoder.encode(deviceId, "UTF-8")
-        val url = URL("http://${PeerAddress.httpEndpoint(peer, dtlsPort)}/api/profile/status?password=$encodedPass&device_id=$encodedDevice")
+        val url = URL("http://${PeerAddress.httpEndpoint(peer, dtlsPort)}/api/profile/status")
         conn = url.openConnection() as HttpURLConnection
-        conn.requestMethod = "GET"
+        conn.requestMethod = "POST"
         conn.connectTimeout = 4000
         conn.readTimeout = 4000
         conn.useCaches = false
+        conn.doOutput = true
+        conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
         conn.setRequestProperty("Accept", "application/json")
+        val postData = "password=${URLEncoder.encode(password, "UTF-8")}&device_id=$encodedDevice"
+        conn.outputStream.use { it.write(postData.toByteArray(Charsets.UTF_8)) }
 
         val responseCode = conn.responseCode
         if (responseCode == 200) {
@@ -2815,7 +2860,12 @@ private suspend fun fetchProfileStatus(
                 boundDevices = json.optInt("bound_devices", 0),
                 activeDevices = json.optInt("active_devices", 0),
                 isCurrentBound = json.optBoolean("is_current_bound", false),
-                expiresAt = json.optLong("expires_at", 0L)
+                expiresAt = json.optLong("expires_at", 0L),
+                subscriptionStatus = when (json.optString("subscription_status", "active").lowercase()) {
+                    "blocked" -> SubscriptionStatus.BLOCKED
+                    "expired" -> SubscriptionStatus.EXPIRED
+                    else -> SubscriptionStatus.ACTIVE
+                }
             )
         } else {
             null
@@ -2845,7 +2895,6 @@ private suspend fun sendDeviceName(
         android.util.Log.d("WDTT", "sendDeviceName()")
         android.util.Log.d("WDTT", "endpoint = $endpoint")
         android.util.Log.d("WDTT", "url = $url")
-        android.util.Log.d("WDTT", "deviceId = $deviceId")
         android.util.Log.d("WDTT", "deviceName = $deviceName")
 
         conn = url.openConnection() as HttpURLConnection
@@ -2868,14 +2917,6 @@ private suspend fun sendDeviceName(
         val code = conn.responseCode
 
         android.util.Log.d("WDTT", "responseCode = $code")
-
-        val body = try {
-            conn.inputStream.bufferedReader().readText()
-        } catch (_: Exception) {
-            conn.errorStream?.bufferedReader()?.readText()
-        }
-
-        android.util.Log.d("WDTT", "responseBody = $body")
 
     } catch (e: Exception) {
         android.util.Log.e("WDTT", "sendDeviceName failed", e)

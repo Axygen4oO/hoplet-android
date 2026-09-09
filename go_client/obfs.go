@@ -25,6 +25,73 @@ import (
 
 var aeadCache sync.Map
 
+const replayWindowSpan = uint64(4096 * 961)
+const replayWindowMaxEntries = 8192
+
+type replayWindow struct {
+	mu          sync.Mutex
+	seen        map[[12]byte]uint64
+	ssrc        uint32
+	highestTime uint64
+	initialized bool
+}
+
+func (w *replayWindow) accept(wire []byte) bool {
+	if len(wire) < rtpHeaderLenLegacy {
+		return false
+	}
+	ssrc := binary.BigEndian.Uint32(wire[8:12])
+	seq := binary.BigEndian.Uint16(wire[2:4])
+	ts := binary.BigEndian.Uint32(wire[4:8])
+	var nonce [12]byte
+	copy(nonce[:], obfsBuildNonce(ssrc, seq, ts))
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if !w.initialized {
+		w.ssrc = ssrc
+		w.highestTime = uint64(ts)
+		w.seen = make(map[[12]byte]uint64, 4096)
+		w.initialized = true
+	} else if w.ssrc != ssrc {
+		return false
+	}
+	if _, exists := w.seen[nonce]; exists {
+		return false
+	}
+
+	base := w.highestTime &^ uint64(0xffffffff)
+	extended := base | uint64(ts)
+	if extended+(1<<31) < w.highestTime {
+		extended += 1 << 32
+	} else if extended > w.highestTime+(1<<31) && extended >= 1<<32 {
+		extended -= 1 << 32
+	}
+	if extended+replayWindowSpan < w.highestTime {
+		return false
+	}
+	if extended > w.highestTime {
+		w.highestTime = extended
+	}
+	if len(w.seen) >= replayWindowMaxEntries {
+		cutoff := uint64(0)
+		if w.highestTime > replayWindowSpan {
+			cutoff = w.highestTime - replayWindowSpan
+		}
+		for value, packetTime := range w.seen {
+			if packetTime < cutoff {
+				delete(w.seen, value)
+			}
+		}
+		if len(w.seen) >= replayWindowMaxEntries {
+			return false
+		}
+	}
+	w.seen[nonce] = extended
+	return true
+}
+
 func getAEAD(key []byte) (cipher.AEAD, error) {
 	if len(key) != wrapKeyLen {
 		return nil, fmt.Errorf("obfs: key must be %d bytes", wrapKeyLen)
@@ -112,6 +179,11 @@ func obfsBuildNonce(ssrc uint32, seq uint16, ts uint32) []byte {
 	return n
 }
 
+const (
+	rtpHeaderLenFull   = 24
+	rtpHeaderLenLegacy = 12
+)
+
 // ─── Wrap (encrypt + add RTP header) ───
 
 // obfsWrapPacket wraps a plaintext payload into an RTP-like packet with authenticated encryption.
@@ -183,13 +255,23 @@ func obfsUnwrapPacket(key, wire, dst []byte) (int, error) {
 	if len(key) != wrapKeyLen {
 		return 0, fmt.Errorf("obfs: key must be %d bytes (got %d)", wrapKeyLen, len(key))
 	}
-	if len(wire) < 13 { // 12 header + at least 1 byte
+	if len(wire) < rtpHeaderLenLegacy+1 {
 		return 0, errors.New("obfs: packet too short")
 	}
 
 	// Validate RTP version
 	if (wire[0] >> 6) != 2 {
 		return 0, errors.New("obfs: not RTP v2")
+	}
+
+	// Принимаем оба формата, использовавшихся автором: базовый RTP-заголовок
+	// и вариант с RFC8285 extension (X-бит). Длина определяется входным пакетом.
+	headerLen := rtpHeaderLenLegacy
+	if wire[0]&0x10 != 0 {
+		headerLen = rtpHeaderLenFull
+	}
+	if len(wire) < headerLen+1 {
+		return 0, errors.New("obfs: packet too short for declared extension")
 	}
 
 	// Extract RTP fields for nonce
@@ -201,13 +283,13 @@ func obfsUnwrapPacket(key, wire, dst []byte) (int, error) {
 	payloadEnd := len(wire)
 	if wire[0]&0x20 != 0 {
 		padLen := int(wire[len(wire)-1])
-		if padLen == 0 || padLen > payloadEnd-12 {
+		if padLen == 0 || padLen > payloadEnd-headerLen {
 			return 0, fmt.Errorf("obfs: invalid padding length %d", padLen)
 		}
 		payloadEnd -= padLen
 	}
 
-	ciphertextLen := payloadEnd - 12
+	ciphertextLen := payloadEnd - headerLen
 	if ciphertextLen <= chacha20poly1305.Overhead {
 		return 0, errors.New("obfs: no payload after stripping header/padding")
 	}
@@ -221,7 +303,7 @@ func obfsUnwrapPacket(key, wire, dst []byte) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("obfs: cipher init: %w", err)
 	}
-	plain, err := aead.Open(dst[:0], nonce, wire[12:payloadEnd], wire[:12])
+	plain, err := aead.Open(dst[:0], nonce, wire[headerLen:payloadEnd], wire[:headerLen])
 	if err != nil {
 		return 0, fmt.Errorf("obfs: auth: %w", err)
 	}

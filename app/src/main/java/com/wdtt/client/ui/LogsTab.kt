@@ -689,7 +689,7 @@ private fun connectionSummaryText(
     connectionState: ConnectionState,
     logCount: Int
 ): String {
-    val stage = connectionState.currentStage?.displayName ?: "ожидание"
+    val stage = connectionState.displayName(connectionState.currentStage)
     val base = when {
         isRunning -> "Подключено"
         isConnecting -> "Подключение"
