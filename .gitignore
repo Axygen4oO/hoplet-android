@@ -13,7 +13,6 @@ app/build/
 app/release/
 
 # ===== Go =====
-go.sum
 .gocache/
 
 # ===== Native Libraries (compiled) =====
