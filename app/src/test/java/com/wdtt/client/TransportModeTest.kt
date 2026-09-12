@@ -14,8 +14,8 @@ class TransportModeTest {
     }
 
     @Test
-    fun `auto resolves to turn tcp runtime`() {
-        assertEquals(TransportMode.TURN_TCP, TransportMode.AUTO.resolveForRuntime())
+    fun `auto resolves to normal runtime`() {
+        assertEquals(TransportMode.NORMAL, TransportMode.AUTO.resolveForRuntime())
     }
 
     @Test

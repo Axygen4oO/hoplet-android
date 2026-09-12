@@ -87,7 +87,7 @@ class AppUpdateService : Service() {
                 when (action) {
                     ACTION_START_APP_UPDATE -> {
                         val release = intent?.readAppReleaseInfo()
-                        if (release == null || release.downloadUrl.isNullOrBlank()) {
+                        if (release == null || !isInstallableOtaRelease(release)) {
                             Log.w(LOG_TAG, "Ignored start request without downloadable release")
                             stopSelfResult(startId)
                             return@withLock
@@ -98,7 +98,7 @@ class AppUpdateService : Service() {
                     ACTION_RESUME_APP_UPDATE -> {
                         val release = intent?.readAppReleaseInfo()
                             ?: settingsStore.updateDownloadState.first().toReleaseInfo()
-                        if (release == null || release.downloadUrl.isNullOrBlank()) {
+                        if (release == null || !isInstallableOtaRelease(release)) {
                             Log.w(LOG_TAG, "Ignored resume request without stored release")
                             stopSelfResult(startId)
                             return@withLock
@@ -109,7 +109,7 @@ class AppUpdateService : Service() {
                     ACTION_RETRY_APP_UPDATE -> {
                         val release = intent?.readAppReleaseInfo()
                             ?: settingsStore.updateDownloadState.first().toReleaseInfo()
-                        if (release == null || release.downloadUrl.isNullOrBlank()) {
+                        if (release == null || !isInstallableOtaRelease(release)) {
                             Log.w(LOG_TAG, "Ignored retry request without stored release")
                             stopSelfResult(startId)
                             return@withLock
@@ -203,7 +203,9 @@ class AppUpdateService : Service() {
     private suspend fun installDownloadedApk() {
         val snapshot = settingsStore.updateDownloadState.first()
         val apkFile = snapshot.filePath.takeIf { it.isNotBlank() }?.let(::File)
-        if (snapshot.phase != AppUpdatePhase.READY_TO_INSTALL || apkFile == null || !apkFile.exists()) {
+        if (snapshot.source != RemoteVersionSource.Release ||
+            snapshot.phase != AppUpdatePhase.READY_TO_INSTALL || apkFile == null || !apkFile.exists()
+        ) {
             markError(snapshot, "Файл обновления не найден, скачайте APK заново")
             return
         }
@@ -265,7 +267,7 @@ class AppUpdateService : Service() {
             AppUpdatePhase.WAITING_FOR_NETWORK,
             AppUpdatePhase.VERIFYING -> {
                 val release = snapshot.toReleaseInfo()
-                if (release == null || release.downloadUrl.isNullOrBlank()) {
+                if (release == null || !isInstallableOtaRelease(release)) {
                     clearStoredUpdate()
                 } else if (snapshot.phase == AppUpdatePhase.WAITING_FOR_NETWORK && !hasUsableNetwork()) {
                     ensureForeground(snapshot)
@@ -421,6 +423,7 @@ class AppUpdateService : Service() {
 
                     val append = response.code == 206 && existingBytes > 0L
                     val body = response.body ?: throw IOException("Пустой ответ сервера обновлений")
+                    validateApkResponse(response, append)
                     val totalBytes = resolveTotalBytes(response, existingBytes, snapshot.downloadSizeBytes)
                     if (!hasEnoughDiskSpace(totalBytes, existingBytes)) {
                         throw IOException("Недостаточно свободного места")
@@ -606,6 +609,10 @@ class AppUpdateService : Service() {
             else -> 0L
         }
 
+        val releaseNotes = release.releaseNotes.trim().ifBlank {
+            existing.releaseNotes.trim().takeIf { existing.matchesVersion(release.versionTag) }.orEmpty()
+        }
+
         return AppUpdateDownloadSnapshot(
             phase = when {
                 apkFile.exists() -> AppUpdatePhase.READY_TO_INSTALL
@@ -613,17 +620,19 @@ class AppUpdateService : Service() {
                 else -> AppUpdatePhase.IDLE
             },
             versionTag = release.versionTag,
+            source = release.source,
             releaseUrl = release.releaseUrl,
             versionName = release.versionName.orEmpty(),
             versionCode = release.versionCode ?: -1L,
             downloadUrl = release.downloadUrl.orEmpty(),
-            releaseNotes = release.releaseNotes,
+            releaseNotes = releaseNotes,
             isPrerelease = release.isPrerelease,
             downloadFileName = release.downloadFileName.orEmpty(),
             downloadSizeBytes = release.downloadSizeBytes.coerceAtLeast(0L),
             expectedSha256 = release.expectedSha256.orEmpty(),
             sha256AssetUrl = release.sha256AssetUrl.orEmpty(),
             updateManifestUrl = release.updateManifestUrl.orEmpty(),
+            mandatory = release.mandatory,
             filePath = apkFile.absolutePath,
             tempFilePath = partFile.absolutePath,
             downloadedBytes = downloadedBytes,
@@ -980,6 +989,21 @@ class AppUpdateService : Service() {
         }
     }
 
+    private fun validateApkResponse(response: Response, append: Boolean) {
+        val contentType = response.header("Content-Type").orEmpty().substringBefore(';').trim().lowercase()
+        if (contentType == "text/html" || contentType == "application/json" || contentType == "text/plain") {
+            throw IOException("Сервер вернул страницу вместо APK")
+        }
+        // При докачке начало тела — не начало ZIP, поэтому проверяем magic только для нового файла.
+        if (!append) {
+            val prefix = response.peekBody(4L).bytes()
+            val isZip = prefix.size >= 2 && prefix[0] == 'P'.code.toByte() && prefix[1] == 'K'.code.toByte()
+            if (!isZip) {
+                throw IOException("Сервер вернул недопустимое содержимое вместо APK")
+            }
+        }
+    }
+
     private fun supportsByteRange(response: Response): Boolean {
         return response.code == 206 ||
             response.header("Accept-Ranges")?.contains("bytes", ignoreCase = true) == true
@@ -1008,6 +1032,9 @@ class AppUpdateService : Service() {
         apkFile: File,
         snapshot: AppUpdateDownloadSnapshot,
     ): VerificationResult {
+        if (!apkFile.exists() || !apkFile.isFile || apkFile.length() <= 0L) {
+            return VerificationResult.Failure("Не удалось проверить обновление: файл APK пуст или отсутствует")
+        }
         val actualSha256 = try {
             sha256(apkFile)
         } catch (error: Exception) {
@@ -1015,26 +1042,37 @@ class AppUpdateService : Service() {
             return VerificationResult.Failure("Не удалось проверить SHA-256 загруженного APK")
         }
 
+        if (snapshot.updateManifestUrl.isNotBlank() && snapshot.expectedSha256.isBlank()) {
+            return VerificationResult.Failure("Не удалось проверить обновление: в update.json отсутствует SHA-256")
+        }
         if (snapshot.expectedSha256.isNotBlank() &&
             !actualSha256.equals(snapshot.expectedSha256, ignoreCase = true)
         ) {
+            Log.w(LOG_TAG, "Update SHA verification failed: version=${snapshot.versionTag}")
             return VerificationResult.Failure("Не удалось проверить обновление. Файл поврежден или отличается от опубликованной версии.")
         }
+        Log.i(LOG_TAG, "Update SHA verification passed: version=${snapshot.versionTag}, size=${apkFile.length()}")
 
         val archiveInfo = readArchivePackageInfo(apkFile)
             ?: return VerificationResult.Failure("Загруженный файл не распознан как корректный APK")
         if (archiveInfo.packageName != packageName) {
             return VerificationResult.Failure("Загруженный APK принадлежит другому приложению")
         }
+        Log.i(LOG_TAG, "Update package verification passed: package=${archiveInfo.packageName}")
 
         if (!hasMatchingSigningCertificate(apkFile)) {
-            return VerificationResult.Failure("Не удалось проверить подпись обновления")
+            Log.w(LOG_TAG, "Update certificate verification failed: version=${snapshot.versionTag}")
+            return VerificationResult.Failure("Сертификат обновления не совпадает с установленным приложением")
         }
+        Log.i(LOG_TAG, "Update certificate verification passed: version=${snapshot.versionTag}")
 
         val installedInfo = readInstalledPackageInfo()
             ?: return VerificationResult.Success(actualSha256)
         val downloadedVersionCode = PackageInfoCompat.getLongVersionCode(archiveInfo)
         val installedVersionCode = PackageInfoCompat.getLongVersionCode(installedInfo)
+        if (snapshot.versionCode >= 0L && downloadedVersionCode != snapshot.versionCode) {
+            return VerificationResult.Failure("Версия APK не совпадает с update.json")
+        }
         if (downloadedVersionCode <= installedVersionCode) {
             return VerificationResult.Failure("Скачанная версия не новее установленной")
         }

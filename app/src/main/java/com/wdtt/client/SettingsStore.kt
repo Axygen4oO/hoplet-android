@@ -150,6 +150,9 @@ class SettingsStore(context: Context) {
         private val UPDATE_DIALOG_LAST_ACTION = stringPreferencesKey("update_dialog_last_action")
         private val UPDATE_DIALOG_LAST_ACTION_AT = longPreferencesKey("update_dialog_last_action_at")
         private val UPDATE_DOWNLOAD_STATE = stringPreferencesKey("update_download_state")
+        private val UPDATE_CACHED_RELEASE_NOTES_VERSION = stringPreferencesKey("update_cached_release_notes_version")
+        private val UPDATE_CACHED_RELEASE_NOTES = stringPreferencesKey("update_cached_release_notes")
+        private val UPDATE_CACHED_RELEASE_URL = stringPreferencesKey("update_cached_release_url")
         private val LAST_SERVER_NOTIFICATION_ID = longPreferencesKey("last_server_notification_id")
         private val CHANGELOG_SHOWN_VERSION_CODE = intPreferencesKey("changelog_shown_version_code")
         private val SUPPORT_NOTICE_SHOWN_VERSION_CODE = intPreferencesKey("support_notice_shown_version_code")
@@ -490,6 +493,9 @@ class SettingsStore(context: Context) {
     val updateDownloadState: Flow<AppUpdateDownloadSnapshot> = dataStore.data.map {
         decodeAppUpdateSnapshot(it[UPDATE_DOWNLOAD_STATE])
     }
+    val cachedReleaseNotesVersion: Flow<String> = dataStore.data.map { it[UPDATE_CACHED_RELEASE_NOTES_VERSION] ?: "" }
+    val cachedReleaseNotes: Flow<String> = dataStore.data.map { it[UPDATE_CACHED_RELEASE_NOTES] ?: "" }
+    val cachedReleaseUrl: Flow<String> = dataStore.data.map { it[UPDATE_CACHED_RELEASE_URL] ?: "" }
     val lastServerNotificationId: Flow<Long> = dataStore.data.map { it[LAST_SERVER_NOTIFICATION_ID] ?: 0L }
 
     val changelogShownVersionCode: Flow<Int> = dataStore.data.map { it[CHANGELOG_SHOWN_VERSION_CODE] ?: 0 }
@@ -626,7 +632,22 @@ class SettingsStore(context: Context) {
 
     suspend fun saveUpdateDownloadState(snapshot: AppUpdateDownloadSnapshot) {
         dataStore.edit { prefs ->
-            prefs[UPDATE_DOWNLOAD_STATE] = encodeAppUpdateSnapshot(snapshot)
+            val existing = decodeAppUpdateSnapshot(prefs[UPDATE_DOWNLOAD_STATE])
+            prefs[UPDATE_DOWNLOAD_STATE] = encodeAppUpdateSnapshot(
+                mergeUpdateDownloadSnapshot(existing, snapshot)
+            )
+        }
+    }
+
+    /** Сохраняет body релиза вместе с versionTag, не затирая его пустым ответом. */
+    suspend fun saveCachedReleaseMetadata(versionTag: String, releaseUrl: String, releaseNotes: String) {
+        val normalizedVersion = normalizeVersionTag(versionTag)
+        val notes = releaseNotes.trim()
+        if (normalizedVersion.isBlank() || notes.isBlank()) return
+        dataStore.edit { prefs ->
+            prefs[UPDATE_CACHED_RELEASE_NOTES_VERSION] = normalizedVersion
+            prefs[UPDATE_CACHED_RELEASE_NOTES] = notes
+            if (releaseUrl.isNotBlank()) prefs[UPDATE_CACHED_RELEASE_URL] = releaseUrl
         }
     }
 

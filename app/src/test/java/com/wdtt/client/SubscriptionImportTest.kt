@@ -7,7 +7,7 @@ import org.junit.Test
 
 class SubscriptionImportTest {
     @Test
-    fun `connection profile defaults to auto`() {
+    fun `connection profile defaults to normal`() {
         val profile = ConnectionProfile(
             id = "1",
             name = "p",
@@ -18,7 +18,7 @@ class SubscriptionImportTest {
             password = "pass"
         )
 
-        assertTrue(profile.transportMode == TransportMode.AUTO)
+        assertTrue(profile.transportMode == TransportMode.NORMAL)
     }
 
     @Test

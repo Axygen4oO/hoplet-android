@@ -71,10 +71,10 @@ jobs:
           set -euo pipefail
           mkdir -p dist
           apk_source="$(find app/build/outputs/apk -type f -name 'app-universal-release.apk' -print -quit)"
-          if [ -z "$apk_source" ]; then
-            apk_source="$(find app/build/outputs/apk -type f -name '*release.apk' ! -name '*debug*' ! -name '*test*' -print -quit)"
-          fi
-          test -n "$apk_source" && test -s "$apk_source"
+          test -n "$apk_source" && test -s "$apk_source" || {
+            echo "Universal release APK was not produced" >&2
+            exit 1
+          }
           aab_source="$(find app/build/outputs/bundle -type f -name '*release.aab' -print -quit)"
           test -n "$aab_source" && test -s "$aab_source"
           cp "$apk_source" dist/app-release.apk
@@ -83,8 +83,12 @@ jobs:
             cp "$(find app/build/outputs -type f -name 'mapping.txt' -print -quit)" dist/mapping.txt
           fi
 
-          version_name="$(sed -nE 's/^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' app/build.gradle.kts | head -n1)"
-          version_code="$(sed -nE 's/^[[:space:]]*versionCode[[:space:]]*=[[:space:]]*([0-9]+).*/\1/p' app/build.gradle.kts | head -n1)"
+          # Read versions from the signed APK, not from duplicated workflow strings.
+          aapt="$(find "$ANDROID_HOME/build-tools" -type f -name aapt -print | sort -V | tail -n1)"
+          test -x "$aapt"
+          badging="$($aapt dump badging dist/app-release.apk)"
+          version_name="$(printf '%s\n' "$badging" | sed -nE "s/.*versionName='([^']+)'.*/\1/p" | head -n1)"
+          version_code="$(printf '%s\n' "$badging" | sed -nE "s/.*versionCode='([0-9]+)'.*/\1/p" | head -n1)"
           test -n "$version_name" && test -n "$version_code"
           apk_sha="$(sha256sum dist/app-release.apk | awk '{print $1}')"
           apk_size="$(stat -c '%s' dist/app-release.apk)"

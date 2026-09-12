@@ -36,7 +36,9 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.wdtt.client.AppReleaseInfo
 import com.wdtt.client.AppUpdatePhase
+import com.wdtt.client.BuildConfig
 import com.wdtt.client.RemoteVersionSource
+import com.wdtt.client.isInstallableOtaRelease
 import com.wdtt.client.SettingsStore
 import com.wdtt.client.cancelAppUpdateDownload
 import com.wdtt.client.formatAppUpdateDetails
@@ -51,13 +53,18 @@ import com.wdtt.client.sanitizedReleaseNotes
 @Composable
 fun AppUpdateDialog(
     release: AppReleaseInfo,
+    isLatestReleaseInfo: Boolean = false,
     onDismiss: () -> Unit,
     onPostpone: () -> Unit,
     onDownloadStarted: () -> Unit,
     onOpenReleasePage: () -> Unit,
 ) {
-    val isTagOnly = release.source == RemoteVersionSource.Tag || release.downloadUrl.isNullOrBlank()
-    val title = if (isTagOnly) "Доступна новая версия" else "Доступно обновление Hoplet"
+    val isTagOnly = release.source == RemoteVersionSource.Tag || !isInstallableOtaRelease(release)
+    val title = when {
+        isLatestReleaseInfo -> "Последнее обновление"
+        isTagOnly -> "Доступна новая версия"
+        else -> "Доступно обновление Hoplet"
+    }
     val context = LocalContext.current
     val settingsStore = remember(context) { SettingsStore(context) }
     val updateSnapshot by settingsStore.updateDownloadState.collectAsStateWithLifecycle(
@@ -65,6 +72,7 @@ fun AppUpdateDialog(
     )
     val activeSnapshot = updateSnapshot.takeIf { it.matchesVersion(release.versionTag) }
     val displayVersion = release.versionName?.ifBlank { null } ?: release.versionTag
+    val installedVersion = BuildConfig.VERSION_NAME.removePrefix("v")
     var autoInstallRequested by rememberSaveable(release.versionTag) { mutableStateOf(false) }
 
     LaunchedEffect(activeSnapshot?.phase, activeSnapshot?.filePath, autoInstallRequested) {
@@ -74,10 +82,15 @@ fun AppUpdateDialog(
         }
     }
 
-    val description = if (isTagOnly) {
+    val description = if (isLatestReleaseInfo) {
+        buildString {
+            append("У вас последняя версия")
+            release.publishedAt?.takeIf { it.isNotBlank() }?.let { append("\nДата выпуска: $it") }
+        }
+    } else if (isTagOnly) {
         "Обнаружена новая версия Hoplet $displayVersion. Обновление станет доступно сразу после публикации релиза."
     } else {
-        "Доступна новая версия Hoplet $displayVersion.\n\nРекомендуется установить обновление, чтобы получить новые возможности, исправления ошибок и улучшения стабильности."
+        "Сейчас установлено $installedVersion.\nДоступна новая версия Hoplet $displayVersion."
     }
 
     val secondaryLabel = when (activeSnapshot?.phase) {
@@ -88,7 +101,7 @@ fun AppUpdateDialog(
         AppUpdatePhase.READY_TO_INSTALL,
         AppUpdatePhase.CANCELLED,
         AppUpdatePhase.VERIFYING -> "Скрыть"
-        else -> "Позже"
+        else -> if (isLatestReleaseInfo) "Подробнее о релизе" else if (isTagOnly) "Закрыть" else if (release.mandatory) "Закрыть" else "Позже"
     }
 
     val primaryLabel = when {
@@ -99,8 +112,9 @@ fun AppUpdateDialog(
         activeSnapshot?.phase == AppUpdatePhase.CANCELLED -> "Скачать заново"
         activeSnapshot?.phase == AppUpdatePhase.ERROR -> "Повторить"
         activeSnapshot?.phase == AppUpdatePhase.VERIFYING -> "Проверяем"
-        isTagOnly -> "Подробнее"
-        else -> "Обновить"
+        isLatestReleaseInfo -> "Закрыть"
+        isTagOnly -> "Закрыть"
+        else -> "Скачать и установить"
     }
 
     val primaryEnabled = activeSnapshot?.phase != AppUpdatePhase.VERIFYING
@@ -156,7 +170,7 @@ fun AppUpdateDialog(
                 )
 
                 val visibleReleaseNotes = sanitizedReleaseNotes(release.releaseNotes)
-                if (visibleReleaseNotes.isNotBlank()) {
+                if (visibleReleaseNotes.isNotBlank() || isLatestReleaseInfo) {
                     Text(
                         text = "Что нового",
                         style = MaterialTheme.typography.titleSmall,
@@ -173,7 +187,7 @@ fun AppUpdateDialog(
                         tonalElevation = 0.dp
                     ) {
                         Text(
-                            text = visibleReleaseNotes,
+                            text = visibleReleaseNotes.ifBlank { "Описание обновления отсутствует." },
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurface,
                             lineHeight = 20.sp,
@@ -183,6 +197,14 @@ fun AppUpdateDialog(
                                 .verticalScroll(rememberScrollState())
                         )
                     }
+                }
+
+                if (!isLatestReleaseInfo && release.downloadSizeBytes > 0L) {
+                    Text(
+                        text = "Размер обновления: ${com.wdtt.client.formatBytes(release.downloadSizeBytes)}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
 
                 if (release.isPrerelease) {
@@ -255,7 +277,7 @@ fun AppUpdateDialog(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    HopletSecondaryButton(
+                    if (!release.mandatory || isLatestReleaseInfo) HopletSecondaryButton(
                         onClick = {
                             when (activeSnapshot?.phase) {
                                 AppUpdatePhase.DOWNLOADING,
@@ -269,7 +291,7 @@ fun AppUpdateDialog(
                                 AppUpdatePhase.READY_TO_INSTALL,
                                 AppUpdatePhase.CANCELLED,
                                 AppUpdatePhase.VERIFYING -> onDismiss()
-                                else -> onPostpone()
+                                else -> if (isLatestReleaseInfo) onOpenReleasePage() else onPostpone()
                             }
                         },
                         modifier = Modifier
@@ -303,12 +325,14 @@ fun AppUpdateDialog(
                                 AppUpdatePhase.READY_TO_INSTALL -> requestInstallDownloadedUpdate(context)
                                 AppUpdatePhase.VERIFYING -> Unit
                                 else -> {
-                                    if (!isTagOnly) {
+                                    if (isLatestReleaseInfo) {
+                                        onDismiss()
+                                    } else if (isTagOnly) {
+                                        onDismiss()
+                                    } else {
                                         autoInstallRequested = true
                                         onDownloadStarted()
                                         startAppUpdateDownload(context, release)
-                                    } else {
-                                        onOpenReleasePage()
                                     }
                                 }
                             }

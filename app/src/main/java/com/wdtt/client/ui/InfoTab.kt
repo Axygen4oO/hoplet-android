@@ -87,6 +87,7 @@ import com.wdtt.client.SettingsStore
 import com.wdtt.client.UPDATE_DIALOG_ACTION_POSTPONED
 import com.wdtt.client.UPDATE_DIALOG_ACTION_UPDATE
 import com.wdtt.client.WDTTColors
+import com.wdtt.client.isNewerRelease
 import com.wdtt.client.isNewerVersion
 import com.wdtt.client.performAppUpdateCheck
 import kotlinx.coroutines.launch
@@ -303,7 +304,7 @@ fun InfoTab() {
                             return@launch
                         }
 
-                        if (isNewerVersion(currentVersion, release.versionTag, false)) {
+                        if (isNewerRelease(currentVersion, BuildConfig.VERSION_CODE.toLong(), release, false)) {
                             settingsStore.saveUpdateDialogShown(release.versionTag, checkedAt)
                             pendingManualRelease = release
                         } else {

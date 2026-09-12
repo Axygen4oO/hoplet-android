@@ -11,6 +11,7 @@ class AppUpdateRuntimeTest {
         val snapshot = AppUpdateDownloadSnapshot(
             phase = AppUpdatePhase.WAITING_FOR_NETWORK,
             versionTag = "1.4.4",
+            source = RemoteVersionSource.Release,
             releaseUrl = "https://example.test/releases/v1.4.4",
             downloadUrl = "https://example.test/hoplet.apk",
             releaseNotes = "Important fixes",
@@ -47,5 +48,27 @@ class AppUpdateRuntimeTest {
         assertEquals(AppUpdatePhase.IDLE, decoded.phase)
         assertTrue(decoded.versionTag.isBlank())
         assertFalse(decoded.autoResumeOnNetwork)
+    }
+
+    @Test
+    fun tagOnlySnapshotCannotOverwriteInstallableReleaseForSameVersion() {
+        val release = AppUpdateDownloadSnapshot(
+            phase = AppUpdatePhase.READY_TO_INSTALL,
+            versionTag = "v1.5.0",
+            source = RemoteVersionSource.Release,
+            releaseUrl = "https://github.com/example/app/releases/tag/v1.5.0",
+            downloadUrl = "https://github.com/example/app/releases/download/v1.5.0/app-release.apk",
+            downloadFileName = "app-release.apk",
+            releaseNotes = "Release notes",
+        )
+        val tag = release.copy(
+            phase = AppUpdatePhase.IDLE,
+            source = RemoteVersionSource.Tag,
+            downloadUrl = "",
+            downloadFileName = "",
+            releaseNotes = "",
+        )
+
+        assertEquals(release, mergeUpdateDownloadSnapshot(release, tag))
     }
 }

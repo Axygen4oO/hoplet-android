@@ -28,6 +28,9 @@ data class ConnectionProfile(
     val trafficMb: Double = 0.0,
     val groupId: String = "",
     val useGlobalHashes: Boolean = vkHashes.isBlank(),
+    // Server transport ports are app/server configuration, not subscription
+    // `ports` metadata. Legacy wdtt:// links only carry the DTLS/WG/local
+    // triple; keep the current Direct default for profiles imported from them.
     val directPort: Int = 56002,
     val transportMode: TransportMode = TransportMode.NORMAL
 )

@@ -86,7 +86,10 @@ type PasswordEntry struct {
 	DownBytes     int64    `json:"down_bytes"`      // скачано клиентом
 	UpBytes       int64    `json:"up_bytes"`        // отдано клиентом
 	VkHash        string   `json:"vk_hash,omitempty"`
-	Ports         string   `json:"ports,omitempty"` // "dtls,wg,tun"
+	// Ports is the legacy three-value link metadata: DTLS server port, WG
+	// server port and the client's local listen/TUN port.  It is not an
+	// authorization whitelist and is not consulted by the transport handlers.
+	Ports         string   `json:"ports,omitempty"`
 	IsDeactivated bool     `json:"is_deactivated,omitempty"`
 }
 

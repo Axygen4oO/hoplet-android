@@ -24,6 +24,7 @@ internal const val ACTION_RESTORE_APP_UPDATE = "com.wdtt.client.action.RESTORE_A
 
 private const val UPDATE_SNAPSHOT_LOG_TAG = "qWDTT"
 private const val EXTRA_VERSION_TAG = "extra_version_tag"
+private const val EXTRA_SOURCE = "extra_source"
 private const val EXTRA_RELEASE_URL = "extra_release_url"
 private const val EXTRA_VERSION_NAME = "extra_version_name"
 private const val EXTRA_VERSION_CODE = "extra_version_code"
@@ -35,6 +36,7 @@ private const val EXTRA_DOWNLOAD_SIZE_BYTES = "extra_download_size_bytes"
 private const val EXTRA_EXPECTED_SHA256 = "extra_expected_sha256"
 private const val EXTRA_SHA256_ASSET_URL = "extra_sha256_asset_url"
 private const val EXTRA_UPDATE_MANIFEST_URL = "extra_update_manifest_url"
+private const val EXTRA_MANDATORY = "extra_mandatory"
 
 enum class AppUpdatePhase {
     IDLE,
@@ -50,6 +52,7 @@ enum class AppUpdatePhase {
 data class AppUpdateDownloadSnapshot(
     val phase: AppUpdatePhase = AppUpdatePhase.IDLE,
     val versionTag: String = "",
+    val source: RemoteVersionSource = RemoteVersionSource.Release,
     val releaseUrl: String = "",
     val versionName: String = "",
     val versionCode: Long = -1L,
@@ -74,6 +77,7 @@ data class AppUpdateDownloadSnapshot(
     val statusMessage: String = "",
     val rangeSupported: Boolean = false,
     val autoResumeOnNetwork: Boolean = false,
+    val mandatory: Boolean = false,
 ) {
     val progressFraction: Float
         get() = when {
@@ -118,7 +122,7 @@ data class AppUpdateDownloadSnapshot(
         return AppReleaseInfo(
             versionTag = versionTag,
             releaseUrl = releaseUrl,
-            source = RemoteVersionSource.Release,
+            source = source,
             versionName = versionName.ifBlank { null },
             versionCode = versionCode.takeIf { it >= 0L },
             downloadUrl = downloadUrl.ifBlank { null },
@@ -129,7 +133,28 @@ data class AppUpdateDownloadSnapshot(
             expectedSha256 = expectedSha256.ifBlank { null },
             sha256AssetUrl = sha256AssetUrl.ifBlank { null },
             updateManifestUrl = updateManifestUrl.ifBlank { null },
+            mandatory = mandatory,
         )
+    }
+}
+
+/**
+ * Объединяет сохранённое состояние загрузки с новым ответом проверки.
+ * Информационный Tag не может затереть полноценный Release той же версии.
+ */
+internal fun mergeUpdateDownloadSnapshot(
+    existing: AppUpdateDownloadSnapshot,
+    incoming: AppUpdateDownloadSnapshot,
+): AppUpdateDownloadSnapshot {
+    val sameVersion = existing.matchesVersion(incoming.versionTag)
+    return if (
+        sameVersion &&
+        existing.source == RemoteVersionSource.Release &&
+        incoming.source == RemoteVersionSource.Tag
+    ) {
+        existing
+    } else {
+        incoming
     }
 }
 
@@ -181,6 +206,7 @@ private fun startAppUpdateService(context: Context, action: String, release: App
 
 internal fun Intent.putAppReleaseInfo(release: AppReleaseInfo): Intent = apply {
     putExtra(EXTRA_VERSION_TAG, release.versionTag)
+    putExtra(EXTRA_SOURCE, release.source.name)
     putExtra(EXTRA_RELEASE_URL, release.releaseUrl)
     putExtra(EXTRA_VERSION_NAME, release.versionName)
     putExtra(EXTRA_VERSION_CODE, release.versionCode ?: -1L)
@@ -192,6 +218,7 @@ internal fun Intent.putAppReleaseInfo(release: AppReleaseInfo): Intent = apply {
     putExtra(EXTRA_EXPECTED_SHA256, release.expectedSha256)
     putExtra(EXTRA_SHA256_ASSET_URL, release.sha256AssetUrl)
     putExtra(EXTRA_UPDATE_MANIFEST_URL, release.updateManifestUrl)
+    putExtra(EXTRA_MANDATORY, release.mandatory)
 }
 
 internal fun Intent.readAppReleaseInfo(): AppReleaseInfo? {
@@ -201,7 +228,9 @@ internal fun Intent.readAppReleaseInfo(): AppReleaseInfo? {
     return AppReleaseInfo(
         versionTag = normalizeVersionTag(versionTag),
         releaseUrl = releaseUrl,
-        source = RemoteVersionSource.Release,
+        source = getStringExtra(EXTRA_SOURCE)
+            ?.let { value -> RemoteVersionSource.entries.firstOrNull { it.name == value } }
+            ?: RemoteVersionSource.Release,
         versionName = getStringExtra(EXTRA_VERSION_NAME)?.trim()?.ifBlank { null },
         versionCode = getLongExtra(EXTRA_VERSION_CODE, -1L).takeIf { it >= 0L },
         downloadUrl = getStringExtra(EXTRA_DOWNLOAD_URL)?.trim()?.ifBlank { null },
@@ -212,12 +241,14 @@ internal fun Intent.readAppReleaseInfo(): AppReleaseInfo? {
         expectedSha256 = getStringExtra(EXTRA_EXPECTED_SHA256)?.trim()?.ifBlank { null },
         sha256AssetUrl = getStringExtra(EXTRA_SHA256_ASSET_URL)?.trim()?.ifBlank { null },
         updateManifestUrl = getStringExtra(EXTRA_UPDATE_MANIFEST_URL)?.trim()?.ifBlank { null },
+        mandatory = getBooleanExtra(EXTRA_MANDATORY, false),
     )
 }
 
 internal fun encodeAppUpdateSnapshot(snapshot: AppUpdateDownloadSnapshot): String = JSONObject().apply {
     put("phase", snapshot.phase.name)
     put("versionTag", snapshot.versionTag)
+    put("source", snapshot.source.name)
     put("releaseUrl", snapshot.releaseUrl)
     put("versionName", snapshot.versionName)
     put("versionCode", snapshot.versionCode)
@@ -242,6 +273,7 @@ internal fun encodeAppUpdateSnapshot(snapshot: AppUpdateDownloadSnapshot): Strin
     put("statusMessage", snapshot.statusMessage)
     put("rangeSupported", snapshot.rangeSupported)
     put("autoResumeOnNetwork", snapshot.autoResumeOnNetwork)
+    put("mandatory", snapshot.mandatory)
 }.toString()
 
 internal fun decodeAppUpdateSnapshot(raw: String?): AppUpdateDownloadSnapshot {
@@ -254,6 +286,9 @@ internal fun decodeAppUpdateSnapshot(raw: String?): AppUpdateDownloadSnapshot {
                 ?.let { name -> AppUpdatePhase.entries.firstOrNull { it.name == name } }
                 ?: AppUpdatePhase.IDLE,
             versionTag = json.optString("versionTag"),
+            source = json.optString("source")
+                .let { value -> RemoteVersionSource.entries.firstOrNull { it.name == value } }
+                ?: RemoteVersionSource.Release,
             releaseUrl = json.optString("releaseUrl"),
             versionName = json.optString("versionName"),
             versionCode = json.optLong("versionCode", -1L),
@@ -278,6 +313,7 @@ internal fun decodeAppUpdateSnapshot(raw: String?): AppUpdateDownloadSnapshot {
             statusMessage = json.optString("statusMessage"),
             rangeSupported = json.optBoolean("rangeSupported"),
             autoResumeOnNetwork = json.optBoolean("autoResumeOnNetwork"),
+            mandatory = json.optBoolean("mandatory", false),
         )
     } catch (error: Exception) {
         runCatching {

@@ -317,6 +317,9 @@ fun MainScreen(
         initialValue = DEFAULT_UPDATE_CHECK_INTERVAL_HOURS
     )
     val includeBetaUpdates by settingsStore.includeBetaUpdates.collectAsStateWithLifecycle(initialValue = false)
+    val cachedReleaseNotesVersion by settingsStore.cachedReleaseNotesVersion.collectAsStateWithLifecycle(initialValue = "")
+    val cachedReleaseNotes by settingsStore.cachedReleaseNotes.collectAsStateWithLifecycle(initialValue = "")
+    val cachedReleaseUrl by settingsStore.cachedReleaseUrl.collectAsStateWithLifecycle(initialValue = "")
 
     val interfaceRole by settingsStore.interfaceRole.collectAsStateWithLifecycle(initialValue = "admin")
     val isAdminInterface = interfaceRole == "admin"
@@ -326,6 +329,13 @@ fun MainScreen(
         navItems.filter { isAdminInterface || it.id != 1 }
     }
     var pendingRelease by remember { mutableStateOf<AppReleaseInfo?>(null) }
+    // Последний полученный релиз нужен только для отображения подписи в header.
+    // Он сохраняется после postpone, пока приложение живо, и обновляется при
+    // следующей проверке после перезапуска.
+    var latestReleaseForHeader by remember { mutableStateOf<AppReleaseInfo?>(null) }
+    var latestReleaseForDialog by remember { mutableStateOf<AppReleaseInfo?>(null) }
+    var latestDialogIsInfoOnly by remember { mutableStateOf(false) }
+    var updateCheckError by remember { mutableStateOf<String?>(null) }
     var showSupportNotice by remember { mutableStateOf(false) }
     val currentVersion = remember { "v${BuildConfig.VERSION_NAME.removePrefix("v")}" }
     val safeBottomInset = with(density) { WindowInsets.safeDrawing.getBottom(density).toDp() }
@@ -444,12 +454,33 @@ fun MainScreen(
         suspend fun runUpdateCheck(reason: String) {
             val outcome = performAppUpdateCheck(currentVersion, includeBetaUpdates)
             val checkedAt = outcome.checkedAt
-            val release = outcome.release
+            val persistedRelease = if (
+                cachedReleaseNotesVersion.isNotBlank() && cachedReleaseNotes.isNotBlank()
+            ) {
+                AppReleaseInfo(
+                    versionTag = cachedReleaseNotesVersion,
+                    releaseUrl = cachedReleaseUrl.ifBlank {
+                        "https://github.com/Axygen4oO/hoplet-android/releases/tag/$cachedReleaseNotesVersion"
+                    },
+                    source = RemoteVersionSource.Release,
+                    releaseNotes = cachedReleaseNotes,
+                )
+            } else null
+            val release = outcome.release?.let { mergeReleaseInfo(persistedRelease, it) }
+            latestReleaseForHeader = release
             settingsStore.saveUpdateState(
                 lastCheckAt = checkedAt,
                 latestVersion = release?.versionTag ?: "",
                 error = outcome.errorMessage
             )
+
+            if (release != null && release.releaseNotes.isNotBlank()) {
+                settingsStore.saveCachedReleaseMetadata(
+                    release.versionTag,
+                    release.releaseUrl,
+                    release.releaseNotes
+                )
+            }
 
             if (release == null) {
                 Log.w(
@@ -559,7 +590,60 @@ fun MainScreen(
                 ) { tab ->
                     when (tab) {
                         0 -> SettingsTab(
-                            onConnectRequested = { pendingSwitchToLogs = true }
+                            onConnectRequested = { pendingSwitchToLogs = true },
+                            updateVersionLabel = availableUpdateLabel(
+                                localVersionName = currentVersion,
+                                localVersionCode = BuildConfig.VERSION_CODE.toLong(),
+                                remote = latestReleaseForHeader,
+                                includePrerelease = includeBetaUpdates,
+                            ),
+                            onNotificationsClick = { (context as? MainActivity)?.openNotificationSettings() },
+                            onUpdatesClick = {
+                                scope.launch {
+                                    val active = settingsStore.updateDownloadState.first().toReleaseInfo()
+                                        ?.takeIf { it.source == RemoteVersionSource.Release }
+                                    val persisted = if (
+                                        cachedReleaseNotesVersion.isNotBlank() && cachedReleaseNotes.isNotBlank()
+                                    ) {
+                                        AppReleaseInfo(
+                                            versionTag = cachedReleaseNotesVersion,
+                                            releaseUrl = cachedReleaseUrl.ifBlank {
+                                                "https://github.com/Axygen4oO/hoplet-android/releases/tag/$cachedReleaseNotesVersion"
+                                            },
+                                            source = RemoteVersionSource.Release,
+                                            releaseNotes = cachedReleaseNotes,
+                                        )
+                                    } else null
+                                    val known = active ?: latestReleaseForDialog ?: persisted
+                                    val outcome = performAppUpdateCheck(currentVersion, includeBetaUpdates)
+                                    val checkedRelease = outcome.release
+                                    val newerChecked = checkedRelease?.let {
+                                        isNewerRelease(currentVersion, BuildConfig.VERSION_CODE.toLong(), it, includeBetaUpdates)
+                                    } == true
+                                    val fetchedLatest = if (!newerChecked) {
+                                        // Информационный режим всегда показывает последний stable release.
+                                        fetchLatestReleaseInfo(currentVersion, false) ?: checkedRelease ?: known
+                                    } else checkedRelease
+                                    val release = fetchedLatest?.let { mergeReleaseInfo(known, it) }
+                                    latestReleaseForHeader = release
+                                    settingsStore.saveUpdateState(outcome.checkedAt, release?.versionTag.orEmpty(), outcome.errorMessage)
+                                    if (release != null) {
+                                        if (release.releaseNotes.isNotBlank()) {
+                                            settingsStore.saveCachedReleaseMetadata(
+                                                release.versionTag,
+                                                release.releaseUrl,
+                                                release.releaseNotes
+                                            )
+                                        }
+                                        latestReleaseForDialog = release
+                                        val newer = isNewerRelease(currentVersion, BuildConfig.VERSION_CODE.toLong(), release, includeBetaUpdates)
+                                        latestDialogIsInfoOnly = !newer
+                                        pendingRelease = release
+                                    } else {
+                                        updateCheckError = outcome.errorMessage.ifBlank { "Проверьте подключение к интернету." }
+                                    }
+                                }
+                            }
                         )
                         1 -> DeployTab()
                         2 -> ProfilesTab(
@@ -610,7 +694,8 @@ fun MainScreen(
     pendingRelease?.let { release ->
         AppUpdateDialog(
             release = release,
-            onDismiss = { pendingRelease = null },
+            isLatestReleaseInfo = latestDialogIsInfoOnly,
+            onDismiss = { pendingRelease = null; latestDialogIsInfoOnly = false },
             onPostpone = {
                 pendingRelease = null
                 Toast.makeText(context, "Обновление отложено на 24 часа.", Toast.LENGTH_SHORT).show()
@@ -646,6 +731,17 @@ fun MainScreen(
                     )
                     openReleaseUrl(context, release.releaseUrl)
                 }
+            }
+        )
+    }
+
+    updateCheckError?.let { message ->
+        HopletAlertDialog(
+            onDismissRequest = { updateCheckError = null },
+            title = { HopletSectionTitle("Не удалось проверить обновления") },
+            text = { HopletDialogBodyText(message) },
+            confirmButton = {
+                HopletPrimaryButton(onClick = { updateCheckError = null }) { Text("Закрыть") }
             }
         )
     }

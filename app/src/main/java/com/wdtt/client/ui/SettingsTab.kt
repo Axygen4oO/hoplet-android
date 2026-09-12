@@ -31,6 +31,8 @@ import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Tag
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.outlined.DownloadForOffline
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Close
@@ -104,6 +106,7 @@ import androidx.compose.ui.draw.scale
 import com.wdtt.client.NotificationHelper
 import com.wdtt.client.isNewerVersion
 import com.wdtt.client.isNewerRelease
+import com.wdtt.client.isInstallableOtaRelease
 import com.wdtt.client.isDirect
 import com.wdtt.client.isRawTun
 import com.wdtt.client.TransportMode
@@ -139,7 +142,10 @@ private const val WORKERS_PER_GROUP = 9
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsTab(
-    onConnectRequested: () -> Unit = {}
+    onConnectRequested: () -> Unit = {},
+    onUpdatesClick: () -> Unit = {},
+    onNotificationsClick: () -> Unit = {},
+    updateVersionLabel: String? = null,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -153,7 +159,10 @@ fun SettingsTab(
             context = context,
             scope = scope,
             settingsStore = settingsStore,
-            onConnectRequested = onConnectRequested
+            onConnectRequested = onConnectRequested,
+            onUpdatesClick = onUpdatesClick,
+            onNotificationsClick = onNotificationsClick,
+            updateVersionLabel = updateVersionLabel
         )
     }
 }
@@ -164,7 +173,10 @@ fun SettingsTabContent(
     context: android.content.Context,
     scope: kotlinx.coroutines.CoroutineScope,
     settingsStore: SettingsStore,
-    onConnectRequested: () -> Unit = {}
+    onConnectRequested: () -> Unit = {},
+    onUpdatesClick: () -> Unit = {},
+    onNotificationsClick: () -> Unit = {},
+    updateVersionLabel: String? = null,
 ) {
     val savedConnectionPassword by settingsStore.connectionPassword.collectAsStateWithLifecycle(initialValue = "")
     val savedManualPortsEnabled by settingsStore.manualPortsEnabled.collectAsStateWithLifecycle(initialValue = false)
@@ -2103,7 +2115,9 @@ fun SettingsTabContent(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            val releaseForAction = updateDownloadState.toReleaseInfo() ?: latestRelease
+                            val releaseForAction = updateDownloadState.toReleaseInfo()
+                                ?.takeIf(::isInstallableOtaRelease)
+                                ?: latestRelease?.takeIf(::isInstallableOtaRelease)
                             val updateStatusText = remember(
                                 isCheckingUpdates,
                                 latestRelease,
@@ -2115,7 +2129,7 @@ fun SettingsTabContent(
                                     isCheckingUpdates -> "Проверка обновлений..."
                                     updateDownloadState.phase != com.wdtt.client.AppUpdatePhase.IDLE ->
                                         com.wdtt.client.formatAppUpdateStatus(updateDownloadState)
-                                    latestRelease != null -> "⬇ Доступна ${latestRelease!!.versionTag}"
+                                    latestRelease != null -> "Доступна ${latestRelease!!.versionTag}"
                                     updateLatestVersion.isNotBlank() -> "✓ Последняя версия: $updateLatestVersion"
                                     updateLastError.isNotBlank() -> updateLastError
                                     else -> "Не проверено"
@@ -2171,7 +2185,7 @@ fun SettingsTabContent(
                                             try {
                                                 val outcome = com.wdtt.client.performAppUpdateCheck(
                                                     currentVersion,
-                                                    false
+                                                    includeBetaUpdates
                                                 )
                                                 val release = outcome.release
 
@@ -2331,14 +2345,7 @@ fun SettingsTabContent(
                                                     }
 
                                                     else -> {
-                                                        if (release.downloadUrl == null) {
-                                                            context.startActivity(
-                                                                Intent(
-                                                                    Intent.ACTION_VIEW,
-                                                                    Uri.parse(release.releaseUrl)
-                                                                )
-                                                            )
-                                                        } else {
+                                                        if (isInstallableOtaRelease(release)) {
                                                             com.wdtt.client.startAppUpdateDownload(context, release)
                                                         }
                                                     }
@@ -2360,7 +2367,6 @@ fun SettingsTabContent(
                                                     updateDownloadState.phase == com.wdtt.client.AppUpdatePhase.ERROR -> "Повторить"
                                                     updateDownloadState.phase == com.wdtt.client.AppUpdatePhase.READY_TO_INSTALL -> "Установить"
                                                     updateDownloadState.phase == com.wdtt.client.AppUpdatePhase.VERIFYING -> "Проверяем..."
-                                                    releaseForAction?.downloadUrl == null -> "Открыть"
                                                     else -> "Скачать"
                                                 },
                                                 style = MaterialTheme.typography.labelMedium
@@ -2631,7 +2637,10 @@ fun SettingsTabContent(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
                 Text(
                     text = stringResource(R.string.app_name),
                     style = MaterialTheme.typography.titleLarge,
@@ -2639,17 +2648,52 @@ fun SettingsTabContent(
                     color = MaterialTheme.colorScheme.onSurface
                 )
                 Text(
-                    text = "Tunnel · Private Network",
+                    text = "• Private Network •",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
 
-            FilledTonalIconButton(onClick = { showAppSettingsDialog = true }) {
-                Icon(
-                    imageVector = Icons.Default.Settings,
-                    contentDescription = "Настройки Tunnel"
+            AnimatedVisibility(
+                visible = !updateVersionLabel.isNullOrBlank(),
+                enter = fadeIn(animationSpec = tween(180)) + expandHorizontally(),
+                exit = fadeOut(animationSpec = tween(120)) + shrinkHorizontally(),
+                modifier = (if (!updateVersionLabel.isNullOrBlank()) {
+                    Modifier.weight(1f)
+                } else {
+                    Modifier
+                }).padding(horizontal = 8.dp)
+            ) {
+                Text(
+                    text = updateVersionLabel.orEmpty(),
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.primary,
+                    maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                    modifier = Modifier.fillMaxWidth()
                 )
+            }
+
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilledTonalIconButton(
+                    onClick = onUpdatesClick,
+                    modifier = Modifier.semantics {
+                        contentDescription = if (!updateVersionLabel.isNullOrBlank()) {
+                            "Обновления. Доступна новая версия"
+                        } else {
+                            "Обновления"
+                        }
+                    }
+                ) {
+                    Icon(Icons.Outlined.DownloadForOffline, contentDescription = "Обновления")
+                }
+                FilledTonalIconButton(onClick = onNotificationsClick) {
+                    Icon(Icons.Default.Notifications, contentDescription = "Уведомления")
+                }
+                FilledTonalIconButton(onClick = { showAppSettingsDialog = true }) {
+                    Icon(Icons.Default.Settings, contentDescription = "Настройки Tunnel")
+                }
             }
         }
 
