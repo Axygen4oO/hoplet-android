@@ -1979,34 +1979,14 @@ fun SettingsTabContent(
                         )
 
                     val currentVersion = remember { "v${com.wdtt.client.BuildConfig.VERSION_NAME.removePrefix("v")}" }
-                    var isCheckingUpdates by remember { mutableStateOf(false) }
-                    var latestRelease by remember {
-                        mutableStateOf<com.wdtt.client.AppReleaseInfo?>(null)
+                    var settingsUpdateUiState by remember {
+                        mutableStateOf<com.wdtt.client.UpdateUiState>(com.wdtt.client.UpdateUiState.Idle)
                     }
                     val updateLatestVersion by settingsStore.updateLatestVersion.collectAsStateWithLifecycle(initialValue = "")
                     val updateLastError by settingsStore.updateLastError.collectAsStateWithLifecycle(initialValue = "")
                     val updateDownloadState by settingsStore.updateDownloadState.collectAsStateWithLifecycle(
                         initialValue = com.wdtt.client.AppUpdateDownloadSnapshot()
                     )
-                    LaunchedEffect(updateLatestVersion) {
-                        if (
-                            latestRelease == null &&
-                            updateLatestVersion.isNotBlank() &&
-                                            isNewerVersion(currentVersion, updateLatestVersion, includeBetaUpdates)
-                        ) {
-                            scope.launch {
-                                try {
-                                    latestRelease =
-                                        com.wdtt.client.fetchLatestReleaseInfo(
-                                            currentVersion,
-                                            includeBetaUpdates
-                                        )
-                                } catch (_: Exception) {
-                                }
-                            }
-                        }
-                    }
-
                         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         OutlinedButton(
                             onClick = {
@@ -2115,21 +2095,37 @@ fun SettingsTabContent(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            val releaseForAction = updateDownloadState.toReleaseInfo()
-                                ?.takeIf(::isInstallableOtaRelease)
-                                ?: latestRelease?.takeIf(::isInstallableOtaRelease)
+                            val snapshotUiState = updateDownloadState.toUpdateUiState()
+                            val visibleUiState = when (snapshotUiState) {
+                                com.wdtt.client.UpdateUiState.Idle -> settingsUpdateUiState
+                                else -> snapshotUiState
+                            }
+                            val releaseForAction = when (visibleUiState) {
+                                is com.wdtt.client.UpdateUiState.UpdateAvailable -> visibleUiState.release
+                                is com.wdtt.client.UpdateUiState.Downloading -> visibleUiState.release
+                                is com.wdtt.client.UpdateUiState.Verifying -> visibleUiState.release
+                                is com.wdtt.client.UpdateUiState.ReadyToInstall -> visibleUiState.release
+                                is com.wdtt.client.UpdateUiState.Error -> visibleUiState.release
+                                else -> updateDownloadState.toReleaseInfo()
+                            }?.takeIf(::isInstallableOtaRelease)
                             val updateStatusText = remember(
-                                isCheckingUpdates,
-                                latestRelease,
+                                visibleUiState,
                                 updateLatestVersion,
                                 updateLastError,
                                 updateDownloadState
                             ) {
                                 when {
-                                    isCheckingUpdates -> "Проверка обновлений..."
-                                    updateDownloadState.phase != com.wdtt.client.AppUpdatePhase.IDLE ->
+                                    visibleUiState is com.wdtt.client.UpdateUiState.Checking -> "Проверка обновлений..."
+                                    visibleUiState is com.wdtt.client.UpdateUiState.Downloading ->
                                         com.wdtt.client.formatAppUpdateStatus(updateDownloadState)
-                                    latestRelease != null -> "Доступна ${latestRelease!!.versionTag}"
+                                    visibleUiState is com.wdtt.client.UpdateUiState.Verifying ->
+                                        "Проверяем целостность APK"
+                                    visibleUiState is com.wdtt.client.UpdateUiState.ReadyToInstall ->
+                                        "APK готов к установке"
+                                    visibleUiState is com.wdtt.client.UpdateUiState.UpdateAvailable ->
+                                        "Доступна ${visibleUiState.release.versionTag}"
+                                    visibleUiState is com.wdtt.client.UpdateUiState.Error ->
+                                        visibleUiState.message
                                     updateLatestVersion.isNotBlank() -> "✓ Последняя версия: $updateLatestVersion"
                                     updateLastError.isNotBlank() -> updateLastError
                                     else -> "Не проверено"
@@ -2146,11 +2142,11 @@ fun SettingsTabContent(
                                     text = updateStatusText,
                                     style = MaterialTheme.typography.bodySmall,
                                     color =
-                                        if (latestRelease != null ||
-                                            updateDownloadState.phase == com.wdtt.client.AppUpdatePhase.READY_TO_INSTALL
+                                        if (visibleUiState is com.wdtt.client.UpdateUiState.UpdateAvailable ||
+                                            visibleUiState is com.wdtt.client.UpdateUiState.ReadyToInstall
                                         ) {
                                             MaterialTheme.colorScheme.primary
-                                        } else if (updateDownloadState.phase == com.wdtt.client.AppUpdatePhase.ERROR) {
+                                        } else if (visibleUiState is com.wdtt.client.UpdateUiState.Error) {
                                             MaterialTheme.colorScheme.error
                                         } else {
                                             MaterialTheme.colorScheme.onSurfaceVariant
@@ -2180,7 +2176,7 @@ fun SettingsTabContent(
                                 Button(
                                     onClick = {
                                         scope.launch {
-                                            isCheckingUpdates = true
+                                            settingsUpdateUiState = com.wdtt.client.UpdateUiState.Checking
 
                                             try {
                                                 val outcome = com.wdtt.client.performAppUpdateCheck(
@@ -2199,8 +2195,11 @@ fun SettingsTabContent(
                                                             includeBetaUpdates
                                                         )
 
-                                                    latestRelease =
-                                                        if (hasUpdate) release else null
+                                                    settingsUpdateUiState = if (hasUpdate) {
+                                                        com.wdtt.client.UpdateUiState.UpdateAvailable(release)
+                                                    } else {
+                                                        com.wdtt.client.UpdateUiState.Idle
+                                                    }
 
                                                     settingsStore.saveUpdateState(
                                                         lastCheckAt = outcome.checkedAt,
@@ -2210,7 +2209,7 @@ fun SettingsTabContent(
 
                                                     Toast.makeText(
                                                         context,
-                                                        if (latestRelease != null)
+                                                        if (hasUpdate)
                                                             "Доступна новая версия ${release.versionTag}"
                                                         else
                                                             "✓ Установлена последняя версия",
@@ -2219,7 +2218,9 @@ fun SettingsTabContent(
 
                                                 } else {
 
-                                                    latestRelease = null
+                                                    settingsUpdateUiState = com.wdtt.client.UpdateUiState.Error(
+                                                        outcome.errorMessage.ifBlank { "Не удалось проверить обновления" }
+                                                    )
 
                                                     settingsStore.saveUpdateState(
                                                         lastCheckAt = outcome.checkedAt,
@@ -2236,7 +2237,9 @@ fun SettingsTabContent(
 
                                             } catch (e: Exception) {
 
-                                                latestRelease = null
+                                                settingsUpdateUiState = com.wdtt.client.UpdateUiState.Error(
+                                                    e.message ?: "Ошибка проверки обновлений"
+                                                )
 
                                                 Toast.makeText(
                                                     context,
@@ -2245,16 +2248,18 @@ fun SettingsTabContent(
                                                 ).show()
 
                                             } finally {
-                                                isCheckingUpdates = false
+                                                if (settingsUpdateUiState is com.wdtt.client.UpdateUiState.Checking) {
+                                                    settingsUpdateUiState = com.wdtt.client.UpdateUiState.Idle
+                                                }
                                             }
                                         }
                                     },
-                                    enabled = !isCheckingUpdates,
+                                    enabled = settingsUpdateUiState !is com.wdtt.client.UpdateUiState.Checking,
                                     shape = RoundedCornerShape(8.dp),
                                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
                                 ) {
 
-                                    if (isCheckingUpdates) {
+                                    if (settingsUpdateUiState is com.wdtt.client.UpdateUiState.Checking) {
 
                                         CircularProgressIndicator(
                                             modifier = Modifier.size(16.dp),

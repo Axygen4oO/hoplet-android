@@ -633,6 +633,7 @@ class AppUpdateService : Service() {
             sha256AssetUrl = release.sha256AssetUrl.orEmpty(),
             updateManifestUrl = release.updateManifestUrl.orEmpty(),
             mandatory = release.mandatory,
+            isDraft = release.isDraft,
             filePath = apkFile.absolutePath,
             tempFilePath = partFile.absolutePath,
             downloadedBytes = downloadedBytes,

@@ -235,6 +235,8 @@ class AppUpdateTest {
         val release = AppReleaseInfo("v1.5.0", "https://github.com/Axygen4oO/hoplet-android/releases/tag/v1.5.0", RemoteVersionSource.Release)
         val resolved = resolveManifestApkUrl(release, "https://example.test/app-release.apk")
         assertEquals("https://example.test/app-release.apk", resolved?.first)
+        assertNull(resolveManifestApkUrl(release, release.releaseUrl))
+        assertNull(resolveManifestApkUrl(release, "https://example.test/releases/latest"))
     }
 
     private fun downloadableRelease(versionTag: String, notes: String): AppReleaseInfo =

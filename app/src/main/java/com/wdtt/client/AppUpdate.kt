@@ -61,6 +61,8 @@ data class AppReleaseInfo(
     val updateManifestUrl: String? = null,
     val publishedAt: String? = null,
     val mandatory: Boolean = false,
+    /** GitHub draft никогда не должен попадать в OTA-кандидаты. */
+    val isDraft: Boolean = false,
 )
 
 private const val RELEASE_NOTES_CACHE_LIMIT = 12
@@ -144,13 +146,19 @@ internal data class UpdateManifest(
 internal fun parseUpdateManifest(raw: String): UpdateManifest? {
     return runCatching {
         val json = JSONObject(raw)
-        val versionName = json.optString("versionName").trim().takeIf { it.isNotBlank() } ?: return@runCatching null
-        val versionCode = json.optLong("versionCode", Long.MIN_VALUE)
-            .takeIf { it >= 0L } ?: return@runCatching null
-        val tag = json.optString("tag").trim().takeIf { it.isNotBlank() } ?: return@runCatching null
-        val apk = json.optString("apk").trim().takeIf { it.isNotBlank() } ?: return@runCatching null
-        val sha = normalizeSha256(json.optString("sha256").trim()) ?: return@runCatching null
-        if (json.has("mandatory") && json.opt("mandatory") !is Boolean) return@runCatching null
+        val versionName = (json.opt("versionName") as? String)
+            ?.trim()?.takeIf { it.isNotBlank() } ?: return@runCatching null
+        val versionCodeValue = json.opt("versionCode") as? Number ?: return@runCatching null
+        val versionCode = versionCodeValue.toLong().takeIf {
+            it >= 0L && versionCodeValue.toDouble() == it.toDouble()
+        } ?: return@runCatching null
+        val tag = (json.opt("tag") as? String)
+            ?.trim()?.takeIf { it.isNotBlank() } ?: return@runCatching null
+        val apk = (json.opt("apk") as? String)
+            ?.trim()?.takeIf { it.isNotBlank() } ?: return@runCatching null
+        val sha = normalizeSha256((json.opt("sha256") as? String)?.trim())
+            ?: return@runCatching null
+        if (!json.has("mandatory") || json.opt("mandatory") !is Boolean) return@runCatching null
         UpdateManifest(
             versionName = versionName,
             versionCode = versionCode,
@@ -206,10 +214,15 @@ suspend fun fetchLatestReleaseInfo(
 internal fun selectOtaCandidate(
     publishedRelease: AppReleaseInfo?,
     informationalTag: AppReleaseInfo? = null,
-): AppReleaseInfo? = publishedRelease?.takeIf(::isInstallableOtaRelease)
+    includePrerelease: Boolean = false,
+): AppReleaseInfo? = publishedRelease?.takeIf {
+    isInstallableOtaRelease(it) && (includePrerelease || !it.isPrerelease)
+}
 
 internal fun isInstallableOtaRelease(release: AppReleaseInfo): Boolean {
-    if (release.source != RemoteVersionSource.Release || release.downloadUrl.isNullOrBlank()) return false
+    if (release.source != RemoteVersionSource.Release || release.isDraft ||
+        release.downloadUrl.isNullOrBlank()
+    ) return false
     val fileName = release.downloadFileName?.trim().orEmpty().ifBlank {
         runCatching { URL(release.downloadUrl).path.substringAfterLast('/') }.getOrDefault("")
     }
@@ -219,7 +232,15 @@ internal fun isInstallableOtaRelease(release: AppReleaseInfo): Boolean {
 private fun isSafeOtaApkName(fileName: String): Boolean {
     val name = fileName.trim().lowercase()
     if (!name.endsWith(".apk")) return false
-    return listOf("debug", "test", "androidtest", "split").none(name::contains)
+    if (listOf("debug", "test", "androidtest", "split").any(name::contains)) return false
+    // OTA принимает только универсальную production-сборку. ABI-specific
+    // APK нельзя безопасно предложить всем пользователям.
+    if (Regex("(^|[-_.])(armeabi(?:-v7a)?|arm64-v8a|x86(?:_64)?)([-_.]|$)").containsMatchIn(name)) {
+        return false
+    }
+    return name == "app-release.apk" ||
+        name == "app-universal-release.apk" ||
+        name.contains("universal")
 }
 
 suspend fun performAppUpdateCheck(
@@ -483,8 +504,14 @@ internal fun resolveManifestApkUrl(release: AppReleaseInfo, apk: String?): Pair<
     val value = apk?.trim().orEmpty()
     if (value.isBlank()) return null
     if (value.startsWith("https://", ignoreCase = true) || value.startsWith("http://", ignoreCase = true)) {
-        val name = runCatching { URL(value).path.substringAfterLast('/') }.getOrDefault("")
-        return value to name.ifBlank { release.downloadFileName.orEmpty() }
+        val parsed = runCatching { URL(value) }.getOrNull() ?: return null
+        val name = parsed.path.substringAfterLast('/')
+        val hasCredentials = runCatching { parsed.toURI().userInfo != null }.getOrDefault(true)
+        if (hasCredentials || name.isBlank() || !name.endsWith(".apk", ignoreCase = true) ||
+            parsed.path.contains("/releases/tag/", ignoreCase = true) ||
+            parsed.path.endsWith("/releases", ignoreCase = true)
+        ) return null
+        return value to name
     }
     val fileName = value.substringAfterLast('/').takeIf { it.endsWith(".apk", ignoreCase = true) } ?: return null
     val releaseTag = release.releaseUrl.substringAfter("/releases/tag/", "")
@@ -597,6 +624,7 @@ private fun noteGitHubApiCooldown(conn: HttpURLConnection, responseCode: Int, re
 }
 
 internal fun JSONObject.toAppReleaseInfo(): AppReleaseInfo? {
+    if (optBoolean("draft")) return null
     val versionTag = normalizeVersionTag(optString("tag_name"))
     val releaseUrl = optString("html_url").trim()
     if (versionTag.isBlank() || releaseUrl.isBlank()) return null
@@ -667,6 +695,7 @@ internal fun JSONObject.toAppReleaseInfo(): AppReleaseInfo? {
         downloadUrl,
         releaseNotes = releaseNotes,
         isPrerelease = optBoolean("prerelease"),
+        isDraft = optBoolean("draft"),
         downloadFileName = downloadFileName,
         downloadSizeBytes = selectedAsset?.optLong("size")?.takeIf { it > 0L } ?: 0L,
         expectedSha256 = expectedSha256,

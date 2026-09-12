@@ -37,6 +37,7 @@ private const val EXTRA_EXPECTED_SHA256 = "extra_expected_sha256"
 private const val EXTRA_SHA256_ASSET_URL = "extra_sha256_asset_url"
 private const val EXTRA_UPDATE_MANIFEST_URL = "extra_update_manifest_url"
 private const val EXTRA_MANDATORY = "extra_mandatory"
+private const val EXTRA_IS_DRAFT = "extra_is_draft"
 
 enum class AppUpdatePhase {
     IDLE,
@@ -47,6 +48,36 @@ enum class AppUpdatePhase {
     READY_TO_INSTALL,
     ERROR,
     CANCELLED,
+}
+
+/**
+ * Единое runtime-состояние OTA для Compose-слоя.
+ *
+ * AppUpdateDownloadSnapshot остаётся persistence-моделью (она сериализуется в
+ * DataStore), а этот тип описывает только то, что должен увидеть UI прямо
+ * сейчас.  Благодаря этому экран, настройки и диалог используют одну и ту же
+ * state machine и не заводят собственные флаги загрузки.
+ */
+sealed interface UpdateUiState {
+    data object Idle : UpdateUiState
+    data object Checking : UpdateUiState
+    data class UpdateAvailable(
+        val release: AppReleaseInfo,
+        val isInfoOnly: Boolean = false,
+    ) : UpdateUiState
+    data class Downloading(
+        val release: AppReleaseInfo,
+        val progress: Float,
+    ) : UpdateUiState
+    data class Verifying(val release: AppReleaseInfo) : UpdateUiState
+    data class ReadyToInstall(
+        val release: AppReleaseInfo,
+        val apkFile: File,
+    ) : UpdateUiState
+    data class Error(
+        val message: String,
+        val release: AppReleaseInfo? = null,
+    ) : UpdateUiState
 }
 
 data class AppUpdateDownloadSnapshot(
@@ -78,6 +109,7 @@ data class AppUpdateDownloadSnapshot(
     val rangeSupported: Boolean = false,
     val autoResumeOnNetwork: Boolean = false,
     val mandatory: Boolean = false,
+    val isDraft: Boolean = false,
 ) {
     val progressFraction: Float
         get() = when {
@@ -134,7 +166,36 @@ data class AppUpdateDownloadSnapshot(
             sha256AssetUrl = sha256AssetUrl.ifBlank { null },
             updateManifestUrl = updateManifestUrl.ifBlank { null },
             mandatory = mandatory,
+            isDraft = isDraft,
         )
+    }
+
+    /** Преобразует persistence snapshot в единый runtime state для UI. */
+    fun toUpdateUiState(fallbackRelease: AppReleaseInfo? = null): UpdateUiState {
+        val release = toReleaseInfo() ?: fallbackRelease
+        return when (phase) {
+            AppUpdatePhase.IDLE,
+            AppUpdatePhase.CANCELLED -> UpdateUiState.Idle
+            AppUpdatePhase.DOWNLOADING,
+            AppUpdatePhase.WAITING_FOR_NETWORK,
+            AppUpdatePhase.PAUSED -> release?.let {
+                UpdateUiState.Downloading(it, progressFraction)
+            } ?: UpdateUiState.Error("Не удалось определить релиз обновления")
+            AppUpdatePhase.VERIFYING -> release?.let(UpdateUiState::Verifying)
+                ?: UpdateUiState.Error("Не удалось определить релиз обновления")
+            AppUpdatePhase.READY_TO_INSTALL -> {
+                val apkPath = filePath.trim()
+                when {
+                    release == null -> UpdateUiState.Error("Не удалось определить релиз обновления")
+                    apkPath.isBlank() -> UpdateUiState.Error("Файл обновления не найден", release)
+                    else -> UpdateUiState.ReadyToInstall(release, File(apkPath))
+                }
+            }
+            AppUpdatePhase.ERROR -> UpdateUiState.Error(
+                lastError.ifBlank { "Ошибка обновления" },
+                release,
+            )
+        }
     }
 }
 
@@ -219,6 +280,7 @@ internal fun Intent.putAppReleaseInfo(release: AppReleaseInfo): Intent = apply {
     putExtra(EXTRA_SHA256_ASSET_URL, release.sha256AssetUrl)
     putExtra(EXTRA_UPDATE_MANIFEST_URL, release.updateManifestUrl)
     putExtra(EXTRA_MANDATORY, release.mandatory)
+    putExtra(EXTRA_IS_DRAFT, release.isDraft)
 }
 
 internal fun Intent.readAppReleaseInfo(): AppReleaseInfo? {
@@ -242,6 +304,7 @@ internal fun Intent.readAppReleaseInfo(): AppReleaseInfo? {
         sha256AssetUrl = getStringExtra(EXTRA_SHA256_ASSET_URL)?.trim()?.ifBlank { null },
         updateManifestUrl = getStringExtra(EXTRA_UPDATE_MANIFEST_URL)?.trim()?.ifBlank { null },
         mandatory = getBooleanExtra(EXTRA_MANDATORY, false),
+        isDraft = getBooleanExtra(EXTRA_IS_DRAFT, false),
     )
 }
 
@@ -274,6 +337,7 @@ internal fun encodeAppUpdateSnapshot(snapshot: AppUpdateDownloadSnapshot): Strin
     put("rangeSupported", snapshot.rangeSupported)
     put("autoResumeOnNetwork", snapshot.autoResumeOnNetwork)
     put("mandatory", snapshot.mandatory)
+    put("isDraft", snapshot.isDraft)
 }.toString()
 
 internal fun decodeAppUpdateSnapshot(raw: String?): AppUpdateDownloadSnapshot {
@@ -314,6 +378,7 @@ internal fun decodeAppUpdateSnapshot(raw: String?): AppUpdateDownloadSnapshot {
             rangeSupported = json.optBoolean("rangeSupported"),
             autoResumeOnNetwork = json.optBoolean("autoResumeOnNetwork"),
             mandatory = json.optBoolean("mandatory", false),
+            isDraft = json.optBoolean("isDraft", false),
         )
     } catch (error: Exception) {
         runCatching {

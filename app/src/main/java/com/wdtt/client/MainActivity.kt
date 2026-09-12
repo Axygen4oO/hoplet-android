@@ -328,14 +328,11 @@ fun MainScreen(
     val activeNavItems = remember(isAdminInterface) {
         navItems.filter { isAdminInterface || it.id != 1 }
     }
-    var pendingRelease by remember { mutableStateOf<AppReleaseInfo?>(null) }
+    var updateUiState by remember { mutableStateOf<UpdateUiState>(UpdateUiState.Idle) }
     // Последний полученный релиз нужен только для отображения подписи в header.
     // Он сохраняется после postpone, пока приложение живо, и обновляется при
     // следующей проверке после перезапуска.
     var latestReleaseForHeader by remember { mutableStateOf<AppReleaseInfo?>(null) }
-    var latestReleaseForDialog by remember { mutableStateOf<AppReleaseInfo?>(null) }
-    var latestDialogIsInfoOnly by remember { mutableStateOf(false) }
-    var updateCheckError by remember { mutableStateOf<String?>(null) }
     var showSupportNotice by remember { mutableStateOf(false) }
     val currentVersion = remember { "v${BuildConfig.VERSION_NAME.removePrefix("v")}" }
     val safeBottomInset = with(density) { WindowInsets.safeDrawing.getBottom(density).toDp() }
@@ -452,6 +449,7 @@ fun MainScreen(
             ?: 12L * 60L * 60L * 1000L
 
         suspend fun runUpdateCheck(reason: String) {
+            updateUiState = UpdateUiState.Checking
             val outcome = performAppUpdateCheck(currentVersion, includeBetaUpdates)
             val checkedAt = outcome.checkedAt
             val persistedRelease = if (
@@ -483,6 +481,9 @@ fun MainScreen(
             }
 
             if (release == null) {
+                updateUiState = UpdateUiState.Error(
+                    outcome.errorMessage.ifBlank { "Проверьте подключение к интернету." }
+                )
                 Log.w(
                     "WDTT",
                     "[WARN] Update check: no release info, local=$currentVersion reason=$reason error=${outcome.errorMessage}"
@@ -511,7 +512,9 @@ fun MainScreen(
 
             if (hasUpdate && !isPostponed && !isAlreadyDownloadingSameRelease && !dialogAlreadyShown) {
                 settingsStore.saveUpdateDialogShown(release.versionTag, checkedAt)
-                pendingRelease = release
+                updateUiState = UpdateUiState.UpdateAvailable(release)
+            } else if (updateUiState is UpdateUiState.Checking) {
+                updateUiState = UpdateUiState.Idle
             }
         }
 
@@ -600,6 +603,7 @@ fun MainScreen(
                             onNotificationsClick = { (context as? MainActivity)?.openNotificationSettings() },
                             onUpdatesClick = {
                                 scope.launch {
+                                    updateUiState = UpdateUiState.Checking
                                     val active = settingsStore.updateDownloadState.first().toReleaseInfo()
                                         ?.takeIf { it.source == RemoteVersionSource.Release }
                                     val persisted = if (
@@ -614,7 +618,7 @@ fun MainScreen(
                                             releaseNotes = cachedReleaseNotes,
                                         )
                                     } else null
-                                    val known = active ?: latestReleaseForDialog ?: persisted
+                                    val known = active ?: latestReleaseForHeader ?: persisted
                                     val outcome = performAppUpdateCheck(currentVersion, includeBetaUpdates)
                                     val checkedRelease = outcome.release
                                     val newerChecked = checkedRelease?.let {
@@ -635,12 +639,15 @@ fun MainScreen(
                                                 release.releaseNotes
                                             )
                                         }
-                                        latestReleaseForDialog = release
                                         val newer = isNewerRelease(currentVersion, BuildConfig.VERSION_CODE.toLong(), release, includeBetaUpdates)
-                                        latestDialogIsInfoOnly = !newer
-                                        pendingRelease = release
+                                        updateUiState = UpdateUiState.UpdateAvailable(
+                                            release = release,
+                                            isInfoOnly = !newer,
+                                        )
                                     } else {
-                                        updateCheckError = outcome.errorMessage.ifBlank { "Проверьте подключение к интернету." }
+                                        updateUiState = UpdateUiState.Error(
+                                            outcome.errorMessage.ifBlank { "Проверьте подключение к интернету." }
+                                        )
                                     }
                                 }
                             }
@@ -691,13 +698,15 @@ fun MainScreen(
             }
         )
     }
-    pendingRelease?.let { release ->
+    val dialogState = updateUiState as? UpdateUiState.UpdateAvailable
+    dialogState?.let { available ->
+        val release = available.release
         AppUpdateDialog(
             release = release,
-            isLatestReleaseInfo = latestDialogIsInfoOnly,
-            onDismiss = { pendingRelease = null; latestDialogIsInfoOnly = false },
+            isLatestReleaseInfo = available.isInfoOnly,
+            onDismiss = { updateUiState = UpdateUiState.Idle },
             onPostpone = {
-                pendingRelease = null
+                updateUiState = UpdateUiState.Idle
                 Toast.makeText(context, "Обновление отложено на 24 часа.", Toast.LENGTH_SHORT).show()
                 scope.launch {
                     val now = System.currentTimeMillis()
@@ -722,7 +731,7 @@ fun MainScreen(
                 }
             },
             onOpenReleasePage = {
-                pendingRelease = null
+                updateUiState = UpdateUiState.Idle
                 scope.launch {
                     settingsStore.saveUpdateDialogAction(
                         version = release.versionTag,
@@ -735,13 +744,13 @@ fun MainScreen(
         )
     }
 
-    updateCheckError?.let { message ->
+    (updateUiState as? UpdateUiState.Error)?.let { errorState ->
         HopletAlertDialog(
-            onDismissRequest = { updateCheckError = null },
+            onDismissRequest = { updateUiState = UpdateUiState.Idle },
             title = { HopletSectionTitle("Не удалось проверить обновления") },
-            text = { HopletDialogBodyText(message) },
+            text = { HopletDialogBodyText(errorState.message) },
             confirmButton = {
-                HopletPrimaryButton(onClick = { updateCheckError = null }) { Text("Закрыть") }
+                HopletPrimaryButton(onClick = { updateUiState = UpdateUiState.Idle }) { Text("Закрыть") }
             }
         )
     }

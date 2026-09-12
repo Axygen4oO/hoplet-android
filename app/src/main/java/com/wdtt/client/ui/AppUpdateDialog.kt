@@ -101,7 +101,7 @@ fun AppUpdateDialog(
         AppUpdatePhase.READY_TO_INSTALL,
         AppUpdatePhase.CANCELLED,
         AppUpdatePhase.VERIFYING -> "Скрыть"
-        else -> if (isLatestReleaseInfo) "Подробнее о релизе" else if (isTagOnly) "Закрыть" else if (release.mandatory) "Закрыть" else "Позже"
+        else -> if (isLatestReleaseInfo) "Подробнее" else if (isTagOnly) "Закрыть" else if (release.mandatory) "Закрыть" else "Позже"
     }
 
     val primaryLabel = when {
