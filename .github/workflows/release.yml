@@ -70,17 +70,81 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          apk_source="$(find app/build/outputs/apk -type f -name 'app-universal-release.apk' -print -quit)"
-          test -n "$apk_source" && test -s "$apk_source" || {
-            echo "Universal release APK was not produced" >&2
+
+          echo '=== APK CANDIDATES ==='
+          mapfile -t all_apks < <(find app/build/outputs/apk -type f -name '*.apk' -print | sort)
+          if ((${#all_apks[@]} == 0)); then
+            echo '(none)'
+          else
+            printf '%s\n' "${all_apks[@]}"
+          fi
+
+          # Do not rely on the filename: AGP can use different names for the
+          # universal output. Inspect each APK and require native libraries for
+          # every production ABI instead.
+          apk_source=''
+          for apk in "${all_apks[@]}"; do
+            case "$apk" in
+              *-debug.apk|*-androidTest.apk|*-test.apk) continue ;;
+            esac
+            case "/$apk/" in
+              */debug/*|*/test/*|*/androidTest/*) continue ;;
+            esac
+            test -s "$apk" || continue
+
+            entries="$(unzip -Z1 "$apk" 2>/dev/null || true)"
+            has_arm64=0
+            has_armv7=0
+            has_x86_64=0
+            grep -qE '^lib/arm64-v8a/[^/]+\.so$' <<<"$entries" && has_arm64=1
+            grep -qE '^lib/armeabi-v7a/[^/]+\.so$' <<<"$entries" && has_armv7=1
+            grep -qE '^lib/x86_64/[^/]+\.so$' <<<"$entries" && has_x86_64=1
+
+            if ((has_arm64 && has_armv7 && has_x86_64)); then
+              if [[ -n "$apk_source" ]]; then
+                echo "Multiple universal release APKs were found: '$apk_source' and '$apk'" >&2
+                exit 1
+              fi
+              apk_source="$apk"
+            fi
+          done
+
+          if [[ -z "$apk_source" ]]; then
+            echo "Universal release APK was not produced." >&2
+            echo "Expected one non-debug/non-test APK containing lib/arm64-v8a, lib/armeabi-v7a, and lib/x86_64." >&2
             exit 1
-          }
+          fi
+          echo '=== SELECTED UNIVERSAL APK ==='
+          echo "$apk_source"
+          echo '=== ABI CHECK ==='
+          echo 'arm64-v8a: PASS'
+          echo 'armeabi-v7a: PASS'
+          echo 'x86_64: PASS'
+
           aab_source="$(find app/build/outputs/bundle -type f -name '*release.aab' -print -quit)"
           test -n "$aab_source" && test -s "$aab_source"
           cp "$apk_source" dist/app-release.apk
           cp "$aab_source" dist/app-release.aab
           if find app/build/outputs -type f -name 'mapping.txt' -print -quit | grep -q .; then
             cp "$(find app/build/outputs -type f -name 'mapping.txt' -print -quit)" dist/mapping.txt
+          fi
+
+          test -f dist/app-release.apk
+          test -s dist/app-release.apk
+          echo '=== FINAL APK ==='
+          echo 'dist/app-release.apk'
+          unzip -l dist/app-release.apk | grep -qE 'lib/arm64-v8a/'
+          unzip -l dist/app-release.apk | grep -qE 'lib/armeabi-v7a/'
+          unzip -l dist/app-release.apk | grep -qE 'lib/x86_64/'
+
+          apksigner="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner -print | sort -V | tail -n1)"
+          if [[ -n "$apksigner" && -x "$apksigner" ]]; then
+            "$apksigner" verify --verbose dist/app-release.apk
+            echo '=== APK SIGNATURE ==='
+            echo 'PASS (apksigner verify)'
+          else
+            echo '=== APK SIGNATURE ==='
+            echo 'SKIP (apksigner is not available)'
           fi
 
           # Read versions from the signed APK, not from duplicated workflow strings.
@@ -105,9 +169,13 @@ jobs:
             '{versionName:$versionName,versionCode:$versionCode,tag:$tag,apk:$apk,sha256:$sha256,mandatory:false,releaseUrl:$releaseUrl,publishedAt:$publishedAt,size:$size}' \
             > dist/update.json
           {
-            sha256sum dist/app-release.apk
-            sha256sum dist/app-release.aab
+            (cd dist && sha256sum app-release.apk app-release.aab)
+            if [[ -f dist/mapping.txt ]]; then
+              (cd dist && sha256sum mapping.txt)
+            fi
           } > dist/checksums.txt
+          echo '=== SHA256 ==='
+          echo "$apk_sha"
           cat dist/update.json
 
       - name: Upload assets to GitHub Release
