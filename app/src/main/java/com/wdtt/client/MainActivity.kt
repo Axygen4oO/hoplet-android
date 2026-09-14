@@ -481,9 +481,17 @@ fun MainScreen(
             }
 
             if (release == null) {
-                updateUiState = UpdateUiState.Error(
-                    outcome.errorMessage.ifBlank { "Проверьте подключение к интернету." }
-                )
+                // Temporary network/API failures must not erase a previously
+                // discovered release or a verified APK ready for installation.
+                val known = latestReleaseForHeader
+                    ?: settingsStore.updateDownloadState.first().toReleaseInfo()
+                updateUiState = if (known != null || reason != "manual") {
+                    UpdateUiState.Idle
+                } else {
+                    UpdateUiState.Error(
+                        outcome.errorMessage.ifBlank { "Проверьте подключение к интернету." }
+                    )
+                }
                 Log.w(
                     "WDTT",
                     "[WARN] Update check: no release info, local=$currentVersion reason=$reason error=${outcome.errorMessage}"
@@ -594,12 +602,18 @@ fun MainScreen(
                     when (tab) {
                         0 -> SettingsTab(
                             onConnectRequested = { pendingSwitchToLogs = true },
-                            updateVersionLabel = availableUpdateLabel(
-                                localVersionName = currentVersion,
-                                localVersionCode = BuildConfig.VERSION_CODE.toLong(),
-                                remote = latestReleaseForHeader,
-                                includePrerelease = includeBetaUpdates,
-                            ),
+                            // Header получает подпись только из активного состояния
+                            // UpdateAvailable. В Idle/Checking/Error место под текст
+                            // полностью освобождается, а OTA-логика остаётся прежней.
+                            updateVersionLabel = (updateUiState as? UpdateUiState.UpdateAvailable)
+                                ?.let { available ->
+                                    availableUpdateLabel(
+                                        localVersionName = currentVersion,
+                                        localVersionCode = BuildConfig.VERSION_CODE.toLong(),
+                                        remote = available.release,
+                                        includePrerelease = includeBetaUpdates,
+                                    )
+                                },
                             onNotificationsClick = { (context as? MainActivity)?.openNotificationSettings() },
                             onUpdatesClick = {
                                 scope.launch {

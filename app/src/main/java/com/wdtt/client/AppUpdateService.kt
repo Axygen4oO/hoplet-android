@@ -1069,9 +1069,12 @@ class AppUpdateService : Service() {
             return VerificationResult.Failure("APK не является универсальной production-сборкой")
         }
 
-        if (!hasMatchingSigningCertificate(apkFile)) {
-            Log.w(LOG_TAG, "Update certificate verification failed: version=${snapshot.versionTag}")
-            return VerificationResult.Failure("Сертификат обновления не совпадает с установленным приложением")
+        when (val certificateCheck = checkSigningCertificate(apkFile)) {
+            CertificateCheck.Success -> Unit
+            is CertificateCheck.Failure -> {
+                Log.w(LOG_TAG, "Update certificate verification failed: remote=${certificateCheck.remoteSha256}, installed=${certificateCheck.installedSha256}")
+                return VerificationResult.Failure(certificateCheck.message)
+            }
         }
         Log.i(LOG_TAG, "Update certificate verification passed: version=${snapshot.versionTag}")
 
@@ -1090,19 +1093,19 @@ class AppUpdateService : Service() {
     }
 
     /** Проверяет подпись APK через PackageManager (v2/v3 на API 28+). */
-    private fun hasMatchingSigningCertificate(apkFile: File): Boolean {
+    private fun checkSigningCertificate(apkFile: File): CertificateCheck {
         return runCatching {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                 val archive = packageManager.getPackageArchiveInfo(
                     apkFile.absolutePath,
                     PackageManager.GET_SIGNING_CERTIFICATES
-                ) ?: return@runCatching false
+                ) ?: return@runCatching CertificateCheck.Failure("Не удалось прочитать сертификат APK", null, null)
                 val installed = packageManager.getPackageInfo(
                     packageName,
                     PackageManager.GET_SIGNING_CERTIFICATES
                 )
-                val remoteInfo = archive.signingInfo ?: return@runCatching false
-                val installedInfo = installed.signingInfo ?: return@runCatching false
+                val remoteInfo = archive.signingInfo ?: return@runCatching CertificateCheck.Failure("Не удалось прочитать сертификат APK", null, null)
+                val installedInfo = installed.signingInfo ?: return@runCatching CertificateCheck.Failure("Не удалось прочитать сертификат установленного приложения", null, null)
                 val remoteSignatures = if (remoteInfo.hasMultipleSigners()) {
                     remoteInfo.apkContentsSigners
                 } else {
@@ -1113,29 +1116,40 @@ class AppUpdateService : Service() {
                 } else {
                     installedInfo.signingCertificateHistory
                 }
-                remoteSignatures.any { remote ->
-                    certificateSha256(remote.toByteArray()) == PRODUCTION_CERTIFICATE_SHA256.lowercase() &&
-                    installedSignatures.any { current ->
-                        remote.toByteArray().contentEquals(current.toByteArray())
-                    }
-                }
+                val remoteDigests = remoteSignatures.map { certificateSha256(it.toByteArray()) }
+                val installedDigests = installedSignatures.map { certificateSha256(it.toByteArray()) }
+                val remoteSha = remoteDigests.firstOrNull { it == PRODUCTION_CERTIFICATE_SHA256.lowercase() }
+                    ?: remoteDigests.firstOrNull()
+                val installedSha = installedDigests.firstOrNull { it == PRODUCTION_CERTIFICATE_SHA256.lowercase() }
+                    ?: installedDigests.firstOrNull()
+                if (!remoteDigests.contains(PRODUCTION_CERTIFICATE_SHA256.lowercase())) {
+                    CertificateCheck.Failure("Сертификат APK не является production-сертификатом", remoteSha, installedSha)
+                } else if (!installedDigests.contains(PRODUCTION_CERTIFICATE_SHA256.lowercase())) {
+                    CertificateCheck.Failure("Текущая версия приложения подписана другим сертификатом. Установите production-сборку перед OTA-обновлением.", remoteSha, installedSha)
+                } else CertificateCheck.Success
             } else {
                 @Suppress("DEPRECATION")
                 val archive = packageManager.getPackageArchiveInfo(
                     apkFile.absolutePath,
                     PackageManager.GET_SIGNATURES
-                ) ?: return@runCatching false
+                ) ?: return@runCatching CertificateCheck.Failure("Не удалось прочитать сертификат APK", null, null)
                 @Suppress("DEPRECATION")
                 val installed = packageManager.getPackageInfo(packageName, PackageManager.GET_SIGNATURES)
                 @Suppress("DEPRECATION")
-                archive.signatures.orEmpty().any { remote ->
-                    certificateSha256(remote.toByteArray()) == PRODUCTION_CERTIFICATE_SHA256.lowercase() &&
-                    installed.signatures.orEmpty().any { current ->
-                        remote.toByteArray().contentEquals(current.toByteArray())
-                    }
-                }
+                val remoteDigests = archive.signatures.orEmpty().map { certificateSha256(it.toByteArray()) }
+                val installedDigests = installed.signatures.orEmpty().map { certificateSha256(it.toByteArray()) }
+                val remoteSha = remoteDigests.firstOrNull { it == PRODUCTION_CERTIFICATE_SHA256.lowercase() } ?: remoteDigests.firstOrNull()
+                val installedSha = installedDigests.firstOrNull { it == PRODUCTION_CERTIFICATE_SHA256.lowercase() } ?: installedDigests.firstOrNull()
+                if (!remoteDigests.contains(PRODUCTION_CERTIFICATE_SHA256.lowercase())) CertificateCheck.Failure("Сертификат APK не является production-сертификатом", remoteSha, installedSha)
+                else if (!installedDigests.contains(PRODUCTION_CERTIFICATE_SHA256.lowercase())) CertificateCheck.Failure("Текущая версия приложения подписана другим сертификатом. Установите production-сборку перед OTA-обновлением.", remoteSha, installedSha)
+                else CertificateCheck.Success
             }
-        }.getOrDefault(false)
+        }.getOrElse { CertificateCheck.Failure("Не удалось проверить сертификат подписи APK", null, null) }
+    }
+
+    private sealed interface CertificateCheck {
+        data object Success : CertificateCheck
+        data class Failure(val message: String, val remoteSha256: String?, val installedSha256: String?) : CertificateCheck
     }
 
     private fun certificateSha256(bytes: ByteArray): String =

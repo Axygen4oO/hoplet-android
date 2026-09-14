@@ -12,6 +12,9 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -53,6 +56,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.Density
@@ -139,7 +143,7 @@ import androidx.compose.ui.text.withStyle
 
 private const val WORKERS_PER_GROUP = 9
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun SettingsTab(
     onConnectRequested: () -> Unit = {},
@@ -167,7 +171,7 @@ fun SettingsTab(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun SettingsTabContent(
     context: android.content.Context,
@@ -2639,64 +2643,79 @@ fun SettingsTabContent(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(top = 4.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(2.dp)
-            ) {
-                Text(
-                    text = stringResource(R.string.app_name),
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onSurface
-                )
-                Text(
-                    text = "• Private Network •",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+            // Компактный брендовый asset занимает фиксированное место и не
+            // конкурирует с кнопками за ширину.
+            Image(
+                painter = painterResource(R.drawable.hoplet_logo),
+                contentDescription = "Hoplet",
+                modifier = Modifier.size(40.dp)
+            )
+
+            Text(
+                text = "Hoplet",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                modifier = Modifier.padding(start = 6.dp)
+            )
+
+            if (!updateVersionLabel.isNullOrBlank()) {
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(horizontal = 8.dp)
+                        .clip(RoundedCornerShape(6.dp))
+                ) {
+                    Text(
+                        text = updateVersionLabel,
+                        style = MaterialTheme.typography.labelLarge,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = MaterialTheme.colorScheme.primary,
+                        maxLines = 1,
+                        softWrap = false,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .basicMarquee(
+                                iterations = Int.MAX_VALUE,
+                                repeatDelayMillis = 900,
+                                initialDelayMillis = 500,
+                                velocity = 30.dp
+                            )
+                    )
+                }
+            } else {
+                Spacer(modifier = Modifier.weight(1f))
             }
 
-            AnimatedVisibility(
-                visible = !updateVersionLabel.isNullOrBlank(),
-                enter = fadeIn(animationSpec = tween(180)) + expandHorizontally(),
-                exit = fadeOut(animationSpec = tween(120)) + shrinkHorizontally(),
-                modifier = (if (!updateVersionLabel.isNullOrBlank()) {
-                    Modifier.weight(1f)
-                } else {
-                    Modifier
-                }).padding(horizontal = 8.dp)
-            ) {
-                Text(
-                    text = updateVersionLabel.orEmpty(),
-                    style = MaterialTheme.typography.labelLarge,
-                    fontWeight = FontWeight.Medium,
-                    color = MaterialTheme.colorScheme.primary,
-                    maxLines = 1,
-                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                    modifier = Modifier.fillMaxWidth()
-                )
-            }
-
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 FilledTonalIconButton(
                     onClick = onUpdatesClick,
-                    modifier = Modifier.semantics {
-                        contentDescription = if (!updateVersionLabel.isNullOrBlank()) {
-                            "Обновления. Доступна новая версия"
-                        } else {
-                            "Обновления"
-                        }
-                    }
+                    modifier = Modifier
+                        .size(44.dp)
+                        .semantics {
+                            contentDescription = if (!updateVersionLabel.isNullOrBlank()) {
+                                "Обновления. Доступна новая версия"
+                            } else {
+                                "Обновления"
+                            }
+                        },
                 ) {
                     Icon(Icons.Outlined.DownloadForOffline, contentDescription = "Обновления")
                 }
-                FilledTonalIconButton(onClick = onNotificationsClick) {
+                FilledTonalIconButton(
+                    onClick = onNotificationsClick,
+                    modifier = Modifier.size(44.dp)
+                ) {
                     Icon(Icons.Default.Notifications, contentDescription = "Уведомления")
                 }
-                FilledTonalIconButton(onClick = { showAppSettingsDialog = true }) {
+                FilledTonalIconButton(
+                    onClick = { showAppSettingsDialog = true },
+                    modifier = Modifier.size(44.dp)
+                ) {
                     Icon(Icons.Default.Settings, contentDescription = "Настройки Tunnel")
                 }
             }

@@ -1,6 +1,7 @@
 package com.wdtt.client.ui
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -30,6 +31,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.DialogProperties
@@ -272,76 +274,147 @@ fun AppUpdateDialog(
 
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
 
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    if (!release.mandatory || isLatestReleaseInfo) HopletSecondaryButton(
-                        onClick = {
-                            when (activeSnapshot?.phase) {
-                                AppUpdatePhase.DOWNLOADING,
-                                AppUpdatePhase.WAITING_FOR_NETWORK -> {
-                                    cancelAppUpdateDownload(context)
-                                    onDismiss()
-                                }
-
-                                AppUpdatePhase.PAUSED,
-                                AppUpdatePhase.ERROR,
-                                AppUpdatePhase.READY_TO_INSTALL,
-                                AppUpdatePhase.CANCELLED,
-                                AppUpdatePhase.VERIFYING -> onDismiss()
-                                else -> if (isLatestReleaseInfo) onOpenReleasePage() else onPostpone()
-                            }
-                        },
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(52.dp)
-                    ) {
-                        Text(secondaryLabel, fontWeight = FontWeight.SemiBold)
+                BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+                    val compactActions = maxWidth < 420.dp
+                    val actionModifier = if (compactActions) {
+                        Modifier.fillMaxWidth()
+                    } else {
+                        Modifier.height(52.dp)
+                    }
+                    @Composable
+                    fun SecondaryActionText() {
+                        Text(
+                            secondaryLabel,
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 15.sp,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    @Composable
+                    fun PrimaryActionText() {
+                        Text(
+                            primaryLabel,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 15.sp,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
+                        )
                     }
 
-                    HopletPrimaryButton(
-                        onClick = {
-                            when (activeSnapshot?.phase) {
-                                AppUpdatePhase.DOWNLOADING,
-                                AppUpdatePhase.WAITING_FOR_NETWORK -> pauseAppUpdateDownload(context)
-                                AppUpdatePhase.PAUSED -> {
-                                    autoInstallRequested = true
-                                    resumeAppUpdateDownload(context)
-                                }
+                    if (compactActions) {
+                        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            if (!release.mandatory || isLatestReleaseInfo) HopletSecondaryButton(
+                                onClick = {
+                                    when (activeSnapshot?.phase) {
+                                        AppUpdatePhase.DOWNLOADING,
+                                        AppUpdatePhase.WAITING_FOR_NETWORK -> {
+                                            cancelAppUpdateDownload(context)
+                                            onDismiss()
+                                        }
 
-                                AppUpdatePhase.CANCELLED -> {
-                                    autoInstallRequested = true
-                                    onDownloadStarted()
-                                    startAppUpdateDownload(context, release)
-                                }
-
-                                AppUpdatePhase.ERROR -> {
-                                    autoInstallRequested = true
-                                    retryAppUpdateDownload(context)
-                                }
-
-                                AppUpdatePhase.READY_TO_INSTALL -> requestInstallDownloadedUpdate(context)
-                                AppUpdatePhase.VERIFYING -> Unit
-                                else -> {
-                                    if (isLatestReleaseInfo) {
-                                        onDismiss()
-                                    } else if (isTagOnly) {
-                                        onDismiss()
-                                    } else {
-                                        autoInstallRequested = true
-                                        onDownloadStarted()
-                                        startAppUpdateDownload(context, release)
+                                        AppUpdatePhase.PAUSED,
+                                        AppUpdatePhase.ERROR,
+                                        AppUpdatePhase.READY_TO_INSTALL,
+                                        AppUpdatePhase.CANCELLED,
+                                        AppUpdatePhase.VERIFYING -> onDismiss()
+                                        else -> if (isLatestReleaseInfo) onOpenReleasePage() else onPostpone()
                                     }
-                                }
-                            }
-                        },
-                        enabled = primaryEnabled,
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(52.dp)
-                    ) {
-                        Text(primaryLabel, fontWeight = FontWeight.Bold)
+                                },
+                                modifier = actionModifier
+                            ) { SecondaryActionText() }
+
+                            HopletPrimaryButton(
+                                onClick = {
+                                    when (activeSnapshot?.phase) {
+                                        AppUpdatePhase.DOWNLOADING,
+                                        AppUpdatePhase.WAITING_FOR_NETWORK -> pauseAppUpdateDownload(context)
+                                        AppUpdatePhase.PAUSED -> {
+                                            autoInstallRequested = true
+                                            resumeAppUpdateDownload(context)
+                                        }
+                                        AppUpdatePhase.CANCELLED -> {
+                                            autoInstallRequested = true
+                                            onDownloadStarted()
+                                            startAppUpdateDownload(context, release)
+                                        }
+                                        AppUpdatePhase.ERROR -> {
+                                            autoInstallRequested = true
+                                            retryAppUpdateDownload(context)
+                                        }
+                                        AppUpdatePhase.READY_TO_INSTALL -> requestInstallDownloadedUpdate(context)
+                                        AppUpdatePhase.VERIFYING -> Unit
+                                        else -> {
+                                            if (isLatestReleaseInfo || isTagOnly) onDismiss()
+                                            else {
+                                                autoInstallRequested = true
+                                                onDownloadStarted()
+                                                startAppUpdateDownload(context, release)
+                                            }
+                                        }
+                                    }
+                                },
+                                enabled = primaryEnabled,
+                                modifier = actionModifier
+                            ) { PrimaryActionText() }
+                        }
+                    } else {
+                        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            if (!release.mandatory || isLatestReleaseInfo) HopletSecondaryButton(
+                                onClick = {
+                                    when (activeSnapshot?.phase) {
+                                        AppUpdatePhase.DOWNLOADING,
+                                        AppUpdatePhase.WAITING_FOR_NETWORK -> {
+                                            cancelAppUpdateDownload(context)
+                                            onDismiss()
+                                        }
+                                        AppUpdatePhase.PAUSED,
+                                        AppUpdatePhase.ERROR,
+                                        AppUpdatePhase.READY_TO_INSTALL,
+                                        AppUpdatePhase.CANCELLED,
+                                        AppUpdatePhase.VERIFYING -> onDismiss()
+                                        else -> if (isLatestReleaseInfo) onOpenReleasePage() else onPostpone()
+                                    }
+                                },
+                                modifier = Modifier.weight(0.9f).height(52.dp)
+                            ) { SecondaryActionText() }
+
+                            HopletPrimaryButton(
+                                onClick = {
+                                    when (activeSnapshot?.phase) {
+                                        AppUpdatePhase.DOWNLOADING,
+                                        AppUpdatePhase.WAITING_FOR_NETWORK -> pauseAppUpdateDownload(context)
+                                        AppUpdatePhase.PAUSED -> {
+                                            autoInstallRequested = true
+                                            resumeAppUpdateDownload(context)
+                                        }
+                                        AppUpdatePhase.CANCELLED -> {
+                                            autoInstallRequested = true
+                                            onDownloadStarted()
+                                            startAppUpdateDownload(context, release)
+                                        }
+                                        AppUpdatePhase.ERROR -> {
+                                            autoInstallRequested = true
+                                            retryAppUpdateDownload(context)
+                                        }
+                                        AppUpdatePhase.READY_TO_INSTALL -> requestInstallDownloadedUpdate(context)
+                                        AppUpdatePhase.VERIFYING -> Unit
+                                        else -> {
+                                            if (isLatestReleaseInfo || isTagOnly) onDismiss()
+                                            else {
+                                                autoInstallRequested = true
+                                                onDownloadStarted()
+                                                startAppUpdateDownload(context, release)
+                                            }
+                                        }
+                                    }
+                                },
+                                enabled = primaryEnabled,
+                                modifier = Modifier.weight(1.35f).height(52.dp)
+                            ) { PrimaryActionText() }
+                        }
                     }
                 }
             }

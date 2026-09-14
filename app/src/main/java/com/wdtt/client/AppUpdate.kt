@@ -22,6 +22,9 @@ import java.net.URL
 import java.net.UnknownHostException
 import java.util.LinkedHashMap
 import javax.net.ssl.SSLException
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import java.util.concurrent.TimeUnit
 
 const val UPDATE_CHECK_NEVER = -1
 const val DEFAULT_UPDATE_CHECK_INTERVAL_HOURS = 12
@@ -35,6 +38,16 @@ private const val GITHUB_API_RATE_LIMIT_FALLBACK_MS = 30L * 60L * 1000L
 private const val RELEASE_NOTES_CACHE_LIMIT = 12
 private val VERSION_NUMBER_REGEX = Regex("\\d+(?:\\.\\d+)*")
 private val SHA256_REGEX = Regex("\\b[a-fA-F0-9]{64}\\b")
+private val otaHttpClient by lazy {
+    OkHttpClient.Builder()
+        .followRedirects(true)
+        .followSslRedirects(true)
+        .retryOnConnectionFailure(true)
+        .connectTimeout(20, TimeUnit.SECONDS)
+        .readTimeout(60, TimeUnit.SECONDS)
+        .writeTimeout(30, TimeUnit.SECONDS)
+        .build()
+}
 @Volatile private var githubApiCooldownUntilMs = 0L
 @Volatile private var lastUpdateRequestErrorMessage = ""
 private val updateCheckMutex = Mutex()
@@ -106,12 +119,17 @@ suspend fun fetchLatestReleaseInfo(@Suppress("UNUSED_PARAMETER") localVersion: S
     val raw = fetchGitHubApi(GITHUB_RELEASES_URL) ?: return@withContext null
     val releases = runCatching { JSONArray(raw) }.getOrElse { setLastUpdateRequestError("Сервер обновлений вернул повреждённый список релизов"); return@withContext null }
     var best: AppReleaseInfo? = null
+    var rejected = 0
     for (i in 0 until releases.length()) {
         val json = releases.optJSONObject(i) ?: continue
         if (json.optBoolean("draft") || (!includePrerelease && json.optBoolean("prerelease"))) continue
-        val candidate = json.toAppReleaseInfo()?.let(::enrichReleaseFromManifest) ?: continue
+        val shell = json.toAppReleaseInfo()
+        if (shell == null) { rejected++; continue }
+        val candidate = enrichReleaseFromManifest(shell)
+        if (candidate == null) { rejected++; continue }
         if (best == null || candidate.versionCode!! > best.versionCode!!) best = candidate
     }
+    if (best == null && rejected > 0) setLastUpdateRequestError("Опубликованные релизы не прошли проверку OTA-метаданных")
     best
     }
 }
@@ -162,14 +180,41 @@ private data class ParsedVersionTag(val core: List<Int>, val prerelease: String?
 private fun parseVersionTag(version: String): ParsedVersionTag { val n = normalizeVersionTag(version).removePrefix("v").removePrefix("V"); val m = VERSION_NUMBER_REGEX.find(n)?.value ?: return ParsedVersionTag(emptyList(), null); return ParsedVersionTag(m.split('.').mapNotNull(String::toIntOrNull), n.removePrefix(m).trim().trimStart('-').ifBlank { null }) }
 
 private fun enrichReleaseFromManifest(release: AppReleaseInfo): AppReleaseInfo? {
-    val raw = release.updateManifestUrl?.let { fetchHttpText(it, "update.json", "application/json", false) } ?: return null
-    val m = parseUpdateManifest(raw) ?: return null
-    if (!m.packageNamePresent || m.packageName != BuildConfig.APPLICATION_ID || m.packageName != OTA_PACKAGE_NAME || !m.apk.equals(release.downloadFileName, false)) return null
+    val raw = release.updateManifestUrl?.let { fetchHttpText(it, "update.json", "application/json", false) }
+    if (raw == null) { Log.w(UPDATE_LOG_TAG, "OTA ${release.versionTag}: update.json request failed") ; return null }
+    val m = parseUpdateManifest(raw)
+    if (m == null) { Log.w(UPDATE_LOG_TAG, "OTA ${release.versionTag}: update.json parse failed") ; return null }
+    if (!m.packageNamePresent || m.packageName != BuildConfig.APPLICATION_ID || m.packageName != OTA_PACKAGE_NAME) { Log.w(UPDATE_LOG_TAG, "OTA ${release.versionTag}: package mismatch metadata=${m.packageName} app=${BuildConfig.APPLICATION_ID}"); return null }
+    if (!m.apk.equals(release.downloadFileName, false)) { Log.w(UPDATE_LOG_TAG, "OTA ${release.versionTag}: apk mismatch metadata=${m.apk} asset=${release.downloadFileName}"); return null }
     return release.copy(versionName = m.versionName, versionCode = m.versionCode, packageName = m.packageName, expectedSha256 = m.sha256, releaseNotes = release.releaseNotes.ifBlank { m.releaseNotes }, publishedAt = m.publishedAt ?: release.publishedAt, mandatory = m.mandatory).takeIf(::isInstallableOtaRelease)?.let { mergeReleaseInfo(null, it) }
 }
 private fun fetchGitHubApi(url: String): String? { if (System.currentTimeMillis() < githubApiCooldownUntilMs) { setLastUpdateRequestError("GitHub временно ограничил запросы, попробуйте позже"); return null }; return fetchHttpText(url, "GitHub API", "application/vnd.github+json", true) }
-private fun fetchHttpText(url: String, sourceLabel: String, accept: String, isGitHubApi: Boolean): String? { var c: HttpURLConnection? = null; return try { c = URL(url).openConnection() as HttpURLConnection; c.requestMethod = "GET"; c.connectTimeout = 15_000; c.readTimeout = 30_000; c.useCaches = false; c.setRequestProperty("Accept", accept); c.setRequestProperty("User-Agent", "HopletAndroid/${BuildConfig.VERSION_NAME}"); if (isGitHubApi) c.setRequestProperty("X-GitHub-Api-Version", "2022-11-28"); val code = c.responseCode; val body = (if (code in 200..299) c.inputStream else c.errorStream)?.bufferedReader()?.use { it.readText() }.orEmpty(); if (code in 200..299) { if (isGitHubApi) githubApiCooldownUntilMs = 0L; body } else { if (isGitHubApi) noteGitHubApiCooldown(c, code, body); setLastUpdateRequestError(describeHttpError(code, body)); Log.w(UPDATE_LOG_TAG, "$sourceLabel returned HTTP $code"); null } } catch (e: Exception) { setLastUpdateRequestError(describeRequestException(e)); null } finally { c?.disconnect() } }
-private fun noteGitHubApiCooldown(c: HttpURLConnection, code: Int, body: String) { if (code != 403 && code != 429) return; val now = System.currentTimeMillis(); val retry = c.getHeaderField("Retry-After")?.toLongOrNull()?.let { now + it * 1000 }; val reset = c.getHeaderField("X-RateLimit-Reset")?.toLongOrNull()?.let { it * 1000 }; githubApiCooldownUntilMs = listOfNotNull(retry, reset).filter { it > now }.minOrNull() ?: now + if (body.contains("rate limit", true)) GITHUB_API_RATE_LIMIT_FALLBACK_MS else 300_000 }
+private fun fetchHttpText(url: String, sourceLabel: String, accept: String, isGitHubApi: Boolean): String? {
+    return try {
+        val request = Request.Builder().url(url).get()
+            .header("Accept", accept)
+            .header("User-Agent", "HopletAndroid/${BuildConfig.VERSION_NAME}")
+            .apply { if (isGitHubApi) header("X-GitHub-Api-Version", "2022-11-28") }
+            .build()
+        otaHttpClient.newCall(request).execute().use { response ->
+            val body = response.body?.string().orEmpty()
+            if (response.isSuccessful) {
+            if (isGitHubApi) githubApiCooldownUntilMs = 0L
+            body
+            } else {
+                if (isGitHubApi) noteGitHubApiCooldown(response.code, response.header("Retry-After"), response.header("X-RateLimit-Reset"), body)
+                setLastUpdateRequestError(describeHttpError(response.code, body))
+                Log.w(UPDATE_LOG_TAG, "$sourceLabel returned HTTP ${response.code}")
+                null
+            }
+        }
+    } catch (e: Exception) {
+        setLastUpdateRequestError(describeRequestException(e))
+        Log.w(UPDATE_LOG_TAG, "$sourceLabel request failed", e)
+        null
+    }
+}
+private fun noteGitHubApiCooldown(code: Int, retryAfter: String?, rateLimitReset: String?, body: String) { if (code != 403 && code != 429) return; val now = System.currentTimeMillis(); val retry = retryAfter?.toLongOrNull()?.let { now + it * 1000 }; val reset = rateLimitReset?.toLongOrNull()?.let { it * 1000 }; githubApiCooldownUntilMs = listOfNotNull(retry, reset).filter { it > now }.minOrNull() ?: now + if (body.contains("rate limit", true)) GITHUB_API_RATE_LIMIT_FALLBACK_MS else 300_000 }
 
 internal fun JSONObject.toAppReleaseInfo(): AppReleaseInfo? {
     if (optBoolean("draft")) return null
