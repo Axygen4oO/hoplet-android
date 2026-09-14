@@ -458,7 +458,7 @@ fun MainScreen(
                 AppReleaseInfo(
                     versionTag = cachedReleaseNotesVersion,
                     releaseUrl = cachedReleaseUrl.ifBlank {
-                        "https://github.com/Axygen4oO/hoplet-android/releases/tag/$cachedReleaseNotesVersion"
+                        "https://github.com/Axygen4oO/hoplet-android/releases"
                     },
                     source = RemoteVersionSource.Release,
                     releaseNotes = cachedReleaseNotes,
@@ -612,7 +612,7 @@ fun MainScreen(
                                         AppReleaseInfo(
                                             versionTag = cachedReleaseNotesVersion,
                                             releaseUrl = cachedReleaseUrl.ifBlank {
-                                                "https://github.com/Axygen4oO/hoplet-android/releases/tag/$cachedReleaseNotesVersion"
+                                        "https://github.com/Axygen4oO/hoplet-android/releases"
                                             },
                                             source = RemoteVersionSource.Release,
                                             releaseNotes = cachedReleaseNotes,

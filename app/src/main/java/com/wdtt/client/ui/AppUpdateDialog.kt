@@ -37,7 +37,6 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.wdtt.client.AppReleaseInfo
 import com.wdtt.client.AppUpdatePhase
 import com.wdtt.client.BuildConfig
-import com.wdtt.client.RemoteVersionSource
 import com.wdtt.client.isInstallableOtaRelease
 import com.wdtt.client.SettingsStore
 import com.wdtt.client.cancelAppUpdateDownload
@@ -59,7 +58,7 @@ fun AppUpdateDialog(
     onDownloadStarted: () -> Unit,
     onOpenReleasePage: () -> Unit,
 ) {
-    val isTagOnly = release.source == RemoteVersionSource.Tag || !isInstallableOtaRelease(release)
+    val isTagOnly = !isInstallableOtaRelease(release)
     val title = when {
         isLatestReleaseInfo -> "Последнее обновление"
         isTagOnly -> "Доступна новая версия"

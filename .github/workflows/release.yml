@@ -163,13 +163,12 @@ jobs:
           jq -n \
             --arg versionName "$version_name" \
             --argjson versionCode "$version_code" \
-            --arg tag "$TAG_NAME" \
+            --arg packageName "net.qwdtt.client" \
             --arg apk "app-release.apk" \
             --arg sha256 "$apk_sha" \
-            --arg releaseUrl "https://github.com/${{ github.repository }}/releases/tag/$TAG_NAME" \
             --arg publishedAt "${{ github.event.release.published_at || '' }}" \
             --argjson size "$apk_size" \
-            '{versionName:$versionName,versionCode:$versionCode,tag:$tag,apk:$apk,sha256:$sha256,mandatory:false,releaseUrl:$releaseUrl,publishedAt:$publishedAt,size:$size}' \
+            '{versionName:$versionName,versionCode:$versionCode,packageName:$packageName,apk:$apk,sha256:$sha256,mandatory:false,publishedAt:$publishedAt,size:$size}' \
             > dist/update.json
           {
             (cd dist && sha256sum app-release.apk app-release.aab)

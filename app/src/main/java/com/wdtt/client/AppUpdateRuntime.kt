@@ -2,6 +2,7 @@ package com.wdtt.client
 
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.util.Log
 import androidx.core.content.ContextCompat
@@ -72,7 +73,7 @@ sealed interface UpdateUiState {
     data class Verifying(val release: AppReleaseInfo) : UpdateUiState
     data class ReadyToInstall(
         val release: AppReleaseInfo,
-        val apkFile: File,
+        val apkUri: Uri?,
     ) : UpdateUiState
     data class Error(
         val message: String,
@@ -87,6 +88,7 @@ data class AppUpdateDownloadSnapshot(
     val releaseUrl: String = "",
     val versionName: String = "",
     val versionCode: Long = -1L,
+    val packageName: String = "",
     val downloadUrl: String = "",
     val releaseNotes: String = "",
     val isPrerelease: Boolean = false,
@@ -157,6 +159,7 @@ data class AppUpdateDownloadSnapshot(
             source = source,
             versionName = versionName.ifBlank { null },
             versionCode = versionCode.takeIf { it >= 0L },
+            packageName = packageName.ifBlank { null },
             downloadUrl = downloadUrl.ifBlank { null },
             releaseNotes = releaseNotes,
             isPrerelease = isPrerelease,
@@ -188,7 +191,7 @@ data class AppUpdateDownloadSnapshot(
                 when {
                     release == null -> UpdateUiState.Error("Не удалось определить релиз обновления")
                     apkPath.isBlank() -> UpdateUiState.Error("Файл обновления не найден", release)
-                    else -> UpdateUiState.ReadyToInstall(release, File(apkPath))
+                    else -> UpdateUiState.ReadyToInstall(release, null)
                 }
             }
             AppUpdatePhase.ERROR -> UpdateUiState.Error(
@@ -210,8 +213,7 @@ internal fun mergeUpdateDownloadSnapshot(
     val sameVersion = existing.matchesVersion(incoming.versionTag)
     return if (
         sameVersion &&
-        existing.source == RemoteVersionSource.Release &&
-        incoming.source == RemoteVersionSource.Tag
+        existing.source == RemoteVersionSource.Release && incoming.source != RemoteVersionSource.Release
     ) {
         existing
     } else {
@@ -271,6 +273,7 @@ internal fun Intent.putAppReleaseInfo(release: AppReleaseInfo): Intent = apply {
     putExtra(EXTRA_RELEASE_URL, release.releaseUrl)
     putExtra(EXTRA_VERSION_NAME, release.versionName)
     putExtra(EXTRA_VERSION_CODE, release.versionCode ?: -1L)
+    putExtra("extra_package_name", release.packageName)
     putExtra(EXTRA_DOWNLOAD_URL, release.downloadUrl)
     putExtra(EXTRA_RELEASE_NOTES, release.releaseNotes)
     putExtra(EXTRA_IS_PRERELEASE, release.isPrerelease)
@@ -295,6 +298,7 @@ internal fun Intent.readAppReleaseInfo(): AppReleaseInfo? {
             ?: RemoteVersionSource.Release,
         versionName = getStringExtra(EXTRA_VERSION_NAME)?.trim()?.ifBlank { null },
         versionCode = getLongExtra(EXTRA_VERSION_CODE, -1L).takeIf { it >= 0L },
+        packageName = getStringExtra("extra_package_name")?.trim().orEmpty(),
         downloadUrl = getStringExtra(EXTRA_DOWNLOAD_URL)?.trim()?.ifBlank { null },
         releaseNotes = getStringExtra(EXTRA_RELEASE_NOTES).orEmpty(),
         isPrerelease = getBooleanExtra(EXTRA_IS_PRERELEASE, false),
@@ -315,6 +319,7 @@ internal fun encodeAppUpdateSnapshot(snapshot: AppUpdateDownloadSnapshot): Strin
     put("releaseUrl", snapshot.releaseUrl)
     put("versionName", snapshot.versionName)
     put("versionCode", snapshot.versionCode)
+    put("packageName", snapshot.packageName)
     put("downloadUrl", snapshot.downloadUrl)
     put("releaseNotes", snapshot.releaseNotes)
     put("isPrerelease", snapshot.isPrerelease)
@@ -356,6 +361,7 @@ internal fun decodeAppUpdateSnapshot(raw: String?): AppUpdateDownloadSnapshot {
             releaseUrl = json.optString("releaseUrl"),
             versionName = json.optString("versionName"),
             versionCode = json.optLong("versionCode", -1L),
+            packageName = json.optString("packageName"),
             downloadUrl = json.optString("downloadUrl"),
             releaseNotes = json.optString("releaseNotes"),
             isPrerelease = json.optBoolean("isPrerelease"),

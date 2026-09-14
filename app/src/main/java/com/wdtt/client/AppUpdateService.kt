@@ -37,6 +37,7 @@ import java.io.IOException
 import java.net.ConnectException
 import java.net.SocketTimeoutException
 import java.security.MessageDigest
+import java.util.zip.ZipFile
 import java.util.concurrent.TimeUnit
 import javax.net.ssl.SSLException
 
@@ -624,6 +625,7 @@ class AppUpdateService : Service() {
             releaseUrl = release.releaseUrl,
             versionName = release.versionName.orEmpty(),
             versionCode = release.versionCode ?: -1L,
+            packageName = release.packageName.orEmpty(),
             downloadUrl = release.downloadUrl.orEmpty(),
             releaseNotes = releaseNotes,
             isPrerelease = release.isPrerelease,
@@ -1020,7 +1022,9 @@ class AppUpdateService : Service() {
     private fun moveDownloadedPart(partFile: File, targetFile: File): Boolean {
         return try {
             if (!partFile.exists()) return false
-            partFile.copyTo(targetFile, overwrite = true)
+            if (targetFile.exists()) targetFile.delete()
+            if (partFile.renameTo(targetFile)) return true
+            partFile.copyTo(targetFile, overwrite = false)
             partFile.delete()
             true
         } catch (error: Exception) {
@@ -1060,6 +1064,10 @@ class AppUpdateService : Service() {
             return VerificationResult.Failure("Загруженный APK принадлежит другому приложению")
         }
         Log.i(LOG_TAG, "Update package verification passed: package=${archiveInfo.packageName}")
+
+        if (!hasUniversalNativeLibraries(apkFile)) {
+            return VerificationResult.Failure("APK не является универсальной production-сборкой")
+        }
 
         if (!hasMatchingSigningCertificate(apkFile)) {
             Log.w(LOG_TAG, "Update certificate verification failed: version=${snapshot.versionTag}")
@@ -1106,6 +1114,7 @@ class AppUpdateService : Service() {
                     installedInfo.signingCertificateHistory
                 }
                 remoteSignatures.any { remote ->
+                    certificateSha256(remote.toByteArray()) == PRODUCTION_CERTIFICATE_SHA256.lowercase() &&
                     installedSignatures.any { current ->
                         remote.toByteArray().contentEquals(current.toByteArray())
                     }
@@ -1120,6 +1129,7 @@ class AppUpdateService : Service() {
                 val installed = packageManager.getPackageInfo(packageName, PackageManager.GET_SIGNATURES)
                 @Suppress("DEPRECATION")
                 archive.signatures.orEmpty().any { remote ->
+                    certificateSha256(remote.toByteArray()) == PRODUCTION_CERTIFICATE_SHA256.lowercase() &&
                     installed.signatures.orEmpty().any { current ->
                         remote.toByteArray().contentEquals(current.toByteArray())
                     }
@@ -1127,6 +1137,16 @@ class AppUpdateService : Service() {
             }
         }.getOrDefault(false)
     }
+
+    private fun certificateSha256(bytes: ByteArray): String =
+        MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+
+    private fun hasUniversalNativeLibraries(apkFile: File): Boolean = runCatching {
+        ZipFile(apkFile).use { zip ->
+            val required = listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+            required.all { abi -> zip.entries().asSequence().any { entry -> entry.name.startsWith("lib/$abi/") && entry.name.endsWith(".so") } }
+        }
+    }.getOrDefault(false)
 
     private fun readArchivePackageInfo(apkFile: File): PackageInfo? {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
