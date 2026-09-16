@@ -48,29 +48,65 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sdk_root="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
-          test -n "$sdk_root" || { echo "Neither ANDROID_SDK_ROOT nor ANDROID_HOME is set" >&2; exit 1; }
-          test -d "$sdk_root" || { echo "Android SDK directory does not exist: $sdk_root" >&2; exit 1; }
-          command -v sdkmanager >/dev/null || { echo "sdkmanager is not available on PATH" >&2; exit 1; }
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          test -n "$SDK" || { echo "Neither ANDROID_HOME nor ANDROID_SDK_ROOT is set" >&2; exit 1; }
+          test -d "$SDK" || { echo "Android SDK directory does not exist: $SDK" >&2; exit 1; }
 
-          export ANDROID_SDK_ROOT="$sdk_root"
-          export ANDROID_HOME="$sdk_root"
+          SDKMANAGER="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          if [[ ! -x "$SDKMANAGER" ]]; then
+            mapfile -t sdkmanager_candidates < <(
+              find "$SDK/cmdline-tools" -type f -name sdkmanager -path '*/bin/sdkmanager' -print 2>/dev/null \
+                | sort -V
+            )
+            ((${#sdkmanager_candidates[@]} > 0)) || {
+              echo "No executable sdkmanager found under $SDK/cmdline-tools" >&2
+              exit 1
+            }
+            SDKMANAGER="${sdkmanager_candidates[${#sdkmanager_candidates[@]}-1]}"
+          fi
+          test -x "$SDKMANAGER" || { echo "sdkmanager is not executable: $SDKMANAGER" >&2; exit 1; }
+          sdkmanager_bin="$(dirname "$SDKMANAGER")"
+
+          export ANDROID_SDK_ROOT="$SDK"
+          export ANDROID_HOME="$SDK"
+          export PATH="$sdkmanager_bin:$SDK/cmdline-tools/latest/bin:$SDK/platform-tools:$PATH"
+          {
+            echo "$sdkmanager_bin"
+            echo "$SDK/cmdline-tools/latest/bin"
+            echo "$SDK/platform-tools"
+          } >> "$GITHUB_PATH"
+          {
+            echo "ANDROID_SDK_ROOT=$SDK"
+            echo "ANDROID_HOME=$SDK"
+            echo "ANDROID_NDK_HOME=$SDK/ndk/29.0.13846066"
+            echo "ANDROID_NDK_ROOT=$SDK/ndk/29.0.13846066"
+          } >> "$GITHUB_ENV"
+
+          echo "ANDROID_HOME=$ANDROID_HOME"
           echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+          echo "SDK=$SDK"
+          echo "SDKMANAGER=$SDKMANAGER"
+          command -v sdkmanager
           sdkmanager --version
-          yes | sdkmanager --licenses || true
-          sdkmanager \
+          ls -la "$SDK/cmdline-tools"
+          ls -la "$SDK/cmdline-tools/latest/bin" || true
+          ls -la "$SDK/platform-tools" || true
+
+          set +o pipefail
+          yes | "$SDKMANAGER" --licenses >/dev/null
+          licenses_status=${PIPESTATUS[1]}
+          set -o pipefail
+          test "$licenses_status" -eq 0 || {
+            echo "sdkmanager --licenses failed with exit code $licenses_status" >&2
+            exit "$licenses_status"
+          }
+          "$SDKMANAGER" \
             "platform-tools" \
             "platforms;android-35" \
             "build-tools;35.0.0" \
             "ndk;29.0.13846066"
 
-          test -d "$sdk_root/ndk/29.0.13846066"
-          {
-            echo "ANDROID_SDK_ROOT=$sdk_root"
-            echo "ANDROID_HOME=$sdk_root"
-            echo "ANDROID_NDK_HOME=$sdk_root/ndk/29.0.13846066"
-            echo "ANDROID_NDK_ROOT=$sdk_root/ndk/29.0.13846066"
-          } >> "$GITHUB_ENV"
+          test -d "$SDK/ndk/29.0.13846066"
 
       - name: Configure production signing
         shell: bash
