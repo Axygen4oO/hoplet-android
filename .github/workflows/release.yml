@@ -38,17 +38,39 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Set up Go and Android NDK
+      - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.25'
           cache: true
 
-      - uses: android-actions/setup-android@v3
-      - run: sdkmanager "ndk;29.0.13846066"
-      - run: |
-          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/29.0.13846066" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/29.0.13846066" >> "$GITHUB_ENV"
+      - name: Configure runner Android SDK and NDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdk_root="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
+          test -n "$sdk_root" || { echo "Neither ANDROID_SDK_ROOT nor ANDROID_HOME is set" >&2; exit 1; }
+          test -d "$sdk_root" || { echo "Android SDK directory does not exist: $sdk_root" >&2; exit 1; }
+          command -v sdkmanager >/dev/null || { echo "sdkmanager is not available on PATH" >&2; exit 1; }
+
+          export ANDROID_SDK_ROOT="$sdk_root"
+          export ANDROID_HOME="$sdk_root"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+          sdkmanager --version
+          yes | sdkmanager --licenses || true
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0" \
+            "ndk;29.0.13846066"
+
+          test -d "$sdk_root/ndk/29.0.13846066"
+          {
+            echo "ANDROID_SDK_ROOT=$sdk_root"
+            echo "ANDROID_HOME=$sdk_root"
+            echo "ANDROID_NDK_HOME=$sdk_root/ndk/29.0.13846066"
+            echo "ANDROID_NDK_ROOT=$sdk_root/ndk/29.0.13846066"
+          } >> "$GITHUB_ENV"
 
       - name: Configure production signing
         shell: bash
@@ -62,6 +84,18 @@ jobs:
             echo "KEY_ALIAS=$KEY_ALIAS"
             echo "KEY_PASSWORD=$KEY_PASSWORD"
           } > local.properties
+
+      - name: Verify release build toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          java -version
+          go version
+          sdkmanager --version
+          ls -la "$ANDROID_SDK_ROOT"
+          ls -la "$ANDROID_SDK_ROOT/build-tools" || true
+          ls -la "$ANDROID_SDK_ROOT/platforms" || true
+          ls -la "$ANDROID_SDK_ROOT/ndk" || true
 
       - name: Build signed APK and AAB
         run: |
