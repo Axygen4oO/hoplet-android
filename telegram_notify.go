@@ -2,19 +2,20 @@ package main
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
+	"time"
 )
 
 const (
 	notificationStageTitle    = "title"
 	notificationStageMessage  = "message"
 	notificationStageConfirm  = "confirm"
-	notificationPanelCallback = "panel_notify"
+	notificationPanelCallback = "nt"
 )
 
-const notificationPreviewHeader = "--------------------------------"
-
 func startNotificationWizard(token string, adminID int64) {
+	resetPushComposeState()
 	resetNotificationComposeState()
 	tgState.NotificationStage = notificationStageTitle
 
@@ -22,7 +23,7 @@ func startNotificationWizard(token string, adminID int64) {
 		token,
 		adminID,
 		"Введите заголовок уведомления",
-		nil,
+		map[string]interface{}{"inline_keyboard": [][]map[string]interface{}{{{"text": "◀️ Назад", "callback_data": "notify_cancel"}}}},
 	)
 }
 
@@ -30,13 +31,122 @@ func startNotificationCompose(token string, adminID int64) {
 	startNotificationWizard(token, adminID)
 }
 
-func handleNotificationPanelAction(token string, adminID int64, data string) bool {
-	if data != notificationPanelCallback {
-		return false
+func handleNotificationPanelAction(token string, adminID int64, data string, messageIDs ...int) bool {
+	messageID := 0
+	if len(messageIDs) > 0 {
+		messageID = messageIDs[0]
 	}
+	switch {
+	case data == notificationPanelCallback || data == "nt_refresh":
+		showNotificationManagement(token, adminID, messageID)
+		return true
+	case data == "nt_new":
+		startNotificationWizard(token, adminID)
+		return true
+	case data == "push_new":
+		startPushWizard(token, adminID)
+		return true
+	case data == "nt_back":
+		showMainPanel(token, adminID, messageID, true)
+		return true
+	case strings.HasPrefix(data, "nt_v_"):
+		showNotificationDetails(token, adminID, messageID, notificationCallbackID(data, "nt_v_"))
+		return true
+	case strings.HasPrefix(data, "nt_dc_"):
+		id := notificationCallbackID(data, "nt_dc_")
+		if id > 0 {
+			deleteNotification(id)
+		}
+		showNotificationManagement(token, adminID, messageID)
+		return true
+	case strings.HasPrefix(data, "nt_d_"):
+		showNotificationDeleteConfirmation(token, adminID, messageID, notificationCallbackID(data, "nt_d_"))
+		return true
+	case strings.HasPrefix(data, "nt_r_"):
+		id := notificationCallbackID(data, "nt_r_")
+		if source, ok := getNotification(id); ok {
+			published := publishNotification(source.Title, source.Message)
+			showNotificationDetails(token, adminID, messageID, published.ID)
+		} else {
+			showNotificationManagement(token, adminID, messageID)
+		}
+		return true
+	}
+	return false
+}
 
-	startNotificationWizard(token, adminID)
-	return true
+func notificationCallbackID(data, prefix string) int64 {
+	id, _ := strconv.ParseInt(strings.TrimPrefix(data, prefix), 10, 64)
+	return id
+}
+
+func notificationHistorySnapshot() []NotificationRecord {
+	dbMutex.Lock()
+	defer dbMutex.Unlock()
+	return append([]NotificationRecord(nil), db.Notifications...)
+}
+
+func showNotificationManagement(token string, adminID int64, messageID int) {
+	items := notificationHistorySnapshot()
+	var text strings.Builder
+	text.WriteString("🔔 УВЕДОМЛЕНИЯ\n\nПоследние уведомления:\n")
+	if len(items) == 0 {
+		text.WriteString("\nУведомлений пока нет.")
+	}
+	keyboard := make([][]map[string]interface{}, 0, len(items)+3)
+	for index, item := range items {
+		fmt.Fprintf(&text, "\n%d. %s\n   %s\n", index+1, item.Title, formatTelegramNotificationTime(item.CreatedAt))
+		keyboard = append(keyboard, []map[string]interface{}{{
+			"text": fmt.Sprintf("Открыть #%d", item.ID), "callback_data": fmt.Sprintf("nt_v_%d", item.ID),
+		}})
+	}
+	keyboard = append(keyboard,
+		[]map[string]interface{}{{"text": "➕ Новое уведомление", "callback_data": "nt_new"}},
+		[]map[string]interface{}{{"text": "📢 Отправить push всем", "callback_data": "push_new"}, {"text": "👤 Push пользователю", "callback_data": "push_user"}},
+		[]map[string]interface{}{{"text": "🗑 Удалить", "callback_data": notificationDeleteMenuCallback(items)}, {"text": "🔄 Обновить", "callback_data": "nt_refresh"}},
+		[]map[string]interface{}{{"text": "◀️ Назад", "callback_data": "nt_back"}},
+	)
+	editTelegramPlain(token, adminID, messageID, text.String(), map[string]interface{}{"inline_keyboard": keyboard})
+}
+
+func notificationDeleteMenuCallback(items []NotificationRecord) string {
+	if len(items) == 0 {
+		return "nt_refresh"
+	}
+	return fmt.Sprintf("nt_d_%d", items[0].ID)
+}
+
+func showNotificationDetails(token string, adminID int64, messageID int, id int64) {
+	item, ok := getNotification(id)
+	if !ok {
+		showNotificationManagement(token, adminID, messageID)
+		return
+	}
+	text := fmt.Sprintf("🔔 Уведомление #%d\n\nЗаголовок:\n%s\n\nТекст:\n%s\n\nСоздано:\n%s", item.ID, item.Title, item.Message, formatTelegramNotificationTime(item.CreatedAt))
+	keyboard := [][]map[string]interface{}{
+		{{"text": "🗑 Удалить", "callback_data": fmt.Sprintf("nt_d_%d", item.ID)}, {"text": "📤 Повторно отправить", "callback_data": fmt.Sprintf("nt_r_%d", item.ID)}},
+		{{"text": "◀️ Назад", "callback_data": "nt_refresh"}},
+	}
+	editTelegramPlain(token, adminID, messageID, text, map[string]interface{}{"inline_keyboard": keyboard})
+}
+
+func showNotificationDeleteConfirmation(token string, adminID int64, messageID int, id int64) {
+	if _, ok := getNotification(id); !ok {
+		showNotificationManagement(token, adminID, messageID)
+		return
+	}
+	keyboard := [][]map[string]interface{}{
+		{{"text": "✅ Да, удалить", "callback_data": fmt.Sprintf("nt_dc_%d", id)}},
+		{{"text": "❌ Отмена", "callback_data": fmt.Sprintf("nt_v_%d", id)}},
+	}
+	editTelegramPlain(token, adminID, messageID, "Вы действительно хотите удалить уведомление?", map[string]interface{}{"inline_keyboard": keyboard})
+}
+
+func formatTelegramNotificationTime(timestamp int64) string {
+	if timestamp <= 0 {
+		return "дата неизвестна"
+	}
+	return time.Unix(timestamp, 0).Local().Format("02.01 15:04")
 }
 
 func cancelNotificationCompose(token string, chatID int64) {
@@ -92,7 +202,7 @@ func handleNotificationInput(token string, adminID int64, text string) bool {
 				token,
 				adminID,
 				"Введите текст уведомления",
-				nil,
+				map[string]interface{}{"inline_keyboard": [][]map[string]interface{}{{{"text": "◀️ Назад", "callback_data": "notify_cancel"}}}},
 			)
 			return true
 		}
@@ -145,10 +255,10 @@ func handleNotificationCallback(
 ) bool {
 	switch data {
 	case "notify_cancel":
-		if tgState.NotificationStage != notificationStageConfirm {
+		if !hasActiveNotificationCompose() {
 			return true
 		}
-		if normalizeTelegramText(messageText) != tgState.NotificationPreview {
+		if tgState.NotificationStage == notificationStageConfirm && normalizeTelegramText(messageText) != tgState.NotificationPreview {
 			return true
 		}
 
@@ -187,7 +297,7 @@ func handleNotificationCallback(
 			adminID,
 			messageID,
 			fmt.Sprintf("✅ Уведомление опубликовано.\n\nID: %d", notification.ID),
-			nil,
+			map[string]interface{}{"inline_keyboard": [][]map[string]interface{}{{{"text": "🔔 К уведомлениям", "callback_data": "nt_refresh"}}}},
 		)
 		return true
 	}
@@ -208,37 +318,28 @@ func publishNotificationSafely(title, message string) (notification AppNotificat
 
 func buildNotificationPreviewText(title, message string) string {
 	return fmt.Sprintf(
-		"Предпросмотр\n\n%s\n\nЗаголовок:\n\n%s\n\nТекст:\n\n%s\n\n%s",
-		notificationPreviewHeader,
+		"🔔 ПРЕДПРОСМОТР\n\nЗаголовок:\n%s\n\nТекст:\n%s",
 		title,
 		message,
-		notificationPreviewHeader,
 	)
 }
 
 func parseNotificationPreviewText(text string) (string, string, bool) {
 	normalized := normalizeTelegramText(text)
-	prefix := "Предпросмотр\n\n" + notificationPreviewHeader + "\n\nЗаголовок:\n\n"
+	prefix := "🔔 ПРЕДПРОСМОТР\n\nЗаголовок:\n"
 	if !strings.HasPrefix(normalized, prefix) {
 		return "", "", false
 	}
 
 	body := strings.TrimPrefix(normalized, prefix)
-	titleSeparator := "\n\nТекст:\n\n"
+	titleSeparator := "\n\nТекст:\n"
 	titleEnd := strings.Index(body, titleSeparator)
 	if titleEnd < 0 {
 		return "", "", false
 	}
 
 	title := body[:titleEnd]
-	messagePart := body[titleEnd+len(titleSeparator):]
-	footer := "\n\n" + notificationPreviewHeader
-	messageEnd := strings.LastIndex(messagePart, footer)
-	if messageEnd < 0 {
-		return "", "", false
-	}
-
-	message := messagePart[:messageEnd]
+	message := body[titleEnd+len(titleSeparator):]
 	if strings.TrimSpace(title) == "" || strings.TrimSpace(message) == "" {
 		return "", "", false
 	}

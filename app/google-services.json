@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "681922833915",
+    "project_id": "hoplet-ee3a2",
+    "storage_bucket": "hoplet-ee3a2.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:681922833915:android:9d9a3eaa2fdd2709946f5e",
+        "android_client_info": {
+          "package_name": "net.qwdtt.client"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBWsr3V9Obj9uLAH23UN6p4ODArc_SQ7pw"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

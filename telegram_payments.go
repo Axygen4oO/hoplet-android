@@ -8,7 +8,9 @@ import (
 	"strings"
 )
 
-const defaultTelegramPaymentsProviderToken = "381764678:TEST:185872"
+// Payment provider credentials must be supplied explicitly for the deployment.
+// Never fall back to Telegram's sandbox token in production.
+const defaultTelegramPaymentsProviderToken = ""
 
 type telegramSuccessfulPaymentPayload struct {
 	Currency                string `json:"currency"`

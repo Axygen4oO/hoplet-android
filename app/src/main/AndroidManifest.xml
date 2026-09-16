@@ -24,6 +24,13 @@
         android:extractNativeLibs="true"
         android:theme="@style/Theme.WDTTClient">
 
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_icon"
+            android:resource="@drawable/ic_notification_hoplet" />
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_color"
+            android:resource="@color/notification_accent" />
+
         <activity
             android:name=".MainActivity"
             android:configChanges="orientation|screenSize"
@@ -42,6 +49,23 @@
                 <action android:name="android.service.quicksettings.action.QS_TILE_PREFERENCES" />
             </intent-filter>
             <!-- Открытие .qwdtt файлов -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="hoplet" android:host="notifications" />
+                <data android:scheme="hoplet" android:host="subscription" />
+                <data android:scheme="hoplet" android:host="support" />
+                <data android:scheme="hoplet" android:host="updates" />
+            </intent-filter>
+            <!-- Импорт выданной сервером подписки напрямую из wdtt:// link. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="wdtt" />
+                <data android:scheme="qwdtt" />
+            </intent-filter>
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -99,6 +123,14 @@
             android:exported="false"
             android:foregroundServiceType="dataSync"
             android:stopWithTask="false" />
+
+        <service
+            android:name=".HopletFirebaseMessagingService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
 
 
         <activity

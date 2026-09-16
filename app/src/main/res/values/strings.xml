@@ -4,6 +4,8 @@
     <!-- Branding -->
     <string name="app_name">Hoplet</string>
     <string name="tunnel_name">Hoplet Tunnel</string>
+    <string name="push_group_name">Hoplet</string>
+    <string name="push_group_summary">Новые уведомления</string>
 
     <!-- App Shortcuts -->
     <string name="shortcut_start_short">Запустить</string>

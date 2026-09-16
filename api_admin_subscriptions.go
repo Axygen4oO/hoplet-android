@@ -212,7 +212,6 @@ func adminSubscriptionCreateHandler(w http.ResponseWriter, r *http.Request) {
 	user.DeviceLimit = req.Devices
 
 	syncUserSubscription(user)
-
 	saveDBLocked()
 	dbMutex.Unlock()
 

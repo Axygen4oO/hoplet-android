@@ -1,6 +1,7 @@
 package com.wdtt.client
 
 import android.Manifest
+import android.app.AlertDialog
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
@@ -75,6 +76,7 @@ import androidx.compose.runtime.getValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.wdtt.client.ui.AppUpdateDialog
 import com.wdtt.client.ui.WelcomeDialog
+import com.wdtt.client.ui.WelcomeDialogContext
 import com.wdtt.client.ui.ProfilesTab
 import com.wdtt.client.ui.HopletAlertDialog
 import com.wdtt.client.ui.HopletDialogBodyText
@@ -87,6 +89,7 @@ import com.wdtt.client.ui.SettingsTab
 import com.wdtt.client.ui.DeployTab
 import com.wdtt.client.ui.ExceptionsTab
 import com.wdtt.client.ui.InfoTab
+import com.wdtt.client.ui.NotificationCenterDialog
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.first
@@ -155,6 +158,12 @@ class MainActivity : ComponentActivity() {
     }
 
     companion object {
+        const val EXTRA_PUSH_NOTIFICATION_ID = "push_notification_id"
+        const val EXTRA_PUSH_DEEP_LINK = "push_deep_link"
+        const val EXTRA_PUSH_TYPE = "push_type"
+        const val EXTRA_PUSH_REVISION = "push_revision"
+        const val EXTRA_PUSH_TITLE = "push_title"
+        const val EXTRA_PUSH_BODY = "push_body"
         var activeActivities = 0
         var isForeground: Boolean
             get() = activeActivities > 0
@@ -168,6 +177,9 @@ class MainActivity : ComponentActivity() {
 
         // Открыть экран создания профиля из ярлыка лаунчера
         val pendingAddProfile = mutableStateOf(false)
+
+        val pendingPushNotificationId = mutableStateOf<Long?>(null)
+        val pendingPushDeepLink = mutableStateOf<String?>(null)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -183,7 +195,17 @@ class MainActivity : ComponentActivity() {
             onStartTunnel = { startTunnelFromShortcut() },
             onStopTunnel = { stopTunnelFromShortcut() },
         )
-        if (!handledShortcut && intent?.action == Intent.ACTION_VIEW) {
+        intent?.getLongExtra(EXTRA_PUSH_NOTIFICATION_ID, 0L)?.takeIf { it > 0L }?.let {
+            pendingPushNotificationId.value = it
+            pendingPushDeepLink.value = intent.getStringExtra(EXTRA_PUSH_DEEP_LINK)
+            return
+        }
+        intent?.data?.takeIf { it.scheme == "hoplet" }?.let { uri ->
+            pendingPushDeepLink.value = uri.host
+            if (uri.host == "notifications") pendingPushNotificationId.value = uri.pathSegments.firstOrNull()?.toLongOrNull() ?: -1L
+            return
+        }
+        if (!handledShortcut && intent?.action == Intent.ACTION_VIEW && intent.data?.scheme != "hoplet") {
             val uri = intent.data
             if (uri != null) {
                 pendingFileUri.value = uri
@@ -204,6 +226,7 @@ class MainActivity : ComponentActivity() {
         super.onStart()
         activeActivities++
         currentActivity = this
+        PushRegistrationClient.registerCurrentToken(applicationContext)
         ServerNotificationManager.start(applicationContext)
         ManlCaptchaWebViewManager.checkAndShowPendingCaptcha(this)
         VkAuthWebViewManager.checkAndShowPendingAuth(this)
@@ -222,7 +245,6 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        android.util.Log.e("TEST_BUILD", "THIS IS MY CUSTOM BUILD")
         enableEdgeToEdge()
 
         checkAndRequestNotifications()
@@ -241,9 +263,21 @@ class MainActivity : ComponentActivity() {
 
     private fun checkAndRequestNotifications() {
         NotificationHelper.ensureTunnelChannel(this)
+        NotificationHelper.ensurePushChannels(this)
         if (Build.VERSION.SDK_INT >= 33) {
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-                notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                val prefs = getSharedPreferences("push_registration", Context.MODE_PRIVATE)
+                if (!prefs.getBoolean("permission_explained", false)) {
+                    AlertDialog.Builder(this)
+                        .setTitle("Уведомления Hoplet")
+                        .setMessage("Разрешите уведомления, чтобы получать важные сообщения о подписке и безопасности, даже когда приложение закрыто.")
+                        .setNegativeButton("Позже") { _, _ -> prefs.edit().putBoolean("permission_explained", true).apply() }
+                        .setPositiveButton("Разрешить") { _, _ ->
+                            prefs.edit().putBoolean("permission_explained", true).apply()
+                            notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                        }
+                        .show()
+                }
             } else {
                 checkAndRequestBattery()
             }
@@ -310,13 +344,31 @@ fun MainScreen(
     val context = LocalContext.current
     val density = LocalDensity.current
     val scope = rememberCoroutineScope()
-    var selectedTab by rememberSaveable { mutableIntStateOf(0) }
+	val notificationStore = remember(context) { ServerNotificationStore.get(context) }
+	val notificationState by notificationStore.state.collectAsStateWithLifecycle()
+	var showNotificationCenter by rememberSaveable { mutableStateOf(false) }
+	var initiallyUnreadNotificationIds by remember { mutableStateOf(emptySet<Long>()) }
+	val pendingPushNotificationId = MainActivity.pendingPushNotificationId.value
+	val pendingPushDeepLink = MainActivity.pendingPushDeepLink.value
+	var selectedTab by rememberSaveable { mutableIntStateOf(0) }
+	LaunchedEffect(pendingPushNotificationId, pendingPushDeepLink) {
+		when (pendingPushDeepLink?.substringAfter("hoplet://")?.substringBefore('/')) {
+			"subscription" -> selectedTab = 2
+			"notifications", "support", "updates" -> if (pendingPushNotificationId == null) MainActivity.pendingPushNotificationId.value = -1L
+		}
+		if (pendingPushNotificationId != null) {
+			initiallyUnreadNotificationIds = notificationState.notifications.filter { it.id !in notificationState.readIds }.map { it.id }.toSet()
+			showNotificationCenter = true
+			notificationStore.markAllRead()
+			MainActivity.pendingPushNotificationId.value = null
+			MainActivity.pendingPushDeepLink.value = null
+		}
+	}
     var dragTargetIndex by remember { mutableIntStateOf(-1) }
     var dragProgress by remember { mutableFloatStateOf(0f) }
     val updateCheckIntervalHours by settingsStore.updateCheckIntervalHours.collectAsStateWithLifecycle(
         initialValue = DEFAULT_UPDATE_CHECK_INTERVAL_HOURS
     )
-    val includeBetaUpdates by settingsStore.includeBetaUpdates.collectAsStateWithLifecycle(initialValue = false)
     val cachedReleaseNotesVersion by settingsStore.cachedReleaseNotesVersion.collectAsStateWithLifecycle(initialValue = "")
     val cachedReleaseNotes by settingsStore.cachedReleaseNotes.collectAsStateWithLifecycle(initialValue = "")
     val cachedReleaseUrl by settingsStore.cachedReleaseUrl.collectAsStateWithLifecycle(initialValue = "")
@@ -441,7 +493,7 @@ fun MainScreen(
         }
     }
 
-    LaunchedEffect(updateCheckIntervalHours, includeBetaUpdates) {
+    LaunchedEffect(updateCheckIntervalHours) {
         if (updateCheckIntervalHours == UPDATE_CHECK_NEVER) return@LaunchedEffect
 
         val intervalMillis = updateIntervalHoursToMillis(updateCheckIntervalHours)
@@ -450,7 +502,7 @@ fun MainScreen(
 
         suspend fun runUpdateCheck(reason: String) {
             updateUiState = UpdateUiState.Checking
-            val outcome = performAppUpdateCheck(currentVersion, includeBetaUpdates)
+            val outcome = performAppUpdateCheck(currentVersion)
             val checkedAt = outcome.checkedAt
             val persistedRelease = if (
                 cachedReleaseNotesVersion.isNotBlank() && cachedReleaseNotes.isNotBlank()
@@ -464,7 +516,8 @@ fun MainScreen(
                     releaseNotes = cachedReleaseNotes,
                 )
             } else null
-            val release = outcome.release?.let { mergeReleaseInfo(persistedRelease, it) }
+            val stablePersistedRelease = persistedRelease?.takeIf { !it.isPrerelease && !it.isDraft }
+            val release = outcome.release?.let { mergeReleaseInfo(stablePersistedRelease, it) }
             latestReleaseForHeader = release
             settingsStore.saveUpdateState(
                 lastCheckAt = checkedAt,
@@ -485,6 +538,7 @@ fun MainScreen(
                 // discovered release or a verified APK ready for installation.
                 val known = latestReleaseForHeader
                     ?: settingsStore.updateDownloadState.first().toReleaseInfo()
+                        ?.takeIf(::isProductionOtaRelease)
                 updateUiState = if (known != null || reason != "manual") {
                     UpdateUiState.Idle
                 } else {
@@ -499,7 +553,7 @@ fun MainScreen(
                 return
             }
 
-            val hasUpdate = isNewerRelease(currentVersion, BuildConfig.VERSION_CODE.toLong(), release, includeBetaUpdates)
+            val hasUpdate = isNewerRelease(currentVersion, BuildConfig.VERSION_CODE.toLong(), release)
             val postponeVer = settingsStore.updatePostponeVersion.first()
             val postponeUntil = settingsStore.updatePostponeUntil.first()
             val isPostponed = postponeVer == release.versionTag && checkedAt < postponeUntil
@@ -611,15 +665,21 @@ fun MainScreen(
                                         localVersionName = currentVersion,
                                         localVersionCode = BuildConfig.VERSION_CODE.toLong(),
                                         remote = available.release,
-                                        includePrerelease = includeBetaUpdates,
                                     )
                                 },
-                            onNotificationsClick = { (context as? MainActivity)?.openNotificationSettings() },
+							onNotificationsClick = {
+								initiallyUnreadNotificationIds = notificationState.notifications
+									.filter { it.id !in notificationState.readIds }
+									.mapTo(linkedSetOf()) { it.id }
+								showNotificationCenter = true
+								notificationStore.markAllRead()
+							},
+							unreadNotificationCount = notificationState.unreadCount,
                             onUpdatesClick = {
                                 scope.launch {
                                     updateUiState = UpdateUiState.Checking
                                     val active = settingsStore.updateDownloadState.first().toReleaseInfo()
-                                        ?.takeIf { it.source == RemoteVersionSource.Release }
+                                        ?.takeIf(::isProductionOtaRelease)
                                     val persisted = if (
                                         cachedReleaseNotesVersion.isNotBlank() && cachedReleaseNotes.isNotBlank()
                                     ) {
@@ -632,17 +692,20 @@ fun MainScreen(
                                             releaseNotes = cachedReleaseNotes,
                                         )
                                     } else null
-                                    val known = active ?: latestReleaseForHeader ?: persisted
-                                    val outcome = performAppUpdateCheck(currentVersion, includeBetaUpdates)
+                                    val stablePersisted = persisted?.takeIf { !it.isPrerelease && !it.isDraft }
+                                    val known = active ?: latestReleaseForHeader
+                                    val outcome = performAppUpdateCheck(currentVersion)
                                     val checkedRelease = outcome.release
                                     val newerChecked = checkedRelease?.let {
-                                        isNewerRelease(currentVersion, BuildConfig.VERSION_CODE.toLong(), it, includeBetaUpdates)
+                                        isNewerRelease(currentVersion, BuildConfig.VERSION_CODE.toLong(), it)
                                     } == true
                                     val fetchedLatest = if (!newerChecked) {
                                         // Информационный режим всегда показывает последний stable release.
                                         fetchLatestReleaseInfo(currentVersion, false) ?: checkedRelease ?: known
                                     } else checkedRelease
-                                    val release = fetchedLatest?.let { mergeReleaseInfo(known, it) }
+                                    val release = fetchedLatest?.let {
+                                        mergeReleaseInfo(known ?: stablePersisted, it)
+                                    }
                                     latestReleaseForHeader = release
                                     settingsStore.saveUpdateState(outcome.checkedAt, release?.versionTag.orEmpty(), outcome.errorMessage)
                                     if (release != null) {
@@ -653,7 +716,7 @@ fun MainScreen(
                                                 release.releaseNotes
                                             )
                                         }
-                                        val newer = isNewerRelease(currentVersion, BuildConfig.VERSION_CODE.toLong(), release, includeBetaUpdates)
+                                        val newer = isNewerRelease(currentVersion, BuildConfig.VERSION_CODE.toLong(), release)
                                         updateUiState = UpdateUiState.UpdateAvailable(
                                             release = release,
                                             isInfoOnly = !newer,
@@ -701,15 +764,29 @@ fun MainScreen(
             }
         }
 
-    }
+	}
+	if (showNotificationCenter) {
+		NotificationCenterDialog(
+			state = notificationState,
+			initiallyUnreadIds = initiallyUnreadNotificationIds,
+			onDismiss = { showNotificationCenter = false },
+		)
+	}
 
-    if (!hasSeenWelcomeDialog) {
+	if (!hasSeenWelcomeDialog) {
         WelcomeDialog(
+            context = WelcomeDialogContext.FIRST_RUN,
             onDismiss = {
                 scope.launch {
                     settingsStore.saveHasSeenWelcomeDialog(true)
                 }
-            }
+            },
+            onFinish = {
+                scope.launch {
+                    settingsStore.saveHasSeenWelcomeDialog(true)
+                }
+                selectedTab = 2
+            },
         )
     }
     val dialogState = updateUiState as? UpdateUiState.UpdateAvailable

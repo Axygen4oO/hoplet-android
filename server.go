@@ -78,19 +78,19 @@ type ClientDevice struct {
 }
 
 type PasswordEntry struct {
-	Label         string   `json:"label,omitempty"` // понятное имя в боте
-	DeviceID      string   `json:"device_id"`       // Для обратной совместимости, если нужно
-	DeviceIDs     []string `json:"device_ids"`      // Список привязанных deviceID
-	MaxDevices    int      `json:"max_devices"`     // Максимальное кол-во устройств (0 или 1 = 1 устройство)
-	ExpiresAt     int64    `json:"expires_at"`      // unix timestamp
-	DownBytes     int64    `json:"down_bytes"`      // скачано клиентом
-	UpBytes       int64    `json:"up_bytes"`        // отдано клиентом
-	VkHash        string   `json:"vk_hash,omitempty"`
+	Label      string   `json:"label,omitempty"` // понятное имя в боте
+	DeviceID   string   `json:"device_id"`       // Для обратной совместимости, если нужно
+	DeviceIDs  []string `json:"device_ids"`      // Список привязанных deviceID
+	MaxDevices int      `json:"max_devices"`     // Максимальное кол-во устройств (0 или 1 = 1 устройство)
+	ExpiresAt  int64    `json:"expires_at"`      // unix timestamp
+	DownBytes  int64    `json:"down_bytes"`      // скачано клиентом
+	UpBytes    int64    `json:"up_bytes"`        // отдано клиентом
+	VkHash     string   `json:"vk_hash,omitempty"`
 	// Ports is the legacy three-value link metadata: DTLS server port, WG
 	// server port and the client's local listen/TUN port.  It is not an
 	// authorization whitelist and is not consulted by the transport handlers.
-	Ports         string   `json:"ports,omitempty"`
-	IsDeactivated bool     `json:"is_deactivated,omitempty"`
+	Ports         string `json:"ports,omitempty"`
+	IsDeactivated bool   `json:"is_deactivated,omitempty"`
 }
 
 func (entry *PasswordEntry) canConnectAndBind(deviceID string) bool {
@@ -182,11 +182,17 @@ type Database struct {
 	Passwords map[string]*PasswordEntry `json:"passwords"`
 	Devices   map[string]*ClientDevice  `json:"devices"`
 
-	Users            map[string]*UserAccount   `json:"users"`
-	Orders           map[string]*Order         `json:"orders"`
-	SupportTickets   map[string]*SupportTicket `json:"support_tickets"`
-	VKHashes         []string                  `json:"vk_hashes"`
-	LastNotification AppNotification           `json:"last_notification"`
+	Users          map[string]*UserAccount   `json:"users"`
+	Orders         map[string]*Order         `json:"orders"`
+	SupportTickets map[string]*SupportTicket `json:"support_tickets"`
+	VKHashes       []string                  `json:"vk_hashes"`
+	// LastNotification is retained only to migrate databases written by versions
+	// that stored a single broadcast. New code uses Notifications exclusively.
+	LastNotification   NotificationRecord           `json:"last_notification,omitempty"`
+	Notifications      []NotificationRecord         `json:"notifications"`
+	NotificationNextID int64                        `json:"notification_next_id"`
+	PushRegistrations  map[string]*PushRegistration `json:"push_registrations,omitempty"`
+	PushReminderKeys   map[string]int64             `json:"push_reminder_keys,omitempty"`
 }
 
 type dbSaveState struct {
@@ -551,11 +557,14 @@ func reloadDB(wgDev *device.Device) error {
 	}
 
 	newDB := &Database{
-		Passwords:      make(map[string]*PasswordEntry),
-		Devices:        make(map[string]*ClientDevice),
-		Users:          make(map[string]*UserAccount),
-		Orders:         make(map[string]*Order),
-		SupportTickets: make(map[string]*SupportTicket),
+		Passwords:         make(map[string]*PasswordEntry),
+		Devices:           make(map[string]*ClientDevice),
+		Users:             make(map[string]*UserAccount),
+		Orders:            make(map[string]*Order),
+		SupportTickets:    make(map[string]*SupportTicket),
+		Notifications:     []NotificationRecord{},
+		PushRegistrations: make(map[string]*PushRegistration),
+		PushReminderKeys:  make(map[string]int64),
 	}
 	if err := json.Unmarshal(data, newDB); err != nil {
 		return fmt.Errorf("parse db json: %w", err)
@@ -576,9 +585,16 @@ func reloadDB(wgDev *device.Device) error {
 	if newDB.SupportTickets == nil {
 		newDB.SupportTickets = make(map[string]*SupportTicket)
 	}
+	if newDB.PushRegistrations == nil {
+		newDB.PushRegistrations = make(map[string]*PushRegistration)
+	}
+	if newDB.PushReminderKeys == nil {
+		newDB.PushReminderKeys = make(map[string]int64)
+	}
 	if newDB.VKHashes == nil {
 		newDB.VKHashes = []string{}
 	}
+	migrateNotifications(newDB)
 
 	dbMutex.Lock()
 	oldDB := db
@@ -626,11 +642,14 @@ func reloadDB(wgDev *device.Device) error {
 func initDB(dir, mainPass, adminID, botToken string) {
 	dbFile = filepath.Join(dir, "passwords.json")
 	db = &Database{
-		Passwords:      make(map[string]*PasswordEntry),
-		Devices:        make(map[string]*ClientDevice),
-		Users:          make(map[string]*UserAccount),
-		Orders:         make(map[string]*Order),
-		SupportTickets: make(map[string]*SupportTicket),
+		Passwords:         make(map[string]*PasswordEntry),
+		Devices:           make(map[string]*ClientDevice),
+		Users:             make(map[string]*UserAccount),
+		Orders:            make(map[string]*Order),
+		SupportTickets:    make(map[string]*SupportTicket),
+		Notifications:     []NotificationRecord{},
+		PushRegistrations: make(map[string]*PushRegistration),
+		PushReminderKeys:  make(map[string]int64),
 	}
 
 	data, err := os.ReadFile(dbFile)
@@ -657,10 +676,17 @@ func initDB(dir, mainPass, adminID, botToken string) {
 	if db.SupportTickets == nil {
 		db.SupportTickets = make(map[string]*SupportTicket)
 	}
+	if db.PushRegistrations == nil {
+		db.PushRegistrations = make(map[string]*PushRegistration)
+	}
+	if db.PushReminderKeys == nil {
+		db.PushReminderKeys = make(map[string]int64)
+	}
 
 	if db.VKHashes == nil {
 		db.VKHashes = []string{}
 	}
+	migrateNotifications(db)
 
 	db.MainPassword = mainPass
 	db.AdminID = adminID
@@ -750,17 +776,20 @@ func cloneDatabaseLocked() *Database {
 	}
 
 	snapshot := &Database{
-		MainPassword:     db.MainPassword,
-		JWTSecret:        db.JWTSecret,
-		AdminID:          db.AdminID,
-		BotToken:         db.BotToken,
-		Passwords:        make(map[string]*PasswordEntry, len(db.Passwords)),
-		Devices:          make(map[string]*ClientDevice, len(db.Devices)),
-		Users:            make(map[string]*UserAccount, len(db.Users)),
-		Orders:           make(map[string]*Order, len(db.Orders)),
-		SupportTickets:   make(map[string]*SupportTicket, len(db.SupportTickets)),
-		VKHashes:         append([]string(nil), db.VKHashes...),
-		LastNotification: db.LastNotification,
+		MainPassword:       db.MainPassword,
+		JWTSecret:          db.JWTSecret,
+		AdminID:            db.AdminID,
+		BotToken:           db.BotToken,
+		Passwords:          make(map[string]*PasswordEntry, len(db.Passwords)),
+		Devices:            make(map[string]*ClientDevice, len(db.Devices)),
+		Users:              make(map[string]*UserAccount, len(db.Users)),
+		Orders:             make(map[string]*Order, len(db.Orders)),
+		SupportTickets:     make(map[string]*SupportTicket, len(db.SupportTickets)),
+		VKHashes:           append([]string(nil), db.VKHashes...),
+		Notifications:      append([]NotificationRecord(nil), db.Notifications...),
+		NotificationNextID: db.NotificationNextID,
+		PushRegistrations:  make(map[string]*PushRegistration, len(db.PushRegistrations)),
+		PushReminderKeys:   make(map[string]int64, len(db.PushReminderKeys)),
 	}
 
 	for password, entry := range db.Passwords {
@@ -778,6 +807,21 @@ func cloneDatabaseLocked() *Database {
 	for ticketID, ticket := range db.SupportTickets {
 		snapshot.SupportTickets[ticketID] = cloneSupportTicket(ticket)
 	}
+	for id, registration := range db.PushRegistrations {
+		if registration == nil {
+			continue
+		}
+		copy := *registration
+		copy.Preferences = registration.Preferences
+		copy.Metadata = map[string]string{}
+		for key, value := range registration.Metadata {
+			copy.Metadata[key] = value
+		}
+		snapshot.PushRegistrations[id] = &copy
+	}
+	for key, value := range db.PushReminderKeys {
+		snapshot.PushReminderKeys[key] = value
+	}
 
 	return snapshot
 }
@@ -792,7 +836,49 @@ func writeDBSnapshot(snapshot *Database) error {
 		return err
 	}
 
-	return os.WriteFile(dbFile, data, 0600)
+	if dbFile == "" {
+		return nil
+	}
+	dir := filepath.Dir(dbFile)
+	tmp, err := os.CreateTemp(dir, ".passwords-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	cleanup := true
+	defer func() {
+		_ = tmp.Close()
+		if cleanup {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if err := tmp.Chmod(0600); err != nil {
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, dbFile); err != nil {
+		// Windows does not replace an existing destination with os.Rename.
+		backup := dbFile + ".swap-backup"
+		_ = os.Remove(backup)
+		if backupErr := os.Rename(dbFile, backup); backupErr != nil && !os.IsNotExist(backupErr) {
+			return err
+		}
+		if replaceErr := os.Rename(tmpName, dbFile); replaceErr != nil {
+			_ = os.Rename(backup, dbFile)
+			return replaceErr
+		}
+		_ = os.Remove(backup)
+	}
+	cleanup = false
+	return nil
 }
 
 func saveDBLocked() {
@@ -1179,7 +1265,9 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 						entry, exists := db.Passwords[pass]
 						removed := []*ClientDevice{}
 						if exists && entry != nil {
+							previous := snapshotSubscriptionState(entry)
 							entry.IsDeactivated = true
+							recordSubscriptionTransitionLocked(pass, previous, snapshotSubscriptionState(entry), time.Now())
 							if entry.DeviceID != "" {
 								if dev, devExists := db.Devices[entry.DeviceID]; devExists {
 									removed = append(removed, dev)
@@ -1218,7 +1306,9 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 						entry, exists := db.Passwords[pass]
 						restored := []*ClientDevice{}
 						if exists && entry != nil {
+							previous := snapshotSubscriptionState(entry)
 							entry.IsDeactivated = false
+							recordSubscriptionTransitionLocked(pass, previous, snapshotSubscriptionState(entry), time.Now())
 							restored = collectPasswordDevicesLocked(entry)
 							saveDBLocked()
 						}
@@ -1627,6 +1717,7 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 
 				dbMutex.Lock()
 				if entry, ok := db.Passwords[tgState.TargetPassword]; ok && entry != nil {
+					previous := snapshotSubscriptionState(entry)
 
 					now := time.Now().Unix()
 
@@ -1635,6 +1726,7 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 					}
 
 					entry.ExpiresAt += int64(days * 24 * 3600)
+					recordSubscriptionTransitionLocked(tgState.TargetPassword, previous, snapshotSubscriptionState(entry), time.Now())
 
 					saveDBLocked()
 				}
@@ -1662,7 +1754,9 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 
 				dbMutex.Lock()
 				if entry, ok := db.Passwords[tgState.TargetPassword]; ok && entry != nil {
+					previous := snapshotSubscriptionState(entry)
 					entry.ExpiresAt = time.Now().Add(time.Duration(days) * 24 * time.Hour).Unix()
+					recordSubscriptionTransitionLocked(tgState.TargetPassword, previous, snapshotSubscriptionState(entry), time.Now())
 					saveDBLocked()
 				}
 				dbMutex.Unlock()
@@ -2845,9 +2939,9 @@ func main() {
 	}()
 
 	initDB(*configDir, *mainPass, *adminID, *botToken)
+	log.Printf("[PUSH] FCM configured=%t", fcmConfigurationStatus())
 	StartOrderCleanup()
 	LoadSiteConfig()
-	log.Printf("[DEBUG] siteConfig.VkHash = %q", siteConfig.VkHash)
 
 	keys, err := loadOrGenerateKeys(*configDir)
 	if err != nil {
@@ -2876,6 +2970,7 @@ func main() {
 		ctx,
 		wgDev,
 	)
+	go pushReminderScheduler(ctx)
 	go botLoop(*botToken, *adminID, wgDev)
 
 	// Запуск HTTP Control API
@@ -2903,7 +2998,12 @@ func main() {
 		mux.HandleFunc("/api/orders/retry", retryOrderHandler)
 		mux.HandleFunc("/api/orders/cancel", cancelOrderHandler)
 		mux.HandleFunc("/api/orders", ordersHandler)
+		mux.HandleFunc("/api/notifications", notificationsHandler)
 		mux.HandleFunc("/api/notifications/latest", latestNotificationHandler)
+		mux.HandleFunc("/api/push/register", pushRegisterHandler)
+		mux.HandleFunc("/api/push/unregister", pushUnregisterHandler)
+		mux.HandleFunc("/api/push/preferences", pushPreferencesHandler)
+		mux.HandleFunc("/api/push/status", pushStatusHandler)
 		mux.HandleFunc("/api/payments/telegram/confirm", telegramPaymentConfirmHandler)
 		mux.HandleFunc("/api/vkhashes", func(w http.ResponseWriter, r *http.Request) {
 			switch r.Method {
@@ -3939,6 +4039,7 @@ func extendPassword(pass string, days int) {
 	if !exists || entry == nil {
 		return
 	}
+	previous := snapshotSubscriptionState(entry)
 
 	now := time.Now().Unix()
 
@@ -3948,6 +4049,7 @@ func extendPassword(pass string, days int) {
 
 	entry.ExpiresAt += int64(days * 24 * 60 * 60)
 	entry.IsDeactivated = false
+	recordSubscriptionTransitionLocked(pass, previous, snapshotSubscriptionState(entry), time.Now())
 
 	saveDBLocked()
 }

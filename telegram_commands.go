@@ -10,6 +10,12 @@ func handleCommand(
 ) bool {
 
 	switch cmd {
+	case "/push":
+		startPushWizard(token, adminID)
+		return true
+	case "/pushuser":
+		startPushUserWizard(token, adminID)
+		return true
 	case "/notify":
 		startNotificationWizard(token, adminID)
 		return true
@@ -17,6 +23,11 @@ func handleCommand(
 	case "/cancel":
 		if hasActiveNotificationCompose() {
 			cancelNotificationCompose(token, adminID)
+			return true
+		}
+		if hasActivePushCompose() {
+			resetPushComposeState()
+			sendTelegramPlain(token, adminID, "Отправка push отменена.", nil)
 			return true
 		}
 

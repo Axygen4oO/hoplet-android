@@ -2,6 +2,7 @@ package com.wdtt.client.ui
 
 import com.wdtt.client.R
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -9,6 +10,7 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.Canvas
@@ -42,6 +44,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.WifiOff
+import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.automirrored.outlined.ArrowForwardIos
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -58,13 +61,17 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.unit.sp
@@ -101,16 +108,16 @@ import kotlin.math.roundToInt
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
-import android.net.Uri
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.material3.Switch
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.ui.draw.scale
 import com.wdtt.client.NotificationHelper
 import com.wdtt.client.isNewerVersion
 import com.wdtt.client.isNewerRelease
-import com.wdtt.client.isInstallableOtaRelease
+import com.wdtt.client.isProductionOtaRelease
 import com.wdtt.client.isDirect
 import com.wdtt.client.isRawTun
 import com.wdtt.client.TransportMode
@@ -128,6 +135,7 @@ import org.json.JSONArray
 
 import com.wdtt.client.ServerVkHashes
 import com.wdtt.client.AdminSession
+import com.wdtt.client.PushRegistrationClient
 import org.json.JSONObject
 import java.io.OutputStreamWriter
 
@@ -143,12 +151,23 @@ import androidx.compose.ui.text.withStyle
 
 private const val WORKERS_PER_GROUP = 9
 
+/** Presentation-only mapping of the existing tunnel lifecycle to the main control. */
+private enum class ConnectionControlState {
+    READY,
+    CONNECTING,
+    CONNECTED,
+    DISCONNECTING,
+    ERROR,
+    DISABLED
+}
+
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun SettingsTab(
     onConnectRequested: () -> Unit = {},
     onUpdatesClick: () -> Unit = {},
     onNotificationsClick: () -> Unit = {},
+	unreadNotificationCount: Int = 0,
     updateVersionLabel: String? = null,
 ) {
     val context = LocalContext.current
@@ -166,6 +185,7 @@ fun SettingsTab(
             onConnectRequested = onConnectRequested,
             onUpdatesClick = onUpdatesClick,
             onNotificationsClick = onNotificationsClick,
+			unreadNotificationCount = unreadNotificationCount,
             updateVersionLabel = updateVersionLabel
         )
     }
@@ -180,6 +200,7 @@ fun SettingsTabContent(
     onConnectRequested: () -> Unit = {},
     onUpdatesClick: () -> Unit = {},
     onNotificationsClick: () -> Unit = {},
+	unreadNotificationCount: Int = 0,
     updateVersionLabel: String? = null,
 ) {
     val savedConnectionPassword by settingsStore.connectionPassword.collectAsStateWithLifecycle(initialValue = "")
@@ -204,7 +225,12 @@ fun SettingsTabContent(
     val updateCheckIntervalHours by settingsStore.updateCheckIntervalHours.collectAsStateWithLifecycle(
         initialValue = com.wdtt.client.DEFAULT_UPDATE_CHECK_INTERVAL_HOURS
     )
-    val includeBetaUpdates by settingsStore.includeBetaUpdates.collectAsStateWithLifecycle(initialValue = false)
+    val pushEnabled by settingsStore.pushEnabled.collectAsStateWithLifecycle(initialValue = true)
+	val pushSubscriptionUpdates by settingsStore.pushSubscriptionUpdates.collectAsStateWithLifecycle(initialValue = true)
+    val pushSubscriptionReminders by settingsStore.pushSubscriptionReminders.collectAsStateWithLifecycle(initialValue = true)
+    val pushUpdates by settingsStore.pushUpdates.collectAsStateWithLifecycle(initialValue = true)
+    val pushSecurity by settingsStore.pushSecurity.collectAsStateWithLifecycle(initialValue = true)
+    val pushPromotions by settingsStore.pushPromotions.collectAsStateWithLifecycle(initialValue = false)
 
     val currentProfileId by settingsStore.currentProfileId.collectAsStateWithLifecycle(initialValue = "")
     val currentProfileName by settingsStore.currentProfileName.collectAsStateWithLifecycle(initialValue = "")
@@ -1047,6 +1073,32 @@ fun SettingsTabContent(
             }
 
             val notificationsEnabled = NotificationHelper.areNotificationsEnabled(context)
+            Text("Уведомления", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            Text(
+                "Тут вы можете настроить какие уведомления получать",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+                //Text("Push-уведомления", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+			fun persistPush(enabled: Boolean = pushEnabled, subscriptionUpdates: Boolean = pushSubscriptionUpdates, reminders: Boolean = pushSubscriptionReminders, updates: Boolean = pushUpdates, security: Boolean = pushSecurity, promotions: Boolean = pushPromotions) {
+                scope.launch {
+					settingsStore.savePushPreferences(enabled, subscriptionUpdates, reminders, updates, security, promotions)
+					com.wdtt.client.PushRegistrationClient.updatePreferences(context, enabled, subscriptionUpdates, reminders, updates, security, promotions)
+                }
+            }
+            @Composable
+            fun PushPreferenceRow(label: String, checked: Boolean, onChanged: (Boolean) -> Unit) {
+                Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text(label, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                    HopletSwitch(checked = checked, onCheckedChange = onChanged)
+                }
+            }
+            PushPreferenceRow("Push-уведомления", pushEnabled) { persistPush(enabled = it) }
+			PushPreferenceRow("Обновления подписки", pushSubscriptionUpdates) { persistPush(subscriptionUpdates = it) }
+            PushPreferenceRow("Напоминания о подписке", pushSubscriptionReminders) { persistPush(reminders = it) }
+            PushPreferenceRow("Обновления", pushUpdates) { persistPush(updates = it) }
+            PushPreferenceRow("Безопасность", pushSecurity) { persistPush(security = it) }
+            PushPreferenceRow("Акции", pushPromotions) { persistPush(promotions = it) }
             if (!notificationsEnabled) {
                 Surface(
                     shape = RoundedCornerShape(12.dp),
@@ -1640,7 +1692,6 @@ fun SettingsTabContent(
                                         val token = json.getString("token")
 
                                         AdminSession.saveToken(context, token)
-
                                         isAdminMode = true
                                         showPinDialog = false
 
@@ -1767,9 +1818,13 @@ fun SettingsTabContent(
 
     if (showWelcomeDialog) {
         WelcomeDialog(
+            context = WelcomeDialogContext.SETTINGS,
             onDismiss = {
                 showWelcomeDialog = false
-            }
+            },
+            onFinish = {
+                showWelcomeDialog = false
+            },
         )
     }
 
@@ -1938,7 +1993,7 @@ fun SettingsTabContent(
                     .fillMaxWidth()
                     .padding(horizontal = 16.dp)
                     .navigationBarsPadding(),
-                contentPadding = PaddingValues(horizontal = 20.dp, vertical = 20.dp)
+                contentPadding = PaddingValues(horizontal = 20.dp, vertical = 16.dp)
             ) {
                 Column(modifier = Modifier.fillMaxWidth()) {
                     Row(
@@ -1954,13 +2009,13 @@ fun SettingsTabContent(
                             Icon(Icons.Default.Close, contentDescription = "Закрыть")
                         }
                     }
-                    Spacer(Modifier.height(12.dp))
+                    Spacer(Modifier.height(8.dp))
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .heightIn(max = 480.dp)
+                            .heightIn(max = 420.dp)
                             .verticalScroll(rememberScrollState()),
-                        verticalArrangement = Arrangement.spacedBy(16.dp)
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
                         GeneralSettingsEntryCard()
 
@@ -2005,62 +2060,25 @@ fun SettingsTabContent(
                         HorizontalDivider(
                             color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
                         )
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Column {
-                                Text(
-                                    text = "Hoplet",
-                                    style = MaterialTheme.typography.bodyLarge,
-                                    fontWeight = FontWeight.Bold
-                                )
-                                Text(
-                                    text = "Версия $currentVersion",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.clickable {
-                                        versionClickCount++
+                        Column {
+                            Text(
+                                text = "Hoplet",
+                                style = MaterialTheme.typography.bodyLarge,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "Версия $currentVersion",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.clickable {
+                                    versionClickCount++
 
-                                        if (versionClickCount >= 7) {
-                                            versionClickCount = 0
-                                            showPinDialog = true
-                                        }
+                                    if (versionClickCount >= 7) {
+                                        versionClickCount = 0
+                                        showPinDialog = true
                                     }
-                                )
-                            }
-
-                            Row(
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Button(
-                                    onClick = {
-                                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://t.me/+uUh28784ZctiNTNi"))
-                                        context.startActivity(intent)
-                                    },
-                                    shape = RoundedCornerShape(8.dp),
-                                    colors = ButtonDefaults.buttonColors(
-                                        containerColor = MaterialTheme.colorScheme.primaryContainer,
-                                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer
-                                    ),
-                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
-                                ) {
-                                    Text("Telegram", style = MaterialTheme.typography.labelMedium)
                                 }
-
-                                OutlinedButton(
-                                    onClick = {
-                                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://hoplet.ru"))
-                                        context.startActivity(intent)
-                                    },
-                                    shape = RoundedCornerShape(8.dp),
-                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
-                                ) {
-                                    Text("Личный кабинет", style = MaterialTheme.typography.labelMedium)
-                                }
-                            }
+                            )
                         }
 
                         Text(
@@ -2068,29 +2086,6 @@ fun SettingsTabContent(
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
-
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
-                                Text("Бета-обновления", style = MaterialTheme.typography.bodyMedium)
-                                Text(
-                                    "Включать предварительные релизы GitHub",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                            Switch(
-                                checked = includeBetaUpdates,
-                                onCheckedChange = { enabled ->
-                                    scope.launch { settingsStore.saveIncludeBetaUpdates(enabled) }
-                                }
-                            )
-                        }
-
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
 
                         // Проверка обновлений
@@ -2111,7 +2106,7 @@ fun SettingsTabContent(
                                 is com.wdtt.client.UpdateUiState.ReadyToInstall -> visibleUiState.release
                                 is com.wdtt.client.UpdateUiState.Error -> visibleUiState.release
                                 else -> updateDownloadState.toReleaseInfo()
-                            }?.takeIf(::isInstallableOtaRelease)
+                            }?.takeIf(::isProductionOtaRelease)
                             val updateStatusText = remember(
                                 visibleUiState,
                                 updateLatestVersion,
@@ -2183,10 +2178,7 @@ fun SettingsTabContent(
                                             settingsUpdateUiState = com.wdtt.client.UpdateUiState.Checking
 
                                             try {
-                                                val outcome = com.wdtt.client.performAppUpdateCheck(
-                                                    currentVersion,
-                                                    includeBetaUpdates
-                                                )
+                                                val outcome = com.wdtt.client.performAppUpdateCheck(currentVersion)
                                                 val release = outcome.release
 
                                                 if (release != null) {
@@ -2195,8 +2187,7 @@ fun SettingsTabContent(
                                                         isNewerRelease(
                                                             currentVersion,
                                                             com.wdtt.client.BuildConfig.VERSION_CODE.toLong(),
-                                                            release,
-                                                            includeBetaUpdates
+                                                            release
                                                         )
 
                                                     settingsUpdateUiState = if (hasUpdate) {
@@ -2354,7 +2345,7 @@ fun SettingsTabContent(
                                                     }
 
                                                     else -> {
-                                                        if (isInstallableOtaRelease(release)) {
+                                                        if (isProductionOtaRelease(release)) {
                                                             com.wdtt.client.startAppUpdateDownload(context, release)
                                                         }
                                                     }
@@ -2505,7 +2496,7 @@ fun SettingsTabContent(
                         }
 
                     }
-                    Spacer(Modifier.height(16.dp))
+                    Spacer(Modifier.height(12.dp))
                     Button(
                         onClick = {
                             showGeneralSettingsDialog = false
@@ -2575,11 +2566,23 @@ fun SettingsTabContent(
 
     val tunnelSecretsMissing = savedConnectionPassword.isBlank()
     val connectionLifecycle = connectionProgressState.lifecycle
+    // Единый presentation-state строится только из уже существующих потоков.
+    // Он не меняет переходы TunnelManager, а лишь выбирает внешний вид control.
+    val connectionControlState = when {
+        connectionLifecycle == ConnectionLifecycle.DISCONNECTING -> ConnectionControlState.DISCONNECTING
+        connectionLifecycle == ConnectionLifecycle.CONNECTING || isConnecting -> ConnectionControlState.CONNECTING
+        connectionLifecycle == ConnectionLifecycle.CONNECTED && !tunnelRunning -> ConnectionControlState.DISCONNECTING
+        connectionLifecycle == ConnectionLifecycle.CONNECTED || tunnelRunning -> ConnectionControlState.CONNECTED
+        connectionLifecycle == ConnectionLifecycle.ERROR -> ConnectionControlState.ERROR
+        cooldownSeconds > 0 -> ConnectionControlState.DISABLED
+        else -> ConnectionControlState.READY
+    }
     // Режим можно менять только в состоянии ожидания или после ошибки.
     // Состояние подключения остаётся единственным источником истины для UI.
     val showModeSelector = connectionLifecycle == ConnectionLifecycle.IDLE ||
         connectionLifecycle == ConnectionLifecycle.ERROR
     val heroStatusLabel = when {
+        connectionLifecycle == ConnectionLifecycle.DISCONNECTING -> "Отключение"
         tunnelRunning -> "Подключено"
         isConnecting -> "Подключение"
         connectionLifecycle == ConnectionLifecycle.ERROR -> "Ошибка"
@@ -2587,6 +2590,7 @@ fun SettingsTabContent(
         else -> "Готово"
     }
     val heroStatusColor = when {
+        connectionLifecycle == ConnectionLifecycle.DISCONNECTING -> WDTTColors.warning
         tunnelRunning -> MaterialTheme.colorScheme.primary
         isConnecting -> MaterialTheme.colorScheme.secondary
         connectionLifecycle == ConnectionLifecycle.ERROR -> MaterialTheme.colorScheme.error
@@ -2594,6 +2598,7 @@ fun SettingsTabContent(
         else -> MaterialTheme.colorScheme.onSurfaceVariant
     }
     val heroStatusIcon = when {
+        connectionLifecycle == ConnectionLifecycle.DISCONNECTING -> Icons.Default.Stop
         tunnelRunning -> Icons.Default.Verified
         isConnecting -> Icons.Default.PowerSettingsNew
         connectionLifecycle == ConnectionLifecycle.ERROR -> Icons.Default.Error
@@ -2601,6 +2606,7 @@ fun SettingsTabContent(
         else -> Icons.Default.Info
     }
     val heroTitle = when {
+        connectionLifecycle == ConnectionLifecycle.DISCONNECTING -> "Отключение"
         tunnelRunning -> "Туннель активен"
         isConnecting -> "Идет подключение"
         connectionLifecycle == ConnectionLifecycle.ERROR -> "Подключение не удалось"
@@ -2610,6 +2616,7 @@ fun SettingsTabContent(
         else -> "Готово к запуску"
     }
     val heroSubtitle = when {
+        connectionLifecycle == ConnectionLifecycle.DISCONNECTING -> "Останавливаем текущий сеанс."
         tunnelRunning -> "TURN и TUN работают в текущем профиле."
         isConnecting -> connectionProgressState.statusText
         connectionLifecycle == ConnectionLifecycle.ERROR -> connectionProgressState.errorReason ?: "Повторите подключение еще раз."
@@ -2619,17 +2626,18 @@ fun SettingsTabContent(
         currentProfileName.isNotEmpty() -> "Текущий профиль: $currentProfileName"
         else -> "Выберите профиль и запустите подключение."
     }
-    val heroButtonLabel = when {
-        tunnelBusy -> "Остановить"
-        cooldownSeconds > 0 -> "Подождите"
-        else -> "Подключить"
+    val heroButtonLabel = when (connectionControlState) {
+        ConnectionControlState.CONNECTED -> "Отключить"
+        ConnectionControlState.CONNECTING -> "Подключение…"
+        ConnectionControlState.DISCONNECTING -> "Отключение…"
+        ConnectionControlState.ERROR -> "Повторить"
+        ConnectionControlState.DISABLED -> "Подождите"
+        ConnectionControlState.READY -> "Подключить"
     }
-    val heroButtonCaption = when {
-        tunnelRunning -> uptimeText ?: "Сеанс активен"
-        isConnecting -> "Идет запуск"
-        connectionLifecycle == ConnectionLifecycle.ERROR -> "Повторить"
-        cooldownSeconds > 0 -> "$cooldownSeconds c"
-        else -> " "
+    val heroButtonCaption = when (connectionControlState) {
+        ConnectionControlState.CONNECTED -> uptimeText ?: "Сеанс активен"
+        ConnectionControlState.DISABLED -> "$cooldownSeconds с"
+        else -> ""
     }
 
     Column(
@@ -2674,7 +2682,7 @@ fun SettingsTabContent(
                         style = MaterialTheme.typography.labelLarge,
                         fontSize = 14.sp,
                         fontWeight = FontWeight.Medium,
-                        color = MaterialTheme.colorScheme.primary,
+                        color = HopletTheme.colors.info.copy(alpha = 0.90f),
                         maxLines = 1,
                         softWrap = false,
                         modifier = Modifier
@@ -2691,33 +2699,32 @@ fun SettingsTabContent(
                 Spacer(modifier = Modifier.weight(1f))
             }
 
+            val headerButtonAccent = HopletTheme.colors.accent
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                FilledTonalIconButton(
+                LiquidGlassIconButton(
                     onClick = onUpdatesClick,
-                    modifier = Modifier
-                        .size(44.dp)
-                        .semantics {
-                            contentDescription = if (!updateVersionLabel.isNullOrBlank()) {
-                                "Обновления. Доступна новая версия"
-                            } else {
-                                "Обновления"
-                            }
-                        },
-                ) {
-                    Icon(Icons.Outlined.DownloadForOffline, contentDescription = "Обновления")
-                }
-                FilledTonalIconButton(
+                    icon = Icons.Outlined.DownloadForOffline,
+                    iconContentDescription = "Обновления",
+                    accentColor = headerButtonAccent,
+                    accessibilityDescription = if (!updateVersionLabel.isNullOrBlank()) {
+                        "Обновления. Доступна новая версия"
+                    } else {
+                        "Обновления"
+                    }
+                )
+                LiquidGlassIconButton(
                     onClick = onNotificationsClick,
-                    modifier = Modifier.size(44.dp)
-                ) {
-                    Icon(Icons.Default.Notifications, contentDescription = "Уведомления")
-                }
-                FilledTonalIconButton(
+                    icon = Icons.Default.Notifications,
+                    iconContentDescription = "Уведомления",
+                    accentColor = headerButtonAccent,
+                    badgeCount = unreadNotificationCount
+                )
+                LiquidGlassIconButton(
                     onClick = { showAppSettingsDialog = true },
-                    modifier = Modifier.size(44.dp)
-                ) {
-                    Icon(Icons.Default.Settings, contentDescription = "Настройки Tunnel")
-                }
+                    icon = Icons.Default.Settings,
+                    iconContentDescription = "Настройки Tunnel",
+                    accentColor = headerButtonAccent
+                )
             }
         }
 
@@ -2875,14 +2882,16 @@ fun SettingsTabContent(
                 TunnelConnectionButton(
                     title = heroButtonLabel,
                     subtitle = heroButtonCaption,
-                    icon = if (tunnelBusy) Icons.Default.Stop else Icons.Default.PowerSettingsNew,
                     // Кнопка остаётся доступной и при неполных параметрах: по нажатию
                     // пользователь получает понятный путь к вводу секрета/исправлению
                     // настроек, вместо «немой» disabled-кнопки.
-                    enabled = cooldownSeconds == 0 || tunnelBusy,
-                    active = tunnelRunning,
-                    connecting = isConnecting,
-                    error = connectionLifecycle == ConnectionLifecycle.ERROR,
+                    enabled = when (connectionControlState) {
+                        ConnectionControlState.READY,
+                        ConnectionControlState.ERROR -> cooldownSeconds == 0 && !tunnelBusy
+                        ConnectionControlState.CONNECTED -> tunnelBusy
+                        else -> false
+                    },
+                    state = connectionControlState,
                     onClick = {
                         if (tunnelBusy) {
                             context.startService(
@@ -2927,70 +2936,129 @@ fun SettingsTabContent(
             enter = fadeIn() + expandVertically(),
             exit = fadeOut() + shrinkVertically()
         ) {
-            AppSectionCard(
-                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-                color = AppCardDefaults.containerColor(),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+            val powerShape = RoundedCornerShape(26.dp)
+            val accent = HopletTheme.colors.accent
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = powerShape,
+                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f),
+                border = BorderStroke(1.dp, accent.copy(alpha = 0.16f)),
+                shadowElevation = 2.dp
             ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(
+                            brush = Brush.linearGradient(
+                                colors = listOf(
+                                    accent.copy(alpha = 0.035f),
+                                    Color.Transparent,
+                                    HopletTheme.colors.card.copy(alpha = 0.12f)
+                                )
+                            ),
+                            shape = powerShape
+                        )
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(5.dp)
                 ) {
-                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                        Text(
-                            text = "Мощность",
-                            style = MaterialTheme.typography.titleMedium,
-                            color = MaterialTheme.colorScheme.onSurface,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        Text(
-                            text = if (vkAccountAuth) {
-                                "Точная настройка количества потоков."
-                            } else {
-                                "Увеличивает потребление батареи."
-                            },
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    TunnelStatusBadge(
-                        label = currentWorkers.toInt().toString(),
-                        icon = Icons.Default.Tag,
-                        containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f),
-                        contentColor = MaterialTheme.colorScheme.primary
+                    val animatedWorkers by animateFloatAsState(
+                        targetValue = currentWorkers,
+                        animationSpec = tween(durationMillis = 220),
+                        label = "power-value"
                     )
-                }
 
-                val maxWorkers = dynamicMaxWorkers
-                val minWorkers = if (vkAccountAuth) 1f else WORKERS_PER_GROUP.toFloat()
-                val workerStep = if (vkAccountAuth) 1f else WORKERS_PER_GROUP.toFloat()
-                val currentWorkersVal = if (vkAccountAuth) {
-                    currentWorkers.coerceIn(1f, maxWorkers).roundToInt().toFloat()
-                } else {
-                    roundToGroup(currentWorkers.coerceIn(minWorkers, maxWorkers), maxWorkers)
-                }
-
-                CompactSteppedSlider(
-                    value = currentWorkersVal,
-                    onValueChange = { raw ->
-                        workersInput = if (vkAccountAuth) {
-                            raw.coerceIn(1f, maxWorkers).roundToInt().toFloat()
-                        } else {
-                            roundToGroup(raw, maxWorkers)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Surface(
+                            modifier = Modifier.size(42.dp),
+                            shape = RoundedCornerShape(14.dp),
+                            color = accent.copy(alpha = 0.12f)
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Bolt,
+                                    contentDescription = "Мощность",
+                                    tint = accent,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
                         }
-                        scheduleSave()
-                    },
-                    valueRange = minWorkers..maxWorkers,
-                    stepSize = workerStep,
-                    enabled = !tunnelBusy,
-                    modifier = Modifier.fillMaxWidth()
-                )
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
+                            Text(
+                                text = "Мощность",
+                                style = MaterialTheme.typography.titleMedium,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "Увеличение повышает потребление батареи.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 2
+                            )
+                        }
+                        Surface(
+                            modifier = Modifier.widthIn(min = 70.dp, max = 86.dp),
+                            shape = RoundedCornerShape(22.dp),
+                            color = accent.copy(alpha = 0.08f),
+                            border = BorderStroke(1.dp, accent.copy(alpha = 0.18f))
+                        ) {
+                            Text(
+                                text = androidx.compose.ui.text.buildAnnotatedString {
+                                    withStyle(
+                                        style = androidx.compose.ui.text.SpanStyle(
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f),
+                                            fontWeight = FontWeight.Medium
+                                        )
+                                    ) { append("# ") }
+                                    withStyle(
+                                        style = androidx.compose.ui.text.SpanStyle(
+                                            color = accent,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    ) { append(animatedWorkers.roundToInt().toString()) }
+                                },
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                style = MaterialTheme.typography.titleSmall,
+                                textAlign = TextAlign.Center,
+                                maxLines = 1
+                            )
+                        }
+                    }
 
-                PowerRecommendationInfoBlock(
-                    modifier = Modifier.fillMaxWidth()
-                )
+                    val maxWorkers = dynamicMaxWorkers
+                    val minWorkers = if (vkAccountAuth) 1f else WORKERS_PER_GROUP.toFloat()
+                    val workerStep = if (vkAccountAuth) 1f else WORKERS_PER_GROUP.toFloat()
+                    val currentWorkersVal = if (vkAccountAuth) {
+                        currentWorkers.coerceIn(1f, maxWorkers).roundToInt().toFloat()
+                    } else {
+                        roundToGroup(currentWorkers.coerceIn(minWorkers, maxWorkers), maxWorkers)
+                    }
+
+                    CompactSteppedSlider(
+                        value = currentWorkersVal,
+                        onValueChange = { raw ->
+                            workersInput = if (vkAccountAuth) {
+                                raw.coerceIn(1f, maxWorkers).roundToInt().toFloat()
+                            } else {
+                                roundToGroup(raw, maxWorkers)
+                            }
+                            scheduleSave()
+                        },
+                        valueRange = minWorkers..maxWorkers,
+                        stepSize = workerStep,
+                        enabled = !tunnelBusy,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    PowerRecommendationInfoBlock(modifier = Modifier.fillMaxWidth())
+                }
             }
         }
     }
@@ -3170,144 +3238,326 @@ private fun TunnelCompactActionButton(
     }
 }
 
+private fun Modifier.liquidGlassLayer(
+    pigment: Color,
+    enabled: Boolean,
+    innerBorderColor: Color,
+    brightness: Float = 1f,
+    reflectionShift: Float = 0f,
+): Modifier = drawWithCache {
+    val shadedPigment = lerp(Color(0xFF071012), pigment, brightness)
+    val deepPigment = shadedPigment.copy(
+        red = shadedPigment.red * 0.22f,
+        green = shadedPigment.green * 0.22f,
+        blue = shadedPigment.blue * 0.26f
+    )
+    val liquidBrush = Brush.radialGradient(
+        colors = listOf(
+            shadedPigment.copy(alpha = if (enabled) 0.80f else 0.34f),
+            shadedPigment.copy(alpha = if (enabled) 0.62f else 0.22f),
+            deepPigment.copy(alpha = if (enabled) 0.80f else 0.30f),
+            Color(0xFF071012).copy(alpha = if (enabled) 0.90f else 0.80f)
+        ),
+        center = Offset(
+            size.width * (0.40f + reflectionShift * 0.025f),
+            size.height * (0.30f + reflectionShift * 0.04f)
+        ),
+        radius = size.minDimension * 0.86f
+    )
+    val lowerDepth = Brush.linearGradient(
+        colors = listOf(
+            Color.Transparent,
+            Color.Black.copy(alpha = 0.08f),
+            Color.Black.copy(alpha = if (enabled) 0.30f else 0.44f)
+        ),
+        start = Offset(0f, size.height * 0.20f),
+        end = Offset(0f, size.height)
+    )
+    val highlightBrush = Brush.radialGradient(
+        colors = listOf(
+            Color.White.copy(alpha = if (enabled) 0.14f else 0.06f),
+            Color.White.copy(alpha = if (enabled) 0.045f else 0.015f),
+            Color.Transparent
+        ),
+        center = Offset(
+            size.width * (0.30f + reflectionShift * 0.04f),
+            size.height * (0.18f + reflectionShift * 0.06f)
+        ),
+        radius = size.minDimension * 0.60f
+    )
+    val reflectionBrush = Brush.radialGradient(
+        colors = listOf(
+            Color.White.copy(alpha = if (enabled) 0.10f else 0.035f),
+            Color.White.copy(alpha = if (enabled) 0.025f else 0.008f),
+            Color.Transparent
+        ),
+        center = Offset(
+            size.width * (0.34f + reflectionShift * 0.04f),
+            size.height * (0.13f + reflectionShift * 0.08f)
+        ),
+        radius = size.minDimension * 0.72f
+    )
+    val rimBrush = Brush.linearGradient(
+        colors = listOf(
+            Color.White.copy(alpha = 0.24f),
+            shadedPigment.copy(alpha = 0.82f),
+            Color.Black.copy(alpha = 0.22f)
+        ),
+        start = Offset(size.width * 0.12f, size.height * 0.08f),
+        end = Offset(size.width * 0.90f, size.height * 0.92f)
+    )
+    val ringWidth = 1.0.dp.toPx()
+    val innerRingWidth = 0.7.dp.toPx()
+
+    onDrawWithContent {
+        drawCircle(brush = liquidBrush)
+        drawRect(brush = lowerDepth)
+        drawCircle(brush = highlightBrush)
+        // Wide, low-alpha reflection keeps the surface curved without a hard white arc.
+        drawOval(
+            brush = reflectionBrush,
+            topLeft = Offset(size.width * 0.08f, size.height * 0.02f),
+            size = androidx.compose.ui.geometry.Size(size.width * 0.84f, size.height * 0.58f)
+        )
+        drawCircle(brush = rimBrush, style = Stroke(width = ringWidth))
+        drawCircle(color = innerBorderColor, style = Stroke(width = innerRingWidth))
+        drawContent()
+    }
+}
+
+@Composable
+private fun LiquidGlassIconButton(
+    onClick: () -> Unit,
+    icon: ImageVector,
+    iconContentDescription: String,
+    accentColor: Color,
+    accessibilityDescription: String = iconContentDescription,
+    modifier: Modifier = Modifier,
+    badgeCount: Int = 0,
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+    val pressScale by animateFloatAsState(
+        targetValue = if (isPressed) 0.985f else 1f,
+        animationSpec = tween(110),
+        label = "top_glass_button_press_scale"
+    )
+    val brightness by animateFloatAsState(
+        targetValue = if (isPressed) 0.56f else 0.72f,
+        animationSpec = tween(110),
+        label = "top_glass_button_brightness"
+    )
+    val reflectionShift by animateFloatAsState(
+        targetValue = if (isPressed) 1f else 0f,
+        animationSpec = tween(130),
+        label = "top_glass_button_reflection"
+    )
+    val haloScale by animateFloatAsState(
+        targetValue = if (isPressed) 1.01f else 1.07f,
+        animationSpec = tween(130),
+        label = "top_glass_button_halo_scale"
+    )
+
+    Box(
+        modifier = modifier.size(44.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Box(
+            modifier = Modifier
+                .matchParentSize()
+                .scale(haloScale)
+                .background(
+                    brush = Brush.radialGradient(
+                        colors = listOf(
+                            accentColor.copy(alpha = if (isPressed) 0.10f else 0.20f),
+                            Color.Transparent
+                        )
+                    ),
+                    shape = CircleShape
+                )
+        )
+        Surface(
+            onClick = onClick,
+            shape = CircleShape,
+            color = Color.Transparent,
+            contentColor = MaterialTheme.colorScheme.onSurface,
+            border = BorderStroke(0.8.dp, accentColor.copy(alpha = 0.58f)),
+            shadowElevation = 7.dp,
+            interactionSource = interactionSource,
+            modifier = Modifier
+                .size(42.dp)
+                .scale(pressScale)
+                .semantics { contentDescription = accessibilityDescription }
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(2.dp)
+                    .clip(CircleShape)
+                    .liquidGlassLayer(
+                        pigment = accentColor,
+                        enabled = true,
+                        innerBorderColor = Color.White.copy(alpha = 0.22f),
+                        brightness = brightness,
+                        reflectionShift = reflectionShift
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.94f),
+                    modifier = Modifier.size(21.dp)
+                )
+            }
+        }
+
+        if (badgeCount > 0) {
+            Surface(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .offset(x = 1.dp, y = (-3).dp),
+                shape = CircleShape,
+                color = Color(0xFFE11D48).copy(alpha = 0.97f),
+                contentColor = Color.White.copy(alpha = 0.98f),
+                border = BorderStroke(0.8.dp, Color.White.copy(alpha = 0.38f)),
+                shadowElevation = 5.dp,
+            ) {
+                Text(
+                    text = notificationBadgeLabel(badgeCount),
+                    modifier = Modifier
+                        .defaultMinSize(minWidth = 18.dp, minHeight = 18.dp)
+                        .padding(horizontal = 4.dp, vertical = 1.dp)
+                        .wrapContentSize(Alignment.Center),
+                    fontSize = 10.sp,
+                    lineHeight = 10.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun TunnelConnectionButton(
     title: String,
     subtitle: String,
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
     enabled: Boolean,
-    active: Boolean,
-    connecting: Boolean,
-    error: Boolean,
+    state: ConnectionControlState,
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val disconnectedGlow = Color(0xFF6EDDD5)
-    val disconnectedSurface = Color(0xFF1F6F69)
-    val disconnectedEdge = Color(0xFF0F4D4A)
-    val connectedGlow = Color(0xFFAF5A64)
-    val connectedSurface = Color(0xFF7A3D48)
-    val connectedEdge = Color(0xFF4B1F28)
-    val iconTint = Color(0xFF6EDDD5)
-    val subtitleTint = Color(0xFF9FE8E0)
-    val connectedTitleTint = Color(0xFFF1E1CF)
-    val baseColor = when {
-        error -> MaterialTheme.colorScheme.error
-        active -> connectedGlow
-        connecting -> MaterialTheme.colorScheme.secondary
-        enabled -> disconnectedGlow
-        else -> MaterialTheme.colorScheme.outline
+    val interactionSource = remember { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+    val pressScale by animateFloatAsState(
+        targetValue = if (isPressed) 0.97f else 1f,
+        animationSpec = tween(110),
+        label = "tunnel_button_press_scale"
+    )
+    // Deliberately saturated pigments: the colour lives inside the glass layers,
+    // rather than being reduced to a grey surface with a thin tint.
+    val readyEmerald = Color(0xFF00C49A)
+    val connectedCrimson = Color(0xFFEF2D4F)
+    val connectingTeal = Color(0xFF4F91A0)
+    val disconnectingCrimson = Color(0xFFC45B65)
+    val errorCrimson = Color(0xFFB9364A)
+    val disabledSlate = Color(0xFF3A4A50)
+    val stateAccent = when (state) {
+        ConnectionControlState.CONNECTED -> connectedCrimson
+        ConnectionControlState.CONNECTING -> connectingTeal
+        ConnectionControlState.DISCONNECTING -> disconnectingCrimson
+        ConnectionControlState.ERROR -> errorCrimson
+        ConnectionControlState.DISABLED -> disabledSlate
+        ConnectionControlState.READY -> readyEmerald
     }
+    val liquidColor by animateColorAsState(
+        targetValue = stateAccent,
+        animationSpec = tween(360),
+        label = "tunnel_button_liquid_tint"
+    )
+    val baseColor = if (enabled) stateAccent else disabledSlate
     val haloColor by animateColorAsState(
         targetValue = baseColor,
         animationSpec = tween(280),
         label = "tunnel_button_halo"
     )
     val haloAlpha by animateFloatAsState(
-        targetValue = when {
-            error -> 0.16f
-            active -> 0.18f
-            connecting -> 0.14f
-            enabled -> 0.14f
-            else -> 0.08f
+        targetValue = when (state) {
+            ConnectionControlState.CONNECTED -> 0.24f
+            ConnectionControlState.CONNECTING -> 0.13f
+            ConnectionControlState.DISCONNECTING -> 0.16f
+            ConnectionControlState.ERROR -> 0.17f
+            ConnectionControlState.READY -> 0.22f
+            ConnectionControlState.DISABLED -> 0.03f
         },
         animationSpec = tween(280),
         label = "tunnel_button_halo_alpha"
     )
     val haloScale by animateFloatAsState(
-        targetValue = when {
-            active -> 1.16f
-            connecting -> 1.1f
-            error -> 1.08f
-            else -> 1f
+        targetValue = when (state) {
+            ConnectionControlState.CONNECTED -> 1.045f
+            ConnectionControlState.READY -> 1.025f
+            ConnectionControlState.CONNECTING,
+            ConnectionControlState.DISCONNECTING,
+            ConnectionControlState.ERROR -> 1.015f
+            ConnectionControlState.DISABLED -> 1f
         },
         animationSpec = tween(280),
         label = "tunnel_button_scale"
     )
-    val surfaceColor by animateColorAsState(
-        targetValue = when {
-            error -> MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.84f)
-            active -> connectedSurface.copy(alpha = 0.80f)
-            connecting -> MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.8f)
-            enabled -> disconnectedSurface.copy(alpha = 0.80f)
-            else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.88f)
-        },
-        animationSpec = tween(280),
-        label = "tunnel_button_surface"
-    )
     val borderColor by animateColorAsState(
-        targetValue = when {
-            error -> MaterialTheme.colorScheme.error.copy(alpha = 0.42f)
-            active -> connectedGlow.copy(alpha = 0.38f)
-            connecting -> MaterialTheme.colorScheme.secondary.copy(alpha = 0.42f)
-            enabled -> disconnectedGlow.copy(alpha = 0.38f)
-            else -> MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.8f)
+        targetValue = when (state) {
+            ConnectionControlState.CONNECTED -> connectedCrimson.copy(alpha = 0.62f)
+            ConnectionControlState.CONNECTING -> connectingTeal.copy(alpha = 0.64f)
+            ConnectionControlState.DISCONNECTING -> disconnectingCrimson.copy(alpha = 0.70f)
+            ConnectionControlState.ERROR -> errorCrimson.copy(alpha = 0.72f)
+            ConnectionControlState.READY -> readyEmerald.copy(alpha = 0.64f)
+            ConnectionControlState.DISABLED -> disabledSlate.copy(alpha = 0.42f)
         },
         animationSpec = tween(280),
         label = "tunnel_button_border"
     )
     val innerBorderColor by animateColorAsState(
-        targetValue = when {
-            error -> Color(0xFFFFF2EC).copy(alpha = 0.075f)
-            active -> Color(0xFFFFF0E3).copy(alpha = 0.085f)
-            connecting -> Color.White.copy(alpha = 0.085f)
-            enabled -> Color.White.copy(alpha = 0.10f)
-            else -> Color.White.copy(alpha = 0.065f)
+        targetValue = when (state) {
+            ConnectionControlState.CONNECTED -> Color.White.copy(alpha = 0.26f)
+            ConnectionControlState.CONNECTING,
+            ConnectionControlState.DISCONNECTING -> Color.White.copy(alpha = 0.19f)
+            ConnectionControlState.ERROR -> Color.White.copy(alpha = 0.18f)
+            ConnectionControlState.READY -> Color.White.copy(alpha = 0.28f)
+            ConnectionControlState.DISABLED -> Color.White.copy(alpha = 0.08f)
         },
         animationSpec = tween(280),
         label = "tunnel_button_inner_border"
     )
-    val centerTint by animateColorAsState(
-        targetValue = when {
-            error -> MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.24f)
-            active -> connectedSurface.copy(alpha = 0.24f)
-            connecting -> MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.22f)
-            enabled -> disconnectedSurface.copy(alpha = 0.22f)
-            else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.18f)
-        },
-        animationSpec = tween(280),
-        label = "tunnel_button_center_tint"
-    )
-    val edgeTint by animateColorAsState(
-        targetValue = when {
-            error -> MaterialTheme.colorScheme.error.copy(alpha = 0.20f)
-            active -> connectedEdge.copy(alpha = 0.26f)
-            connecting -> MaterialTheme.colorScheme.secondary.copy(alpha = 0.20f)
-            enabled -> disconnectedEdge.copy(alpha = 0.24f)
-            else -> MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.18f)
-        },
-        animationSpec = tween(280),
-        label = "tunnel_button_edge_tint"
-    )
     val titleColor by animateColorAsState(
-        targetValue = when {
-            error -> Color.White
-            active -> connectedTitleTint
-            connecting -> Color.White
-            enabled -> Color.White
-            else -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+        targetValue = when (state) {
+            ConnectionControlState.DISABLED -> Color.White.copy(alpha = 0.48f)
+            else -> Color.White.copy(alpha = 0.96f)
         },
         animationSpec = tween(280),
         label = "tunnel_button_title"
     )
     val subtitleColor by animateColorAsState(
-        targetValue = when {
-            error -> subtitleTint
-            active -> subtitleTint
-            connecting -> subtitleTint
-            enabled -> subtitleTint
-            else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.42f)
+        targetValue = when (state) {
+            // Uptime is deliberately secondary to the action label.
+            ConnectionControlState.CONNECTED -> Color.White.copy(alpha = 0.66f)
+            ConnectionControlState.CONNECTING -> Color(0xFFE9FAFC)
+            ConnectionControlState.DISCONNECTING -> Color(0xFFFFECEC)
+            ConnectionControlState.ERROR -> Color(0xFFFFE9E5)
+            ConnectionControlState.READY -> Color(0xFFE4FFF6)
+            ConnectionControlState.DISABLED -> Color.White.copy(alpha = 0.42f)
         },
         animationSpec = tween(280),
         label = "tunnel_button_subtitle"
     )
     val iconColor by animateColorAsState(
-        targetValue = when {
-            error -> iconTint
-            active -> iconTint
-            connecting -> iconTint
-            enabled -> iconTint
-            else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f)
+        targetValue = when (state) {
+            ConnectionControlState.CONNECTED -> Color(0xFFFFF6F7)
+            ConnectionControlState.CONNECTING,
+            ConnectionControlState.DISCONNECTING -> Color(0xFFF1FEFF)
+            ConnectionControlState.ERROR -> Color(0xFFFFF3F0)
+            ConnectionControlState.READY -> Color(0xFFF0FFFA)
+            ConnectionControlState.DISABLED -> Color.White.copy(alpha = 0.42f)
         },
         animationSpec = tween(280),
         label = "tunnel_button_icon"
@@ -3315,7 +3565,19 @@ private fun TunnelConnectionButton(
 
     Box(
         modifier = modifier
-            .size(176.dp),
+            .sizeIn(minWidth = 48.dp, minHeight = 48.dp)
+            .size(176.dp)
+            .semantics {
+                contentDescription = when (state) {
+                    ConnectionControlState.READY -> "Подключить VPN"
+                    ConnectionControlState.CONNECTING -> "Подключение"
+                    ConnectionControlState.CONNECTED -> "Отключить VPN"
+                    ConnectionControlState.DISCONNECTING -> "Отключение"
+                    ConnectionControlState.ERROR -> "Ошибка подключения"
+                    ConnectionControlState.DISABLED -> "Подключение временно недоступно"
+                }
+                stateDescription = title
+            },
         contentAlignment = Alignment.Center
     ) {
         Box(
@@ -3336,78 +3598,89 @@ private fun TunnelConnectionButton(
             onClick = onClick,
             enabled = enabled,
             shape = CircleShape,
-            color = surfaceColor,
-            border = BorderStroke(1.dp, borderColor),
-            shadowElevation = if (active || connecting) 10.dp else 4.dp,
-            modifier = Modifier.size(160.dp)
+            color = Color.Transparent,
+            contentColor = Color.White,
+            border = BorderStroke(0.8.dp, borderColor),
+            shadowElevation = when (state) {
+                ConnectionControlState.CONNECTED,
+                ConnectionControlState.READY -> 9.dp
+                ConnectionControlState.CONNECTING,
+                ConnectionControlState.DISCONNECTING,
+                ConnectionControlState.ERROR -> 7.dp
+                ConnectionControlState.DISABLED -> 2.dp
+            },
+            interactionSource = interactionSource,
+            modifier = Modifier
+                .size(168.dp)
+                .scale(pressScale)
         ) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(7.dp)
+                    .padding(5.dp)
                     .clip(CircleShape)
-                    .drawWithCache {
-                        val baseBrush = Brush.radialGradient(
-                            colors = listOf(
-                                centerTint.copy(alpha = 0.96f),
-                                centerTint.copy(alpha = 0.82f),
-                                edgeTint.copy(alpha = 0.92f),
-                                edgeTint.copy(alpha = 1f)
-                            ),
-                            center = Offset(size.width * 0.42f, size.height * 0.34f),
-                            radius = size.minDimension * 0.98f
-                        )
-                        val glossBrush = Brush.radialGradient(
-                            colors = listOf(
-                                Color.White.copy(alpha = 0.14f),
-                                Color.White.copy(alpha = 0.05f),
-                                Color.Transparent
-                            ),
-                            center = Offset(size.width * 0.34f, size.height * 0.22f),
-                            radius = size.minDimension * 0.62f
-                        )
-                        val sheenBrush = Brush.linearGradient(
-                            colors = listOf(
-                                Color.White.copy(alpha = 0.12f),
-                                Color.Transparent,
-                                Color.Black.copy(alpha = 0.11f)
-                            ),
-                            start = Offset.Zero,
-                            end = Offset(0f, size.height)
-                        )
-                        val ringWidth = 1.dp.toPx()
-
-                        onDrawWithContent {
-                            drawCircle(brush = baseBrush)
-                            drawCircle(brush = glossBrush)
-                            drawRect(brush = sheenBrush)
-                            drawCircle(color = innerBorderColor, style = Stroke(width = ringWidth))
-                            drawContent()
-                        }
-                    },
+                    .liquidGlassLayer(
+                        pigment = liquidColor,
+                        enabled = enabled,
+                        innerBorderColor = innerBorderColor
+                    ),
                 contentAlignment = Alignment.Center
             ) {
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Icon(
-                        imageVector = icon,
-                        contentDescription = title,
-                        tint = iconColor,
-                        modifier = Modifier.size(32.dp)
-                    )
-                    Text(
-                        text = title,
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold,
-                        color = titleColor
-                    )
-                    Text(
-                        text = subtitle,
-                        style = MaterialTheme.typography.labelMedium,
-                        color = subtitleColor
-                    )
+                AnimatedContent(
+                    targetState = state,
+                    transitionSpec = {
+                        fadeIn(animationSpec = tween(220)) togetherWith
+                            fadeOut(animationSpec = tween(160))
+                    },
+                    label = "tunnel_button_content"
+                ) { currentState ->
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        when (currentState) {
+                            ConnectionControlState.CONNECTING,
+                            ConnectionControlState.DISCONNECTING -> CircularProgressIndicator(
+                                modifier = Modifier.size(28.dp),
+                                color = iconColor,
+                                strokeWidth = 2.5.dp
+                            )
+                            ConnectionControlState.CONNECTED -> Icon(
+                                imageVector = Icons.Default.PowerSettingsNew,
+                                contentDescription = null,
+                                tint = iconColor,
+                                modifier = Modifier.size(36.dp)
+                            )
+                            ConnectionControlState.ERROR -> Icon(
+                                imageVector = Icons.Default.Error,
+                                contentDescription = null,
+                                tint = iconColor,
+                                modifier = Modifier.size(30.dp)
+                            )
+                            ConnectionControlState.READY,
+                            ConnectionControlState.DISABLED -> Icon(
+                                imageVector = Icons.Default.PowerSettingsNew,
+                                contentDescription = null,
+                                tint = iconColor,
+                                modifier = Modifier.size(36.dp)
+                            )
+                        }
+                        Text(
+                            text = title,
+                            style = MaterialTheme.typography.titleMedium.copy(fontSize = 19.sp),
+                            fontWeight = FontWeight.SemiBold,
+                            color = titleColor,
+                            maxLines = 1
+                        )
+                        if (subtitle.isNotBlank()) {
+                            Text(
+                                text = subtitle,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = subtitleColor,
+                                maxLines = 1
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -3475,18 +3748,134 @@ private fun CompactSteppedSlider(
     val steps = (((valueRange.endInclusive - valueRange.start) / stepSize).roundToInt() - 1).coerceAtLeast(0)
     val clampedValue = value.coerceIn(valueRange.start, valueRange.endInclusive)
     val valueLabel = clampedValue.toInt().toString()
-
-    Slider(
-        value = clampedValue,
-        onValueChange = { onValueChange(snap(it)) },
-        valueRange = valueRange,
-        steps = steps,
-        enabled = enabled,
-        modifier = modifier.semantics {
-            contentDescription = "Количество потоков"
-            stateDescription = "$valueLabel, от ${valueRange.start.toInt()} до ${valueRange.endInclusive.toInt()}"
-        }
+    val fraction = ((clampedValue - valueRange.start) /
+        (valueRange.endInclusive - valueRange.start).coerceAtLeast(0.001f)).coerceIn(0f, 1f)
+    val animatedFraction by animateFloatAsState(
+        targetValue = fraction,
+        animationSpec = tween(durationMillis = 220),
+        label = "power-track"
     )
+    val accent = HopletTheme.colors.accent
+    val inactiveTrack = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.24f)
+    val inactiveLabel = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f)
+    val quietLabel = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.48f)
+    val disabledThumbColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.48f)
+    val markerInactive = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.42f)
+    val trackHeight = 8.dp
+    // Подсветка подписи появляется только у фактических крайних положений.
+    val atMinimum = fraction <= 0.05f
+    val atMaximum = fraction >= 0.95f
+
+    Column(modifier = modifier) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "Экономия",
+                style = MaterialTheme.typography.labelSmall,
+                fontSize = 13.sp,
+                color = if (atMinimum) accent else inactiveLabel,
+                fontWeight = if (atMinimum) FontWeight.SemiBold else FontWeight.Medium
+            )
+            Text(
+                text = "Максимальная",
+                style = MaterialTheme.typography.labelSmall,
+                fontSize = 13.sp,
+                color = if (atMaximum) accent else quietLabel,
+                fontWeight = if (atMaximum) FontWeight.SemiBold else FontWeight.Medium,
+                textAlign = TextAlign.End
+            )
+        }
+
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(32.dp)
+        ) {
+            Canvas(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(32.dp)
+            ) {
+                val horizontalPadding = 8.dp.toPx()
+                val trackWidth = (size.width - horizontalPadding * 2f).coerceAtLeast(0f)
+                val centerY = size.height / 2f
+                val trackHeightPx = trackHeight.toPx()
+                val startX = horizontalPadding
+                val thumbX = startX + trackWidth * animatedFraction
+                drawRoundRect(
+                    color = inactiveTrack,
+                    topLeft = Offset(startX, centerY - trackHeightPx / 2f),
+                    size = androidx.compose.ui.geometry.Size(trackWidth, trackHeightPx),
+                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(trackHeightPx / 2f)
+                )
+                // Равномерные точки соответствуют реальным дискретным шагам.
+                val markerCount = (
+                    ((valueRange.endInclusive - valueRange.start) / stepSize).roundToInt() + 1
+                    ).coerceAtLeast(2)
+                for (index in 0 until markerCount) {
+                    val markerFraction = index.toFloat() / (markerCount - 1)
+                    val markerX = startX + trackWidth * markerFraction
+                    drawCircle(
+                        color = if (markerFraction <= animatedFraction) {
+                            accent.copy(alpha = if (enabled) 0.62f else 0.28f)
+                        } else {
+                            markerInactive
+                        },
+                        radius = 1.8.dp.toPx(),
+                        center = Offset(markerX, centerY)
+                    )
+                }
+                drawRoundRect(
+                    brush = Brush.horizontalGradient(
+                        colors = listOf(
+                            accent.copy(alpha = if (enabled) 0.94f else 0.36f),
+                            accent.copy(alpha = if (enabled) 0.68f else 0.28f)
+                        )
+                    ),
+                    topLeft = Offset(startX, centerY - trackHeightPx / 2f),
+                    size = androidx.compose.ui.geometry.Size(trackWidth * animatedFraction, trackHeightPx),
+                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(trackHeightPx / 2f)
+                )
+                drawCircle(
+                    color = accent.copy(alpha = if (enabled) 0.16f else 0.06f),
+                    radius = 11.dp.toPx(),
+                    center = Offset(thumbX, centerY)
+                )
+                drawCircle(
+                    color = if (enabled) accent else disabledThumbColor,
+                    radius = 7.dp.toPx(),
+                    center = Offset(thumbX, centerY)
+                )
+            }
+            Slider(
+                value = clampedValue,
+                onValueChange = { onValueChange(snap(it)) },
+                valueRange = valueRange,
+                steps = steps,
+                enabled = enabled,
+                colors = SliderDefaults.colors(
+                    activeTrackColor = Color.Transparent,
+                    inactiveTrackColor = Color.Transparent,
+                    disabledActiveTrackColor = Color.Transparent,
+                    disabledInactiveTrackColor = Color.Transparent,
+                    activeTickColor = Color.Transparent,
+                    inactiveTickColor = Color.Transparent,
+                    thumbColor = Color.Transparent,
+                    disabledThumbColor = Color.Transparent
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(52.dp)
+                    .semantics {
+                        contentDescription = "Количество потоков"
+                        stateDescription = "$valueLabel, от ${valueRange.start.toInt()} до ${valueRange.endInclusive.toInt()}"
+                    }
+            )
+        }
+    }
 }
 
 @Composable
@@ -3494,33 +3883,36 @@ private fun PowerRecommendationInfoBlock(
     modifier: Modifier = Modifier
 ) {
     val accentColor = HopletTheme.colors.accent
-    val containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.34f)
-    val borderColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.28f)
+    val containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.22f)
+    val borderColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f)
     val textColor = MaterialTheme.colorScheme.onSurfaceVariant
 
     Surface(
         modifier = modifier,
-        shape = RoundedCornerShape(18.dp),
+        shape = RoundedCornerShape(12.dp),
         color = containerColor,
         border = BorderStroke(1.dp, borderColor)
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            modifier = Modifier
+                .heightIn(min = 40.dp)
+                .padding(horizontal = 9.dp, vertical = 5.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Surface(
-                shape = CircleShape,
-                color = accentColor.copy(alpha = 0.14f),
-                border = BorderStroke(1.dp, accentColor.copy(alpha = 0.18f))
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Info,
-                    contentDescription = null,
-                    tint = accentColor,
-                    modifier = Modifier.padding(7.dp).size(14.dp)
-                )
-            }
+            Box(
+                modifier = Modifier
+                    .width(3.dp)
+                    .height(20.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(accentColor.copy(alpha = 0.72f))
+            )
+            Icon(
+                imageVector = Icons.Default.Info,
+                contentDescription = "Рекомендация",
+                tint = accentColor.copy(alpha = 0.86f),
+                modifier = Modifier.size(17.dp)
+            )
 
             Text(
                 modifier = Modifier.weight(1f),
@@ -3529,12 +3921,12 @@ private fun PowerRecommendationInfoBlock(
                     withStyle(
                         style = androidx.compose.ui.text.SpanStyle(
                             color = accentColor,
-                            fontWeight = FontWeight.SemiBold
+                            fontWeight = FontWeight.Bold
                         )
                     ) {
                         append("18")
                     }
-                    append(" потоков.\n")
+                    append(" потоков.")
                 },
                 style = MaterialTheme.typography.bodySmall,
                 color = textColor

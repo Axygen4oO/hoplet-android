@@ -1,0 +1,10 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- Monochrome H mark: Android tints this glyph in the status bar. -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M4,3h4v6h8V3h4v18h-4v-6H8v6H4z" />
+</vector>

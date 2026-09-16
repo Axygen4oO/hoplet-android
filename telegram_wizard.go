@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"log"
 	"strconv"
 	"strings"
 
@@ -15,6 +14,9 @@ func handleTelegramInput(
 	cmd string,
 	wgDev *device.Device,
 ) bool {
+	if handlePushInput(token, adminID, cmd) {
+		return true
+	}
 	if handleNotificationInput(token, adminID, cmd) {
 		return true
 	}
@@ -79,7 +81,6 @@ func handleTelegramInput(
 	}
 
 	if tgState.WaitingForLabel {
-		log.Printf("DEBUG: WaitingForLabel=true, cmd='%s'", cmd)
 		tgState.WaitingForLabel = false
 
 		tgState.TempLabel = strings.TrimSpace(cmd)
@@ -95,8 +96,6 @@ func handleTelegramInput(
 		}
 
 		tgState.WaitingForDevices = true
-		log.Printf("DEBUG: TempLabel='%s', WaitingForDevices=true", tgState.TempLabel)
-
 		sendTelegram(
 			token,
 			adminID,

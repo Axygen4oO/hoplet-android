@@ -224,7 +224,7 @@ class ProfilesStore(context: Context) {
             val parsed = SubscriptionImport.fetch(trimmedUrl).getOrThrow()
             val groupName = parsed.subscriptionName?.trim()?.takeIf { it.isNotEmpty() }
                 ?: return@withContext Result.failure(IllegalArgumentException("В JSON нужно поле subscriptionName"))
-            importProfilesToGroup(groupName, parsed.profiles, fromSubscription = true)
+            val imported = importProfilesToGroup(groupName, parsed.profiles, fromSubscription = true)
             val groupId = findGroupByName(groupName)?.id ?: ""
             val id = UUID.randomUUID().toString()
             val sub = ProfileSubscription(
@@ -240,6 +240,7 @@ class ProfilesStore(context: Context) {
                 lastSyncError = ""
             )
             saveSubscription(sub)
+            imported.firstOrNull()?.let { applyProfile(appContext, it.id) }
             Result.success(sub)
         } catch (e: Exception) {
             Result.failure(e)
@@ -253,7 +254,8 @@ class ProfilesStore(context: Context) {
         try {
             val parsed = SubscriptionImport.fetch(sub.url).getOrThrow()
             val groupName = parsed.subscriptionName?.trim()?.takeIf { it.isNotEmpty() } ?: sub.name
-            importProfilesToGroup(groupName, parsed.profiles, fromSubscription = true)
+            val activeProfile = getProfileOnce(settings.currentProfileId.first())
+            val imported = importProfilesToGroup(groupName, parsed.profiles, fromSubscription = true)
             val groupId = findGroupByName(groupName)?.id ?: sub.groupId
             saveSubscription(
                 sub.copy(
@@ -267,6 +269,9 @@ class ProfilesStore(context: Context) {
                     lastSyncError = ""
                 )
             )
+            if (activeProfile?.groupId == sub.groupId) {
+                imported.firstOrNull()?.let { applyProfile(appContext, it.id) }
+            }
             Result.success(parsed.profiles.size)
         } catch (e: Exception) {
             saveSubscription(
@@ -384,6 +389,14 @@ class ProfilesStore(context: Context) {
     }
 
     suspend fun deleteProfile(id: String) = withContext(Dispatchers.IO) {
+        val currentId = settings.currentProfileId.first()
+        if (currentId == id) {
+            getProfileOnce(id)?.let { profile ->
+                PushRegistrationClient.unregister(appContext, profile.password, profile.peer)
+            }
+            settings.saveConnectionPassword("")
+            settings.saveCurrentProfile("", "")
+        }
         dataStore.edit { prefs ->
             val idsRaw = prefs[idsKey()] ?: ""
             val ids = idsRaw.split(',').map { it.trim() }.filter { it.isNotEmpty() }.toMutableList()
@@ -439,11 +452,15 @@ class ProfilesStore(context: Context) {
         newId
     }
 
-    suspend fun importProfilesToGroup(groupName: String, profiles: List<ConnectionProfile>, fromSubscription: Boolean = false) = withContext(Dispatchers.IO) {
+    suspend fun importProfilesToGroup(groupName: String, profiles: List<ConnectionProfile>, fromSubscription: Boolean = false): List<ConnectionProfile> = withContext(Dispatchers.IO) {
         val groupId = resolveGroupIdForImport(groupName, fromSubscription)
+        val imported = mutableListOf<ConnectionProfile>()
         for (p in profiles) {
-            saveProfile(p.copy(id = UUID.randomUUID().toString(), groupId = groupId), fromSubscriptionSync = fromSubscription)
+            val saved = p.copy(id = UUID.randomUUID().toString(), groupId = groupId)
+            saveProfile(saved, fromSubscriptionSync = fromSubscription)
+            imported += saved
         }
+        imported
     }
 
     suspend fun deleteGroup(id: String) = withContext(Dispatchers.IO) {
@@ -521,6 +538,11 @@ class ProfilesStore(context: Context) {
     // Apply profile: save to SettingsStore
     suspend fun applyProfile(context: Context, id: String) {
         val p = getProfileOnce(id) ?: return
+        val previousPassword = settings.connectionPassword.first().trim()
+        val previousPeer = settings.peer.first().trim()
+        if (previousPassword.isNotBlank() && (previousPassword != p.password.trim() || previousPeer != p.peer.trim())) {
+            PushRegistrationClient.unregister(appContext, previousPassword, previousPeer)
+        }
         // save to settings
         val finalHashes = if (p.useGlobalHashes) {
             val global = settings.globalVkHashes.first()
@@ -556,5 +578,6 @@ class ProfilesStore(context: Context) {
         settings.saveConnectionPassword(p.password)
         settings.saveTransportMode(p.transportMode)
         settings.saveCurrentProfile(p.id, p.name)
+        PushRegistrationClient.onSubscriptionReady(context)
     }
 }

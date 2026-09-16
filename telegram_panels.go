@@ -8,6 +8,14 @@ func showMainPanel(
 ) {
 	keyboard := [][]map[string]interface{}{
 		{{
+			"text":          "📢 Отправить push всем",
+			"callback_data": "push_new",
+		}},
+		{{
+			"text":          "👤 Push пользователю",
+			"callback_data": "push_user",
+		}},
+		{{
 			"text":          "👥 Подписки",
 			"callback_data": "panel_subs",
 		}},
@@ -24,8 +32,12 @@ func showMainPanel(
 			"callback_data": "panel_server",
 		}},
 		{{
-			"text":          "📢 Отправить уведомление",
+			"text":          "🔔 Уведомления",
 			"callback_data": notificationPanelCallback,
+		}},
+		{{
+			"text":          "📱 Push-устройства",
+			"callback_data": "push_devices",
 		}},
 	}
 

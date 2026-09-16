@@ -1,7 +1,7 @@
 package com.wdtt.client
 
 import android.content.Context
-
+/** Server-administrator JWT used only by administrator API calls. */
 object AdminSession {
     private const val PREFS = "admin_session"
     private const val KEY_TOKEN = "jwt"

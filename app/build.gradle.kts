@@ -9,6 +9,12 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+// Production builds should place google-services.json in app/. Keeping this
+// conditional allows OSS/debug builds and unit tests to run without secrets.
+if (file("google-services.json").exists()) {
+    apply(plugin = "com.google.gms.google-services")
+}
+
 val isWindows = System.getProperty("os.name").startsWith("Windows", ignoreCase = true)
 val isBundleBuild = gradle.startParameter.taskNames.any {
     it.substringAfterLast(':').startsWith("bundle", ignoreCase = true)
@@ -22,8 +28,8 @@ android {
         applicationId = "net.qwdtt.client"
         minSdk = 28
         targetSdk = 35
-        versionCode = 47
-        versionName = "1.5.0"
+        versionCode = 48
+        versionName = "1.5.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -219,6 +225,7 @@ dependencies {
     implementation("com.wireguard.android:tunnel:1.0.20230706")
     implementation("com.github.mwiede:jsch:0.2.16")
     implementation("com.google.android.gms:play-services-code-scanner:16.1.0")
+    implementation("com.google.firebase:firebase-messaging:24.1.0")
     implementation("com.google.zxing:core:3.5.3")
     implementation("androidx.webkit:webkit:1.12.1")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")

@@ -88,7 +88,7 @@ class AppUpdateService : Service() {
                 when (action) {
                     ACTION_START_APP_UPDATE -> {
                         val release = intent?.readAppReleaseInfo()
-                        if (release == null || !isInstallableOtaRelease(release)) {
+                        if (release == null || !isProductionOtaRelease(release)) {
                             Log.w(LOG_TAG, "Ignored start request without downloadable release")
                             stopSelfResult(startId)
                             return@withLock
@@ -99,7 +99,7 @@ class AppUpdateService : Service() {
                     ACTION_RESUME_APP_UPDATE -> {
                         val release = intent?.readAppReleaseInfo()
                             ?: settingsStore.updateDownloadState.first().toReleaseInfo()
-                        if (release == null || !isInstallableOtaRelease(release)) {
+                        if (release == null || !isProductionOtaRelease(release)) {
                             Log.w(LOG_TAG, "Ignored resume request without stored release")
                             stopSelfResult(startId)
                             return@withLock
@@ -110,7 +110,7 @@ class AppUpdateService : Service() {
                     ACTION_RETRY_APP_UPDATE -> {
                         val release = intent?.readAppReleaseInfo()
                             ?: settingsStore.updateDownloadState.first().toReleaseInfo()
-                        if (release == null || !isInstallableOtaRelease(release)) {
+                        if (release == null || !isProductionOtaRelease(release)) {
                             Log.w(LOG_TAG, "Ignored retry request without stored release")
                             stopSelfResult(startId)
                             return@withLock
@@ -204,7 +204,9 @@ class AppUpdateService : Service() {
     private suspend fun installDownloadedApk() {
         val snapshot = settingsStore.updateDownloadState.first()
         val apkFile = snapshot.filePath.takeIf { it.isNotBlank() }?.let(::File)
-        if (snapshot.source != RemoteVersionSource.Release ||
+        val release = snapshot.toReleaseInfo()
+        if (release == null || !isProductionOtaRelease(release) ||
+            snapshot.source != RemoteVersionSource.Release ||
             snapshot.phase != AppUpdatePhase.READY_TO_INSTALL || apkFile == null || !apkFile.exists()
         ) {
             markError(snapshot, "Файл обновления не найден, скачайте APK заново")
@@ -268,7 +270,7 @@ class AppUpdateService : Service() {
             AppUpdatePhase.WAITING_FOR_NETWORK,
             AppUpdatePhase.VERIFYING -> {
                 val release = snapshot.toReleaseInfo()
-                if (release == null || !isInstallableOtaRelease(release)) {
+                if (release == null || !isProductionOtaRelease(release)) {
                     clearStoredUpdate()
                 } else if (snapshot.phase == AppUpdatePhase.WAITING_FOR_NETWORK && !hasUsableNetwork()) {
                     ensureForeground(snapshot)
@@ -281,8 +283,12 @@ class AppUpdateService : Service() {
             AppUpdatePhase.PAUSED,
             AppUpdatePhase.ERROR,
             AppUpdatePhase.CANCELLED -> {
-                showDetachedNotification(snapshot)
-                stopSelf()
+                if (snapshot.toReleaseInfo()?.let(::isProductionOtaRelease) == true) {
+                    showDetachedNotification(snapshot)
+                    stopSelf()
+                } else {
+                    clearStoredUpdate()
+                }
             }
 
             AppUpdatePhase.IDLE -> {
@@ -297,7 +303,7 @@ class AppUpdateService : Service() {
         val snapshot = settingsStore.updateDownloadState.first()
         if (snapshot.phase != AppUpdatePhase.WAITING_FOR_NETWORK || !snapshot.autoResumeOnNetwork) return
         if (!hasUsableNetwork()) return
-        val release = snapshot.toReleaseInfo() ?: return
+        val release = snapshot.toReleaseInfo()?.takeIf(::isProductionOtaRelease) ?: return
         Log.i(LOG_TAG, "Network restored, resuming app update ${snapshot.versionTag}")
         startOrResumeDownload(release, "network-restored")
     }

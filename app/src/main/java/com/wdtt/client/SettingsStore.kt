@@ -141,7 +141,6 @@ class SettingsStore(context: Context) {
         private val UPDATE_LATEST_VERSION = stringPreferencesKey("update_latest_version")
         private val UPDATE_LAST_ERROR = stringPreferencesKey("update_last_error")
         private val UPDATE_CHECK_INTERVAL_HOURS = intPreferencesKey("update_check_interval_hours")
-        private val UPDATE_INCLUDE_BETA = booleanPreferencesKey("update_include_beta")
         private val UPDATE_POSTPONE_UNTIL = longPreferencesKey("update_postpone_until")
         private val UPDATE_POSTPONE_VERSION = stringPreferencesKey("update_postpone_version")
         private val UPDATE_DIALOG_LAST_SHOWN_VERSION = stringPreferencesKey("update_dialog_last_shown_version")
@@ -157,6 +156,13 @@ class SettingsStore(context: Context) {
         private val CHANGELOG_SHOWN_VERSION_CODE = intPreferencesKey("changelog_shown_version_code")
         private val SUPPORT_NOTICE_SHOWN_VERSION_CODE = intPreferencesKey("support_notice_shown_version_code")
 
+        private val PUSH_ENABLED = booleanPreferencesKey("push_enabled")
+		private val PUSH_SUBSCRIPTION_UPDATES = booleanPreferencesKey("push_subscription_updates")
+        private val PUSH_SUBSCRIPTION_REMINDERS = booleanPreferencesKey("push_subscription_reminders")
+        private val PUSH_UPDATES = booleanPreferencesKey("push_updates")
+        private val PUSH_SECURITY = booleanPreferencesKey("push_security")
+        private val PUSH_PROMOTIONS = booleanPreferencesKey("push_promotions")
+
         /** versionCode, при первом запуске которого показывается экран поддержки (донат + канал). */
         const val SUPPORT_NOTICE_VERSION_CODE = 28
 
@@ -168,6 +174,17 @@ class SettingsStore(context: Context) {
 
         /** -1 = выкл, 0 = при каждом открытии, иначе интервал в часах (6/12/24). */
         private val SUB_AUTO_REFRESH_HOURS = intPreferencesKey("sub_auto_refresh_hours")
+
+        // Последнее подтверждённое состояние подписки для offline UI.
+        private fun subCacheMaxDevicesKey(id: String) = intPreferencesKey("sub_cache_max_devices_$id")
+        private fun subCacheBoundDevicesKey(id: String) = intPreferencesKey("sub_cache_bound_devices_$id")
+        private fun subCacheActiveDevicesKey(id: String) = intPreferencesKey("sub_cache_active_devices_$id")
+        private fun subCacheCurrentBoundKey(id: String) = booleanPreferencesKey("sub_cache_current_bound_$id")
+        private fun subCacheExpiresAtKey(id: String) = longPreferencesKey("sub_cache_expires_at_$id")
+        private fun subCacheStatusKey(id: String) = stringPreferencesKey("sub_cache_status_$id")
+        private fun subCachePlanKey(id: String) = stringPreferencesKey("sub_cache_plan_$id")
+        private fun subCacheMainPasswordKey(id: String) = booleanPreferencesKey("sub_cache_main_password_$id")
+        private fun subCacheSavedAtKey(id: String) = longPreferencesKey("sub_cache_saved_at_$id")
 
         const val SUB_AUTO_REFRESH_NEVER = -1
         const val SUB_AUTO_REFRESH_EVERY_OPEN = 0
@@ -482,7 +499,6 @@ class SettingsStore(context: Context) {
     val updateLatestVersion: Flow<String> = dataStore.data.map { it[UPDATE_LATEST_VERSION] ?: "" }
     val updateLastError: Flow<String> = dataStore.data.map { it[UPDATE_LAST_ERROR] ?: "" }
     val updateCheckIntervalHours: Flow<Int> = dataStore.data.map { it[UPDATE_CHECK_INTERVAL_HOURS] ?: 24 }
-    val includeBetaUpdates: Flow<Boolean> = dataStore.data.map { it[UPDATE_INCLUDE_BETA] ?: false }
     val updatePostponeUntil: Flow<Long> = dataStore.data.map { it[UPDATE_POSTPONE_UNTIL] ?: 0L }
     val updatePostponeVersion: Flow<String> = dataStore.data.map { it[UPDATE_POSTPONE_VERSION] ?: "" }
     val updateDialogLastShownVersion: Flow<String> = dataStore.data.map { it[UPDATE_DIALOG_LAST_SHOWN_VERSION] ?: "" }
@@ -497,6 +513,13 @@ class SettingsStore(context: Context) {
     val cachedReleaseNotes: Flow<String> = dataStore.data.map { it[UPDATE_CACHED_RELEASE_NOTES] ?: "" }
     val cachedReleaseUrl: Flow<String> = dataStore.data.map { it[UPDATE_CACHED_RELEASE_URL] ?: "" }
     val lastServerNotificationId: Flow<Long> = dataStore.data.map { it[LAST_SERVER_NOTIFICATION_ID] ?: 0L }
+
+    val pushEnabled: Flow<Boolean> = dataStore.data.map { it[PUSH_ENABLED] ?: true }
+	val pushSubscriptionUpdates: Flow<Boolean> = dataStore.data.map { it[PUSH_SUBSCRIPTION_UPDATES] ?: true }
+    val pushSubscriptionReminders: Flow<Boolean> = dataStore.data.map { it[PUSH_SUBSCRIPTION_REMINDERS] ?: true }
+    val pushUpdates: Flow<Boolean> = dataStore.data.map { it[PUSH_UPDATES] ?: true }
+    val pushSecurity: Flow<Boolean> = dataStore.data.map { it[PUSH_SECURITY] ?: true }
+    val pushPromotions: Flow<Boolean> = dataStore.data.map { it[PUSH_PROMOTIONS] ?: false }
 
     val changelogShownVersionCode: Flow<Int> = dataStore.data.map { it[CHANGELOG_SHOWN_VERSION_CODE] ?: 0 }
     val supportNoticeShownVersionCode: Flow<Int> = dataStore.data.map { it[SUPPORT_NOTICE_SHOWN_VERSION_CODE] ?: 0 }
@@ -577,6 +600,40 @@ class SettingsStore(context: Context) {
         }
     }
 
+    suspend fun saveCachedSubscriptionStatus(profileId: String, status: CachedSubscriptionStatus) {
+        if (profileId.isBlank()) return
+        dataStore.edit { prefs ->
+            prefs[subCacheMaxDevicesKey(profileId)] = status.maxDevices.coerceAtLeast(1)
+            prefs[subCacheBoundDevicesKey(profileId)] = status.boundDevices.coerceAtLeast(0)
+            prefs[subCacheActiveDevicesKey(profileId)] = status.activeDevices.coerceAtLeast(0)
+            prefs[subCacheCurrentBoundKey(profileId)] = status.isCurrentBound
+            prefs[subCacheExpiresAtKey(profileId)] = status.expiresAt.coerceAtLeast(0L)
+            prefs[subCacheStatusKey(profileId)] = status.subscriptionStatus
+            prefs[subCachePlanKey(profileId)] = status.plan
+            prefs[subCacheMainPasswordKey(profileId)] = status.isMainPassword
+            prefs[subCacheSavedAtKey(profileId)] = status.savedAt.coerceAtLeast(0L)
+        }
+    }
+
+    suspend fun getCachedSubscriptionStatus(profileId: String): CachedSubscriptionStatus? {
+        if (profileId.isBlank()) return null
+        val prefs = dataStore.data.first()
+        val savedAt = prefs[subCacheSavedAtKey(profileId)] ?: 0L
+        if (savedAt <= 0L) return null
+        val maxDevices = (prefs[subCacheMaxDevicesKey(profileId)] ?: 1).coerceAtLeast(1)
+        return CachedSubscriptionStatus(
+            maxDevices = maxDevices,
+            boundDevices = (prefs[subCacheBoundDevicesKey(profileId)] ?: 0).coerceIn(0, maxDevices),
+            activeDevices = (prefs[subCacheActiveDevicesKey(profileId)] ?: 0).coerceAtLeast(0),
+            isCurrentBound = prefs[subCacheCurrentBoundKey(profileId)] ?: false,
+            expiresAt = (prefs[subCacheExpiresAtKey(profileId)] ?: 0L).coerceAtLeast(0L),
+            subscriptionStatus = prefs[subCacheStatusKey(profileId)] ?: "active",
+            plan = prefs[subCachePlanKey(profileId)] ?: "",
+            isMainPassword = prefs[subCacheMainPasswordKey(profileId)] ?: false,
+            savedAt = savedAt,
+        )
+    }
+
     suspend fun saveUpdateState(lastCheckAt: Long, latestVersion: String, error: String) {
         dataStore.edit { prefs ->
             prefs[UPDATE_LAST_CHECK_AT] = lastCheckAt
@@ -590,11 +647,6 @@ class SettingsStore(context: Context) {
             prefs[UPDATE_CHECK_INTERVAL_HOURS] = hours
         }
     }
-
-    suspend fun saveIncludeBetaUpdates(enabled: Boolean) {
-        dataStore.edit { prefs -> prefs[UPDATE_INCLUDE_BETA] = enabled }
-    }
-
 
     suspend fun saveChangelogShownVersionCode(versionCode: Int) {
         dataStore.edit { prefs ->
@@ -664,6 +716,17 @@ class SettingsStore(context: Context) {
     suspend fun saveLastServerNotificationId(id: Long) {
         dataStore.edit { prefs ->
             prefs[LAST_SERVER_NOTIFICATION_ID] = id
+        }
+    }
+
+    suspend fun savePushPreferences(enabled: Boolean, subscriptionUpdates: Boolean, reminders: Boolean, updates: Boolean, security: Boolean, promotions: Boolean) {
+        dataStore.edit { p ->
+            p[PUSH_ENABLED] = enabled
+			p[PUSH_SUBSCRIPTION_UPDATES] = subscriptionUpdates
+            p[PUSH_SUBSCRIPTION_REMINDERS] = reminders
+            p[PUSH_UPDATES] = updates
+            p[PUSH_SECURITY] = security
+            p[PUSH_PROMOTIONS] = promotions
         }
     }
 

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -88,6 +89,7 @@ func withNotificationTestDB(t *testing.T, database *Database, testFn func(file s
 	dbMutex.Unlock()
 
 	defer func() {
+		asyncDBSave.wait()
 		dbMutex.Lock()
 		db = prevDB
 		dbFile = prevFile
@@ -124,8 +126,8 @@ func TestNotificationFlowPublishSuccess(t *testing.T) {
 			if hasActiveNotificationCompose() {
 				t.Fatalf("expected notification state to be cleared after publish")
 			}
-			if db.LastNotification.ID != 1 || db.LastNotification.Title != "Server title" || db.LastNotification.Message != "Server message" {
-				t.Fatalf("unexpected last notification: %+v", db.LastNotification)
+			if len(db.Notifications) != 1 || db.Notifications[0].ID != 1 || db.Notifications[0].Title != "Server title" || db.Notifications[0].Message != "Server message" {
+				t.Fatalf("unexpected notification history: %+v", db.Notifications)
 			}
 			if !strings.Contains(recorder.lastText(), "ID: 1") {
 				t.Fatalf("expected success confirmation with ID, got %q", recorder.lastText())
@@ -135,8 +137,8 @@ func TestNotificationFlowPublishSuccess(t *testing.T) {
 			if err != nil {
 				t.Fatalf("failed to read db file: %v", err)
 			}
-			if !strings.Contains(string(raw), "\"last_notification\"") {
-				t.Fatalf("expected last_notification to be persisted: %s", string(raw))
+			if !strings.Contains(string(raw), "\"notifications\"") {
+				t.Fatalf("expected notifications to be persisted: %s", string(raw))
 			}
 		})
 	})
@@ -161,7 +163,7 @@ func TestNotificationFlowDoubleSendCallbackIsIgnored(t *testing.T) {
 				t.Fatalf("expected first send callback to be handled")
 			}
 			firstRequestCount := recorder.requestCount()
-			firstNotification := db.LastNotification
+			firstNotification := append([]NotificationRecord(nil), db.Notifications...)
 
 			if !handleNotificationCallback("token", 1, "notify_send", 10, preview) {
 				t.Fatalf("expected duplicate send callback to be handled")
@@ -170,8 +172,8 @@ func TestNotificationFlowDoubleSendCallbackIsIgnored(t *testing.T) {
 			if recorder.requestCount() != firstRequestCount {
 				t.Fatalf("expected duplicate send callback to be ignored")
 			}
-			if db.LastNotification != firstNotification {
-				t.Fatalf("expected duplicate send callback not to republish, got %+v", db.LastNotification)
+			if len(db.Notifications) != len(firstNotification) || db.Notifications[0] != firstNotification[0] {
+				t.Fatalf("expected duplicate send callback not to republish, got %+v", db.Notifications)
 			}
 			if hasActiveNotificationCompose() {
 				t.Fatalf("expected state to remain cleared after duplicate send callback")
@@ -213,7 +215,7 @@ func TestNotificationFlowCancelAndRestart(t *testing.T) {
 	})
 }
 
-func TestNotificationFlowPanelButtonStartsSharedWizard(t *testing.T) {
+func TestNotificationPanelButtonOpensManagement(t *testing.T) {
 	withNotificationTestDB(t, &Database{
 		Passwords:      map[string]*PasswordEntry{},
 		Devices:        map[string]*ClientDevice{},
@@ -223,14 +225,14 @@ func TestNotificationFlowPanelButtonStartsSharedWizard(t *testing.T) {
 	}, func(file string) {
 		_ = file
 		withTelegramRecorder(t, func(recorder *telegramRecorderTransport) {
-			if !handleNotificationPanelAction("token", 1, notificationPanelCallback) {
+			if !handleNotificationPanelAction("token", 1, notificationPanelCallback, 10) {
 				t.Fatalf("expected panel notify action to be handled")
 			}
-			if tgState.NotificationStage != notificationStageTitle {
-				t.Fatalf("expected shared wizard to wait for title, got %q", tgState.NotificationStage)
+			if hasActiveNotificationCompose() {
+				t.Fatalf("management panel must not start the compose wizard")
 			}
-			if recorder.lastText() != "Введите заголовок уведомления" {
-				t.Fatalf("unexpected prompt for panel notify callback: %q", recorder.lastText())
+			if !strings.Contains(recorder.lastText(), "🔔 УВЕДОМЛЕНИЯ") {
+				t.Fatalf("unexpected notification panel: %q", recorder.lastText())
 			}
 		})
 	})
@@ -266,7 +268,7 @@ func TestMainPanelIncludesNotifyButton(t *testing.T) {
 				if !ok {
 					continue
 				}
-				if buttonPayload["text"] == "📢 Отправить уведомление" &&
+				if buttonPayload["text"] == "🔔 Уведомления" &&
 					buttonPayload["callback_data"] == notificationPanelCallback {
 					found = true
 				}
@@ -453,5 +455,49 @@ func TestNonAdminNotifyDenied(t *testing.T) {
 		if recorder.lastText() != "Команда доступна только администратору." {
 			t.Fatalf("unexpected non-admin reply: %q", recorder.lastText())
 		}
+	})
+}
+
+func TestNotificationManagementDeleteCallback(t *testing.T) {
+	withNotificationTestDB(t, &Database{
+		Passwords: map[string]*PasswordEntry{}, Devices: map[string]*ClientDevice{},
+		Users: map[string]*UserAccount{}, Orders: map[string]*Order{},
+		SupportTickets: map[string]*SupportTicket{}, Notifications: []NotificationRecord{},
+	}, func(file string) {
+		_ = file
+		withTelegramRecorder(t, func(recorder *telegramRecorderTransport) {
+			item := publishNotification("Delete me", "Body")
+			if !handleNotificationPanelAction("token", 1, fmt.Sprintf("nt_dc_%d", item.ID), 10) {
+				t.Fatal("delete callback was not handled")
+			}
+			if len(db.Notifications) != 0 {
+				t.Fatalf("notification was not deleted: %+v", db.Notifications)
+			}
+			if !strings.Contains(recorder.lastText(), "Уведомлений пока нет") {
+				t.Fatalf("management list was not refreshed: %q", recorder.lastText())
+			}
+		})
+	})
+}
+
+func TestNotificationManagementResendCreatesNewID(t *testing.T) {
+	withNotificationTestDB(t, &Database{
+		Passwords: map[string]*PasswordEntry{}, Devices: map[string]*ClientDevice{},
+		Users: map[string]*UserAccount{}, Orders: map[string]*Order{},
+		SupportTickets: map[string]*SupportTicket{}, Notifications: []NotificationRecord{},
+	}, func(file string) {
+		_ = file
+		withTelegramRecorder(t, func(recorder *telegramRecorderTransport) {
+			first := publishNotification("Resend me", "Body")
+			if !handleNotificationPanelAction("token", 1, fmt.Sprintf("nt_r_%d", first.ID), 10) {
+				t.Fatal("resend callback was not handled")
+			}
+			if len(db.Notifications) != 2 || db.Notifications[0].ID != first.ID+1 {
+				t.Fatalf("resend did not publish a new record: %+v", db.Notifications)
+			}
+			if !strings.Contains(recorder.lastText(), fmt.Sprintf("#%d", first.ID+1)) {
+				t.Fatalf("resent record details were not shown: %q", recorder.lastText())
+			}
+		})
 	})
 }

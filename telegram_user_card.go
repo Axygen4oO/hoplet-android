@@ -424,7 +424,6 @@ func loadAdminUserCardSnapshot(subscriptionID string) (*adminUserCardSnapshot, e
 	if entry == nil {
 		return nil, fmt.Errorf("подписка не найдена")
 	}
-
 	user, ok := findUserBySubscriptionID(subscriptionID)
 	if !ok || user == nil {
 		return nil, fmt.Errorf("пользователь для подписки не найден")
@@ -714,6 +713,7 @@ func adminSetSubscriptionActiveByID(subscriptionID string, active bool, wgDev *d
 		dbMutex.Unlock()
 		return fmt.Errorf("подписка не найдена")
 	}
+	previous := snapshotSubscriptionState(entry)
 
 	user, _ := findUserBySubscriptionID(subscriptionID)
 	devices := collectPasswordDevicesLocked(entry)
@@ -724,6 +724,7 @@ func adminSetSubscriptionActiveByID(subscriptionID string, active bool, wgDev *d
 			err = unblockSubscription(user)
 		} else {
 			entry.IsDeactivated = false
+			recordSubscriptionTransitionLocked(subscriptionID, previous, snapshotSubscriptionState(entry), time.Now())
 			saveDBLocked()
 		}
 	} else {
@@ -731,6 +732,7 @@ func adminSetSubscriptionActiveByID(subscriptionID string, active bool, wgDev *d
 			err = blockSubscription(user)
 		} else {
 			entry.IsDeactivated = true
+			recordSubscriptionTransitionLocked(subscriptionID, previous, snapshotSubscriptionState(entry), time.Now())
 			saveDBLocked()
 		}
 		purgeRemovedDeviceStatsLocked(devices)

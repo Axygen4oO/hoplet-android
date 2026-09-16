@@ -8,10 +8,10 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -44,12 +44,17 @@ private fun openContact(context: Context, configuredUri: String, fallbackUri: St
     }
 }
 
+/** Открывает существующий production-flow продления через администратора. */
+fun openSubscriptionRenewal(context: Context) {
+    openContact(context, AppLinks.ADMIN_TELEGRAM, AppLinks.ADMIN_TELEGRAM_WEB)
+}
+
 @Composable
 fun AdminContactCard(context: Context, modifier: Modifier = Modifier) {
     AppSectionCard(
         modifier = modifier,
-        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 16.dp, vertical = 14.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
         color = AppCardDefaults.containerColor(),
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.28f)),
         shadowElevation = 0.dp,
@@ -77,32 +82,32 @@ fun AdminContactCard(context: Context, modifier: Modifier = Modifier) {
                 onClick = {
                     openContact(context, AppLinks.ADMIN_TELEGRAM, AppLinks.ADMIN_TELEGRAM_WEB)
                 },
-                modifier = Modifier.weight(1f),
-                contentPadding = ButtonDefaults.ContentPadding,
+                modifier = Modifier.weight(1f).height(36.dp),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 4.dp),
                 shape = RoundedCornerShape(12.dp)
             ) {
                 Icon(painterResource(R.drawable.ic_telegram), contentDescription = null, modifier = Modifier.size(16.dp))
-                Text("Telega", style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(start = 4.dp), maxLines = 2)
+                Text("Telegram", style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(start = 4.dp), maxLines = 1)
             }
             OutlinedButton(
                 onClick = { openContact(context, AppLinks.ADMIN_MAX, AppLinks.ADMIN_MAX_WEB) },
-                modifier = Modifier.weight(1f),
-                contentPadding = ButtonDefaults.ContentPadding,
+                modifier = Modifier.weight(1f).height(36.dp),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 4.dp),
                 shape = RoundedCornerShape(12.dp),
             ) {
                 Icon(painterResource(R.drawable.ic_max), contentDescription = null, modifier = Modifier.size(16.dp), tint = Color(0xFF6B5CE7))
-                Text("MAX", style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(start = 4.dp), maxLines = 2)
+                Text("MAX", style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(start = 4.dp), maxLines = 1)
             }
             OutlinedButton(
                 onClick = {
                     openContact(context, AppLinks.ADMIN_WHATSAPP, AppLinks.ADMIN_WHATSAPP_WEB)
                 },
-                modifier = Modifier.weight(1f),
-                contentPadding = ButtonDefaults.ContentPadding,
+                modifier = Modifier.weight(1f).height(36.dp),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 4.dp),
                 shape = RoundedCornerShape(12.dp),
             ) {
                 Icon(painterResource(R.drawable.ic_whatsapp), contentDescription = null, modifier = Modifier.size(16.dp), tint = Color(0xFF25D366))
-                Text("WhatsApp", style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(start = 4.dp), maxLines = 2)
+                Text("WhatsApp", style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(start = 4.dp), maxLines = 1)
             }
         }
     }

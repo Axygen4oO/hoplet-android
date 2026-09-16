@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 
@@ -32,6 +33,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -41,6 +43,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.saveable.rememberSaveable
 
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -64,6 +69,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import com.wdtt.client.SettingsStore
+import com.wdtt.client.PushRegistrationClient
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.first
 import org.json.JSONArray
@@ -88,6 +94,13 @@ import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.SnackbarDuration
 import com.wdtt.client.ui.components.HopletSubscriptionCard
 import com.wdtt.client.ui.components.AdminContactCard
+import com.wdtt.client.CachedSubscriptionStatus
+import com.wdtt.client.SubscriptionDisplayState
+import com.wdtt.client.remainingSubscriptionText
+import com.wdtt.client.subscriptionDaysLeft
+import com.wdtt.client.subscriptionDisplayState
+import com.wdtt.client.subscriptionExpiredText
+import com.wdtt.client.subscriptionExpiryText
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.net.InetSocketAddress
@@ -105,7 +118,6 @@ import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Block
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.material.icons.filled.QrCodeScanner
-import androidx.compose.material3.ButtonDefaults
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material.icons.filled.FileOpen
@@ -131,6 +143,7 @@ import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.material.icons.filled.SignalCellularAlt
 import androidx.compose.material.icons.filled.Sort
+import androidx.compose.material.icons.filled.VpnKey
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.graphics.graphicsLayer
@@ -360,6 +373,7 @@ fun ProfilesTab(
     var useGlobalHashesInput by rememberSaveable { mutableStateOf(true) }
     var showGroupManagement by rememberSaveable { mutableStateOf(false) }
     var showAddSubscriptionDialog by rememberSaveable { mutableStateOf(false) }
+    var showImportSubscriptionDialog by rememberSaveable { mutableStateOf(false) }
     var savingSubscription by remember { mutableStateOf(false) }
     var refreshingSubId by remember { mutableStateOf<String?>(null) }
     var deleteSubTarget by remember { mutableStateOf<ProfileSubscription?>(null) }
@@ -436,7 +450,11 @@ fun ProfilesTab(
     LaunchedEffect(importFileUri) {
         val uri = importFileUri ?: return@LaunchedEffect
         try {
-            val text = context.contentResolver.openInputStream(uri)?.bufferedReader()?.readText() ?: ""
+            val text = if (uri.scheme.equals("wdtt", true) || uri.scheme.equals("qwdtt", true)) {
+                uri.toString()
+            } else {
+                context.contentResolver.openInputStream(uri)?.bufferedReader()?.readText() ?: ""
+            }
             val parsed = parseMultipleConfigs(text)
             if (parsed != null) {
                 if (parsed.profiles.size == 1) {
@@ -460,11 +478,44 @@ fun ProfilesTab(
         scope.launch {
             val status = fetchProfileStatus(profile.peer, dtlsPort, profile.password, androidId)
             if (status != null) {
-                deviceStatuses = deviceStatuses + (profile.id to status)
-            } else if (deviceStatuses[profile.id] == null) {
-                // Не затираем последний подтверждённый статус при временной
-                // недоступности /api/profile/status.
-                deviceStatuses = deviceStatuses + (profile.id to ProfileDeviceStatus(isError = true))
+                val fresh = status.copy(isLoading = false, isError = false, isStale = false)
+                deviceStatuses = deviceStatuses + (profile.id to fresh)
+                scope.launch {
+                    settingsStore.saveCachedSubscriptionStatus(profile.id, fresh.toCachedSubscriptionStatus())
+                }
+            } else {
+                val previous = deviceStatuses[profile.id]
+                // При offline/временной ошибке оставляем последний корректный статус
+                // и явно помечаем его устаревшим.
+                deviceStatuses = if (previous != null && !previous.isError) {
+                    deviceStatuses + (profile.id to previous.copy(isLoading = false, isStale = true))
+                } else {
+                    deviceStatuses + (profile.id to ProfileDeviceStatus(isError = true))
+                }
+            }
+        }
+    }
+
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, profiles, currentProfileId) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                val active = profiles.firstOrNull { it.id == currentProfileId } ?: profiles.firstOrNull()
+                if (active != null && active.password.isNotBlank() && active.peer.isNotBlank()) {
+                    refreshProfileDeviceStatus(active)
+                }
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    LaunchedEffect(profiles.map { it.id }) {
+        profiles.forEach { profile ->
+            if (deviceStatuses[profile.id] == null) {
+                settingsStore.getCachedSubscriptionStatus(profile.id)?.let { cached ->
+                    deviceStatuses = deviceStatuses + (profile.id to cached.toProfileDeviceStatus())
+                }
             }
         }
     }
@@ -502,11 +553,19 @@ fun ProfilesTab(
                         }
 
                         if (status != null) {
-                            deviceStatuses = deviceStatuses + (profile.id to status)
-                        } else if (deviceStatuses[profile.id] == null) {
-                            deviceStatuses = deviceStatuses + (
-                                    profile.id to ProfileDeviceStatus(isError = true)
-                                    )
+                            val fresh = status.copy(isLoading = false, isError = false, isStale = false)
+                            val previous = deviceStatuses[profile.id]
+                            deviceStatuses = deviceStatuses + (profile.id to fresh)
+                            if (previous == null || previous.withoutTransientFlags() != fresh.withoutTransientFlags()) {
+                                settingsStore.saveCachedSubscriptionStatus(profile.id, fresh.toCachedSubscriptionStatus())
+                            }
+                        } else {
+                            val previous = deviceStatuses[profile.id]
+                            deviceStatuses = if (previous != null && !previous.isError) {
+                                deviceStatuses + (profile.id to previous.copy(isLoading = false, isStale = true))
+                            } else {
+                                deviceStatuses + (profile.id to ProfileDeviceStatus(isError = true))
+                            }
                         }
                     }
                 }
@@ -726,6 +785,25 @@ fun ProfilesTab(
         )
     }
 
+    if (showImportSubscriptionDialog) {
+        ImportExistingSubscriptionDialog(
+            onDismiss = { showImportSubscriptionDialog = false },
+            onConfirm = { rawLink ->
+                val parsed = parseMultipleConfigs(rawLink)
+                if (parsed == null || parsed.profiles.isEmpty()) {
+                    Toast.makeText(context, "Не удалось распознать ссылку подписки", Toast.LENGTH_LONG).show()
+                } else {
+                    if (parsed.profiles.size == 1) {
+                        scannedProfile = parsed.profiles.first()
+                    } else {
+                        scannedMultipleProfiles = parsed
+                    }
+                    showImportSubscriptionDialog = false
+                }
+            }
+        )
+    }
+
     deleteSubTarget?.let { sub ->
         DeleteSubscriptionDialog(
             sub = sub,
@@ -939,6 +1017,7 @@ fun ProfilesTab(
                     onClick = {
                         scope.launch {
                             profilesStore.saveProfile(profile)
+                            profilesStore.applyProfile(context, profile.id)
                             Toast.makeText(context, "Профиль «${profile.name}» сохранен!", Toast.LENGTH_SHORT).show()
                             scannedProfile = null
                         }
@@ -1050,7 +1129,8 @@ fun ProfilesTab(
                                 return@launch
                             }
                             try {
-                                profilesStore.importProfilesToGroup(finalName, list)
+                                val imported = profilesStore.importProfilesToGroup(finalName, list)
+                                imported.firstOrNull()?.let { profilesStore.applyProfile(context, it.id) }
                             } catch (e: Exception) {
                                 Toast.makeText(context, e.message ?: "Ошибка импорта", Toast.LENGTH_LONG).show()
                                 return@launch
@@ -1237,55 +1317,26 @@ fun ProfilesTab(
             effectiveHashes.isBlank() || profile.password.isBlank()
         }
 
-        val activeStatus = profiles
-            .mapNotNull { deviceStatuses[it.id] }
-            .firstOrNull { !it.isError && it.subscriptionStatus != SubscriptionStatus.MISSING }
-
-        val subscriptionStatus: String
-        val subscriptionSubtitle: String
-        val subscriptionColor: Color
-        val subscriptionIcon: androidx.compose.ui.graphics.vector.ImageVector
-
-        if (activeStatus == null) {
-            subscriptionStatus = "Подписка отсутствует"
-            subscriptionSubtitle = "Нет активной подписки"
-            subscriptionColor = MaterialTheme.colorScheme.onSurfaceVariant
-            subscriptionIcon = Icons.Filled.Info
-        } else {
-            val now = currentTime
-            if (activeStatus.subscriptionStatus == SubscriptionStatus.BLOCKED) {
-                subscriptionStatus = "Подписка заблокирована"
-                subscriptionSubtitle = "Свяжитесь с администратором"
-                subscriptionColor = MaterialTheme.colorScheme.error
-                subscriptionIcon = Icons.Filled.Block
-            } else if (activeStatus.subscriptionStatus == SubscriptionStatus.EXPIRED ||
-                (activeStatus.expiresAt > 0L && now >= activeStatus.expiresAt)
-            ) {
-                subscriptionStatus = "Подписка истекла"
-                subscriptionSubtitle = "Требуется продление"
-                subscriptionColor = MaterialTheme.colorScheme.error
-                subscriptionIcon = Icons.Filled.Info
-            } else {
-                val daysLeft = kotlin.math.ceil(
-                    (activeStatus.expiresAt - now) / 86400.0
-                ).toInt()
-                subscriptionStatus = "Подписка активна"
-                subscriptionSubtitle = "Осталось $daysLeft дн."
-                subscriptionColor = when {
-                    daysLeft < 5 -> MaterialTheme.colorScheme.error
-                    daysLeft < 10 -> Color(0xFFDC8A00)
-                    else -> Color(0xFF1E9E64)
-                }
-                subscriptionIcon = Icons.Filled.RssFeed
-            }
+        val activeProfile = profiles.firstOrNull { it.id == currentProfileId } ?: profiles.firstOrNull()
+        val activeStatus = activeProfile?.let { deviceStatuses[it.id] }
+        val displayState = when {
+            activeProfile == null -> SubscriptionDisplayState.MISSING
+            activeStatus == null || activeStatus.isLoading && !activeStatus.isStale -> SubscriptionDisplayState.ACTIVE
+            activeStatus.isError -> SubscriptionDisplayState.ACTIVE
+            else -> subscriptionDisplayState(
+                status = activeStatus.subscriptionStatus.name,
+                expiresAtSeconds = activeStatus.expiresAt,
+                nowSeconds = currentTime,
+                isMainPassword = activeStatus.isMainPassword
+            )
         }
 
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
-                .padding(start = 16.dp, end = 16.dp, top = 14.dp, bottom = if (isSubscriptionFilter) 96.dp else 112.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+                .padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = if (isSubscriptionFilter) 112.dp else 136.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             ProfilesHeaderCard(
                 totalProfiles = profiles.size,
@@ -1305,6 +1356,21 @@ fun ProfilesTab(
                 onManageGroupsClick = { showGroupManagement = true },
                 onExportZipClick = { exportZipLauncher.launch("hoplet_profiles_export.zip") },
                 onImportZipClick = { importZipLauncher.launch("application/zip") }
+            )
+
+            SubscriptionOverviewCard(
+                state = when {
+                    activeProfile == null -> SubscriptionDisplayState.MISSING
+                    activeStatus == null || activeStatus.isLoading && !activeStatus.isStale -> null
+                    activeStatus.isError -> null
+                    else -> displayState
+                },
+                status = activeStatus,
+                nowSeconds = currentTime,
+                onRetry = { activeProfile?.let(::refreshProfileDeviceStatus) },
+                onPrimaryAction = {
+                    showImportSubscriptionDialog = true
+                }
             )
 
             if (groups.isNotEmpty()) {
@@ -1357,25 +1423,11 @@ fun ProfilesTab(
             }
 
             if (profiles.isNotEmpty() || visibleSubscriptions.isNotEmpty()) {
-                ProfilesStatusSummaryCard(
-                    title = subscriptionStatus,
-                    subtitle = subscriptionSubtitle,
-                    accentColor = subscriptionColor,
-                    icon = subscriptionIcon
-                )
                 AdminContactCard(context = context)
             }
 
             when {
-                profiles.isEmpty() -> {
-                    ProfilesEmptyStateCard(
-                        title = "Пока нет добавленных подписок",
-                        description = "Добавьте подписку из буфера, из файла или через QR-код.",
-                        primaryActionLabel = "Добавить подписку",
-                        onPrimaryAction = { showCreateSheet = true }
-                    )
-                }
-                visibleProfiles.isEmpty() -> {
+                profiles.isNotEmpty() && visibleProfiles.isEmpty() -> {
                     val canResetFilter = selectedFilterGroup != null
                     ProfilesEmptyStateCard(
                         title = if (isSubscriptionFilter) {
@@ -1398,7 +1450,7 @@ fun ProfilesTab(
                         }
                     )
                 }
-                else -> {
+                profiles.isNotEmpty() -> {
                     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         draggingList.forEach { profile ->
                             androidx.compose.runtime.key(profile.id) {
@@ -1577,7 +1629,7 @@ fun ProfilesTab(
             hostState = snackbarHostState,
             modifier = Modifier
                 .align(Alignment.BottomCenter)
-                .padding(bottom = 92.dp)
+                .padding(bottom = 104.dp)
         )
 
         if (!isSubscriptionFilter) {
@@ -1585,7 +1637,8 @@ fun ProfilesTab(
                 onClick = { showCreateSheet = true },
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
-                    .padding(16.dp),
+                    .padding(end = 16.dp, bottom = 16.dp)
+                    .navigationBarsPadding(),
                 containerColor = MaterialTheme.colorScheme.primary
             ) {
                 Icon(Icons.Filled.Add, contentDescription = "Добавить")
@@ -1682,25 +1735,36 @@ fun ProfilesTab(
                 )
 
                 ProfilesCreateOptionRow(
-                    icon = Icons.Filled.RssFeed,
-                    title = "Подписка",
-                    subtitle = "Профили по адресу JSON на сервере",
+                    icon = Icons.Filled.VpnKey,
+                    title = "У меня есть подписка",
+                    subtitle = "Вставить qwdtt:// ссылку выданную администратором",
                     onClick = {
                         showCreateSheet = false
-                        showAddSubscriptionDialog = true
+                        showImportSubscriptionDialog = true
                     },
                     tint = MaterialTheme.colorScheme.primary
                 )
 
-                ProfilesCreateOptionRow(
-                    icon = Icons.Filled.Add,
-                    title = "Вручную",
-                    subtitle = "Создать новый профиль с нуля",
-                    onClick = {
-                        showCreateSheet = false
-                        openEditor()
-                    }
-                )
+                //ProfilesCreateOptionRow(
+                  //  icon = Icons.Filled.RssFeed,
+                    //title = "Подписка",
+                    //subtitle = "Профили по адресу JSON на сервере",
+                    //onClick = {
+                      //  showCreateSheet = false
+                      //  showAddSubscriptionDialog = true
+                   // },
+                   // tint = MaterialTheme.colorScheme.primary
+                //)
+
+                //ProfilesCreateOptionRow(
+                   // icon = Icons.Filled.Add,
+                   // title = "Вручную",
+                   // subtitle = "Создать новый профиль с нуля",
+                  //  onClick = {
+                  //      showCreateSheet = false
+                   //     openEditor()
+                  //  }
+              //  )
 
                 ProfilesCreateOptionRow(
                     icon = Icons.Filled.FileOpen,
@@ -1837,7 +1901,7 @@ private fun ProfilesActionButton(
         modifier = modifier
     ) {
         Box(
-            modifier = Modifier.size(42.dp),
+            modifier = Modifier.size(38.dp),
             contentAlignment = Alignment.Center
         ) {
             Icon(
@@ -1848,6 +1912,50 @@ private fun ProfilesActionButton(
             )
         }
     }
+}
+
+@Composable
+private fun ImportExistingSubscriptionDialog(
+    onDismiss: () -> Unit,
+    onConfirm: (String) -> Unit,
+) {
+    var input by remember { mutableStateOf("") }
+    HopletAlertDialog(
+        onDismissRequest = onDismiss,
+        title = { HopletSectionTitle("У меня есть подписка") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    text = "Вставьте ссылку, выданную администратором. Пароль и настройки сохраняются в защищённом хранилище устройства.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedTextField(
+                    value = input,
+                    onValueChange = { input = it },
+                    label = { Text("Ссылка подписки") },
+                    placeholder = { Text("wdtt://… или qwdtt://…") },
+                    minLines = 2,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = HopletModalDefaults.fieldShape,
+                    colors = hopletOutlinedTextFieldColors(),
+                )
+            }
+        },
+        confirmButton = {
+            HopletPrimaryButton(
+                onClick = { onConfirm(input.trim()) },
+                enabled = input.isNotBlank(),
+                modifier = Modifier.weight(1f),
+            ) { Text("Продолжить") }
+        },
+        dismissButton = {
+            HopletSecondaryButton(
+                onClick = onDismiss,
+                modifier = Modifier.weight(1f),
+            ) { Text("Отмена") }
+        },
+    )
 }
 
 @Composable
@@ -1865,7 +1973,7 @@ private fun ProfilesCompactChip(
         modifier = modifier
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+            modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
@@ -1926,8 +2034,8 @@ private fun ProfilesHeaderCard(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 18.dp, vertical = 18.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
+                .padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -1936,7 +2044,7 @@ private fun ProfilesHeaderCard(
             ) {
                 Column(
                     modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                    verticalArrangement = Arrangement.spacedBy(2.dp)
                 ) {
                     Text(
                         text = "Подписка",
@@ -1962,7 +2070,7 @@ private fun ProfilesHeaderCard(
                 modifier = Modifier
                     .fillMaxWidth()
                     .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 ProfilesCompactChip(
                     text = "Всего $totalProfiles",
@@ -2146,8 +2254,8 @@ private fun ProfilesSubscriptionCard(
     }
 
     AppSectionCard(
-        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
         color = AppCardDefaults.containerColor(),
         border = BorderStroke(1.dp, colors.primary.copy(alpha = 0.14f)),
         shadowElevation = 0.dp,
@@ -2167,7 +2275,7 @@ private fun ProfilesSubscriptionCard(
         ) {
             Column(
                 modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
+                verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
@@ -2277,6 +2385,196 @@ private fun ProfilesSubscriptionCard(
                 color = colors.error,
                 backgroundAlpha = 0.08f
             )
+        }
+    }
+}
+
+@Composable
+private fun SubscriptionOverviewCard(
+    state: SubscriptionDisplayState?,
+    status: ProfileDeviceStatus?,
+    nowSeconds: Long,
+    onRetry: () -> Unit,
+    onPrimaryAction: () -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    val accent = when (state) {
+        SubscriptionDisplayState.ACTIVE -> Color(0xFF1E9E64)
+        SubscriptionDisplayState.EXPIRING -> Color(0xFFC27A00)
+        SubscriptionDisplayState.EXPIRED, SubscriptionDisplayState.BLOCKED -> colors.error
+        SubscriptionDisplayState.MISSING, null -> colors.primary
+    }
+
+    AppSectionCard(
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 14.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+        color = AppCardDefaults.containerColor(),
+        border = BorderStroke(1.dp, accent.copy(alpha = 0.24f)),
+        shadowElevation = 0.dp,
+        tonalElevation = 0.dp,
+    ) {
+        if (state == null) {
+            if (status?.isError == true) {
+                Text(
+                    text = "Не удалось получить данные подписки",
+                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+                    color = colors.error,
+                )
+                OutlinedButton(
+                    onClick = onRetry,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(14.dp),
+                ) {
+                    Icon(Icons.Filled.Refresh, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Повторить")
+                }
+            } else {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(24.dp),
+                        strokeWidth = 2.5.dp,
+                        color = colors.primary,
+                    )
+                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(
+                            text = "Загрузка данных подписки",
+                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+                            color = colors.onSurface,
+                        )
+                        Text(
+                            text = "Проверяем срок действия и устройства",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+        } else {
+
+        val effectiveStatus = status
+        when (state) {
+            SubscriptionDisplayState.MISSING -> {
+                Text(
+                    text = "Подписка не подключена",
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                    color = colors.onSurface,
+                )
+                Text(
+                    text = "Добавьте выданную подписку, чтобы подключить Hoplet.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = colors.onSurfaceVariant,
+                )
+            }
+
+            SubscriptionDisplayState.BLOCKED -> {
+                Text(
+                    text = "Подписка заблокирована",
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                    color = colors.onSurface,
+                )
+                Text(
+                    text = "Свяжитесь с администратором для уточнения статуса.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = colors.onSurfaceVariant,
+                )
+            }
+
+            SubscriptionDisplayState.EXPIRED -> {
+                Text(
+                    text = "Подписка истекла",
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                    color = colors.onSurface,
+                )
+                Text(
+                    text = subscriptionExpiredText(effectiveStatus?.expiresAt ?: 0L),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = colors.onSurfaceVariant,
+                )
+            }
+
+            SubscriptionDisplayState.ACTIVE, SubscriptionDisplayState.EXPIRING -> {
+                Text(
+                    text = "Подписка активна",
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                    color = colors.onSurface,
+                )
+                val expiresAt = effectiveStatus?.expiresAt ?: 0L
+                Text(
+                    text = if (expiresAt > 0L) {
+                        remainingSubscriptionText(subscriptionDaysLeft(expiresAt, nowSeconds))
+                    } else {
+                        "Срок действия не указан"
+                    },
+                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+                    color = accent,
+                )
+                if (expiresAt > 0L) {
+                    Text(
+                        text = subscriptionExpiryText(expiresAt),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+
+        if (effectiveStatus != null && state != SubscriptionDisplayState.MISSING) {
+            val maxDevices = effectiveStatus.maxDevices.coerceAtLeast(1)
+            val boundDevices = effectiveStatus.boundDevices.coerceIn(0, maxDevices)
+            Text(
+                text = "Устройства",
+                style = MaterialTheme.typography.labelLarge,
+                color = colors.onSurfaceVariant,
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "$boundDevices / $maxDevices",
+                    style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+                    color = colors.onSurface,
+                )
+                Text(
+                    text = "подключено",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.onSurfaceVariant,
+                )
+            }
+            LinearProgressIndicator(
+                progress = { (boundDevices.toFloat() / maxDevices.toFloat()).coerceIn(0f, 1f) },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(5.dp)
+                    .clip(RoundedCornerShape(999.dp)),
+                color = accent,
+                trackColor = accent.copy(alpha = 0.14f),
+            )
+        }
+
+        if (effectiveStatus?.isStale == true) {
+            Text(
+                text = "Офлайн: показано последнее состояние",
+                style = MaterialTheme.typography.labelSmall,
+                color = colors.onSurfaceVariant,
+            )
+        }
+
+        if (state == SubscriptionDisplayState.MISSING) {
+            OutlinedButton(
+                onClick = onPrimaryAction,
+                modifier = Modifier.fillMaxWidth().height(38.dp),
+                shape = RoundedCornerShape(12.dp),
+            ) {
+                Text("У меня есть подписка")
+            }
+        }
         }
     }
 }
@@ -2497,7 +2795,7 @@ private fun ProfilesProfileCardContent(
         else -> colors.error
     }
 
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -2505,7 +2803,7 @@ private fun ProfilesProfileCardContent(
         ) {
             Column(
                 modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
+                verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
@@ -2824,8 +3122,11 @@ data class ProfileDeviceStatus(
     val isCurrentBound: Boolean = false,
     val expiresAt: Long = 0L,
     val subscriptionStatus: SubscriptionStatus = SubscriptionStatus.MISSING,
+    val plan: String = "",
+    val isMainPassword: Boolean = false,
     val isError: Boolean = false,
-    val isLoading: Boolean = false
+    val isLoading: Boolean = false,
+    val isStale: Boolean = false
 )
 
 enum class SubscriptionStatus { ACTIVE, EXPIRED, BLOCKED, MISSING }
@@ -2856,16 +3157,21 @@ private suspend fun fetchProfileStatus(
             val text = conn.inputStream.bufferedReader().use { it.readText() }
             val json = JSONObject(text)
             ProfileDeviceStatus(
-                maxDevices = json.optInt("max_devices", 1),
-                boundDevices = json.optInt("bound_devices", 0),
-                activeDevices = json.optInt("active_devices", 0),
+                maxDevices = json.optInt("max_devices", 1).coerceAtLeast(1),
+                boundDevices = json.optInt("bound_devices", 0).coerceAtLeast(0),
+                activeDevices = json.optInt("active_devices", 0).coerceAtLeast(0),
                 isCurrentBound = json.optBoolean("is_current_bound", false),
-                expiresAt = json.optLong("expires_at", 0L),
+                expiresAt = json.optLong("expires_at", 0L).coerceAtLeast(0L),
                 subscriptionStatus = when (json.optString("subscription_status", "active").lowercase()) {
                     "blocked" -> SubscriptionStatus.BLOCKED
                     "expired" -> SubscriptionStatus.EXPIRED
                     else -> SubscriptionStatus.ACTIVE
-                }
+                },
+                plan = json.optString(
+                    "subscription_plan",
+                    json.optString("plan", json.optString("tariff", ""))
+                ),
+                isMainPassword = json.optBoolean("is_main_password", false)
             )
         } else {
             null
@@ -2877,6 +3183,40 @@ private suspend fun fetchProfileStatus(
         conn?.disconnect()
     }
 }
+
+private fun ProfileDeviceStatus.withoutTransientFlags(): ProfileDeviceStatus =
+    copy(isError = false, isLoading = false, isStale = false)
+
+private fun ProfileDeviceStatus.toCachedSubscriptionStatus(): CachedSubscriptionStatus =
+    CachedSubscriptionStatus(
+        maxDevices = maxDevices,
+        boundDevices = boundDevices,
+        activeDevices = activeDevices,
+        isCurrentBound = isCurrentBound,
+        expiresAt = expiresAt,
+        subscriptionStatus = subscriptionStatus.name,
+        plan = plan,
+        isMainPassword = isMainPassword,
+        savedAt = System.currentTimeMillis(),
+    )
+
+private fun CachedSubscriptionStatus.toProfileDeviceStatus(): ProfileDeviceStatus =
+    ProfileDeviceStatus(
+        maxDevices = maxDevices,
+        boundDevices = boundDevices,
+        activeDevices = activeDevices,
+        isCurrentBound = isCurrentBound,
+        expiresAt = expiresAt,
+        subscriptionStatus = when (subscriptionStatus.lowercase()) {
+            "blocked" -> SubscriptionStatus.BLOCKED
+            "expired" -> SubscriptionStatus.EXPIRED
+            "missing" -> SubscriptionStatus.MISSING
+            else -> SubscriptionStatus.ACTIVE
+        },
+        plan = plan,
+        isMainPassword = isMainPassword,
+        isStale = true,
+    )
 
 
 private suspend fun sendDeviceName(

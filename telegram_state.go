@@ -33,6 +33,20 @@ type TelegramState struct {
 	NotificationTitle                      string
 	NotificationPreview                    string
 	NotificationIgnoreNextDuplicateMessage bool
+
+	// Push admin wizard state. Values are short-lived and never persisted.
+	PushStage          string
+	PushType           string
+	PushTitle          string
+	PushMessage        string
+	PushDeepLink       string
+	PushAudience       string
+	PushTargetEmail    string
+	PushPreview        string
+	PushMode           string
+	PushTargetIdentity string
+	PushTargetDevices  []string
+	PushSending        bool
 }
 
 var tgState TelegramState

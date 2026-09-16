@@ -146,6 +146,8 @@ internal fun isInstallableOtaRelease(release: AppReleaseInfo): Boolean {
         release.packageName == OTA_PACKAGE_NAME &&
         normalizeSha256(release.expectedSha256) != null
 }
+internal fun isProductionOtaRelease(release: AppReleaseInfo): Boolean =
+    !release.isPrerelease && !release.isDraft && isInstallableOtaRelease(release)
 internal fun isSafeOtaApkName(fileName: String): Boolean = fileName.trim().lowercase() in setOf("app-release.apk", "app-universal-release.apk")
 
 internal fun resolveManifestApkUrl(release: AppReleaseInfo, apk: String?): Pair<String, String>? {
@@ -175,7 +177,7 @@ fun sanitizedReleaseNotes(notes: String): String = notes.replace(Regex("https?:/
 
 fun isNewerVersion(local: String, remote: String, includePrerelease: Boolean = false): Boolean { val l = parseVersionTag(local); val r = parseVersionTag(remote); if (r.core.isEmpty()) return false; if (l.core.isEmpty()) return true; for (i in 0 until maxOf(l.core.size, r.core.size)) { val c = r.core.getOrElse(i) { 0 }.compareTo(l.core.getOrElse(i) { 0 }); if (c != 0) return c > 0 }; if (l.prerelease == null && r.prerelease == null) return false; if (l.prerelease == null) return includePrerelease; if (r.prerelease == null) return true; return includePrerelease && r.prerelease != l.prerelease }
 fun isNewerRelease(@Suppress("UNUSED_PARAMETER") localVersionName: String, localVersionCode: Long, remote: AppReleaseInfo, @Suppress("UNUSED_PARAMETER") includePrerelease: Boolean = false): Boolean = remote.versionCode?.let { it > localVersionCode } == true
-internal fun availableUpdateLabel(localVersionName: String, localVersionCode: Long, remote: AppReleaseInfo?, includePrerelease: Boolean = false): String? = remote?.takeIf { it.source == RemoteVersionSource.Release && (if (it.versionCode != null) isNewerRelease(localVersionName, localVersionCode, it, includePrerelease) else isNewerVersion(localVersionName, it.versionName ?: it.versionTag, includePrerelease)) }?.let { (it.versionName ?: it.versionTag).removePrefix("v").let { v -> "Доступна новая версия $v" } }
+internal fun availableUpdateLabel(localVersionName: String, localVersionCode: Long, remote: AppReleaseInfo?, includePrerelease: Boolean = false): String? = remote?.takeIf { !it.isDraft && (includePrerelease || !it.isPrerelease) && it.source == RemoteVersionSource.Release && (if (it.versionCode != null) isNewerRelease(localVersionName, localVersionCode, it, includePrerelease) else isNewerVersion(localVersionName, it.versionName ?: it.versionTag, includePrerelease)) }?.let { (it.versionName ?: it.versionTag).removePrefix("v").let { v -> "Доступна новая версия $v" } }
 private data class ParsedVersionTag(val core: List<Int>, val prerelease: String?)
 private fun parseVersionTag(version: String): ParsedVersionTag { val n = normalizeVersionTag(version).removePrefix("v").removePrefix("V"); val m = VERSION_NUMBER_REGEX.find(n)?.value ?: return ParsedVersionTag(emptyList(), null); return ParsedVersionTag(m.split('.').mapNotNull(String::toIntOrNull), n.removePrefix(m).trim().trimStart('-').ifBlank { null }) }
 

@@ -64,6 +64,16 @@ func createSubscription(email, plan string, devices int) (string, error) {
 		return "", err
 	}
 
+	// Activation is real only after the credential was installed into the
+	// running transport. Recording it earlier could notify about a rolled-back
+	// PasswordEntry when AddPassword fails.
+	dbMutex.Lock()
+	if current := db.Passwords[password]; current == entry {
+		recordSubscriptionTransitionLocked(password, subscriptionState{}, snapshotSubscriptionState(entry), time.Now())
+		saveDBLocked()
+	}
+	dbMutex.Unlock()
+
 	return password, nil
 }
 
@@ -90,6 +100,7 @@ func extendSubscription(user *UserAccount, days int64) error {
 	if !ok || entry == nil {
 		return errors.New("subscription not found")
 	}
+	previous := snapshotSubscriptionState(entry)
 
 	base := time.Now()
 
@@ -103,6 +114,7 @@ func extendSubscription(user *UserAccount, days int64) error {
 	user.SubscriptionStatus = "active"
 
 	syncUserSubscription(user)
+	recordSubscriptionTransitionLocked(user.SubscriptionID, previous, snapshotSubscriptionState(entry), time.Now())
 
 	saveDBLocked()
 
@@ -132,11 +144,13 @@ func changeSubscriptionDeviceLimit(user *UserAccount, limit int) error {
 	if !ok || entry == nil {
 		return errors.New("subscription not found")
 	}
+	previous := snapshotSubscriptionState(entry)
 
 	entry.MaxDevices = limit
 	user.DeviceLimit = limit
 
 	syncUserSubscription(user)
+	recordSubscriptionTransitionLocked(user.SubscriptionID, previous, snapshotSubscriptionState(entry), time.Now())
 
 	saveDBLocked()
 
@@ -153,9 +167,11 @@ func blockSubscription(user *UserAccount) error {
 	if entry == nil {
 		return errors.New("subscription not found")
 	}
+	previous := snapshotSubscriptionState(entry)
 
 	entry.IsDeactivated = true
 	user.SubscriptionStatus = "blocked"
+	recordSubscriptionTransitionLocked(user.SubscriptionID, previous, snapshotSubscriptionState(entry), time.Now())
 
 	saveDBLocked()
 
@@ -172,9 +188,15 @@ func unblockSubscription(user *UserAccount) error {
 	if entry == nil {
 		return errors.New("subscription not found")
 	}
+	previous := snapshotSubscriptionState(entry)
 
 	entry.IsDeactivated = false
-	user.SubscriptionStatus = "active"
+	if entry.ExpiresAt > time.Now().Unix() {
+		user.SubscriptionStatus = "active"
+	} else {
+		user.SubscriptionStatus = "expired"
+	}
+	recordSubscriptionTransitionLocked(user.SubscriptionID, previous, snapshotSubscriptionState(entry), time.Now())
 
 	saveDBLocked()
 

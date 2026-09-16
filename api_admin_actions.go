@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 )
 
 type AdminUserUpdateRequest struct {
@@ -128,11 +129,16 @@ func adminUserUpdateHandler(w http.ResponseWriter, r *http.Request) {
 			Error:   "user not found",
 		}
 	} else {
+		entry := db.Passwords[user.SubscriptionID]
+		previous := snapshotSubscriptionState(entry)
 		user.SubscriptionPlan = req.Plan
 		user.SubscriptionExpires = req.Expires
 		user.DeviceLimit = req.DeviceLimit
 
 		syncUserSubscription(user)
+		if entry != nil {
+			recordSubscriptionTransitionLocked(user.SubscriptionID, previous, snapshotSubscriptionState(entry), time.Now())
+		}
 		saveDBLocked()
 	}
 	dbMutex.Unlock()

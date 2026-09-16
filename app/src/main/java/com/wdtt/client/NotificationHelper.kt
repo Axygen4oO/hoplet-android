@@ -13,7 +13,12 @@ import androidx.core.content.ContextCompat
 
 object NotificationHelper {
     const val TUNNEL_CHANNEL_ID = "wdtt_tunnel_v5"
-    const val SERVER_NOTIFICATIONS_CHANNEL_ID = "wdtt_server_notifications_v1"
+    const val PUSH_GENERAL_CHANNEL_ID = "wdtt_push_general_v1"
+    const val PUSH_SECURITY_CHANNEL_ID = "wdtt_push_security_v1"
+    const val PUSH_SUBSCRIPTION_CHANNEL_ID = "wdtt_push_subscription_v1"
+    const val PUSH_UPDATES_CHANNEL_ID = "wdtt_push_updates_v1"
+    const val PUSH_GROUP_KEY = "com.wdtt.client.PUSH"
+    const val PUSH_GROUP_SUMMARY_ID = Int.MIN_VALUE + 173
 
     fun hasPostNotificationsPermission(context: Context): Boolean {
         if (Build.VERSION.SDK_INT < 33) return true
@@ -49,24 +54,34 @@ object NotificationHelper {
         manager.createNotificationChannel(channel)
     }
 
-    fun ensureServerNotificationsChannel(context: Context) {
+    fun ensurePushChannels(context: Context) {
         if (Build.VERSION.SDK_INT < 26) return
         val manager = context.getSystemService(NotificationManager::class.java) ?: return
-        val existing = manager.getNotificationChannel(SERVER_NOTIFICATIONS_CHANNEL_ID)
-        if (existing != null && existing.importance >= NotificationManager.IMPORTANCE_DEFAULT) {
-            return
+        val channels = listOf(
+            PushChannel(PUSH_GENERAL_CHANNEL_ID, "Уведомления", "Общие уведомления Hoplet", NotificationManager.IMPORTANCE_DEFAULT, withSound = true, withVibration = true),
+            PushChannel(PUSH_SECURITY_CHANNEL_ID, "Безопасность", "Важные уведомления безопасности", NotificationManager.IMPORTANCE_HIGH, withSound = true, withVibration = true),
+            PushChannel(PUSH_SUBSCRIPTION_CHANNEL_ID, "Подписка", "Срок действия и состояние подписки", NotificationManager.IMPORTANCE_DEFAULT, withSound = false, withVibration = false),
+            PushChannel(PUSH_UPDATES_CHANNEL_ID, "Обновления", "Обновления приложения и сервера", NotificationManager.IMPORTANCE_DEFAULT, withSound = false, withVibration = false),
+        )
+        channels.forEach { spec ->
+            manager.createNotificationChannel(NotificationChannel(spec.id, spec.name, spec.importance).apply {
+                description = spec.description
+                setShowBadge(true)
+                lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
+                if (!spec.withSound) setSound(null, null)
+                enableVibration(spec.withVibration)
+            })
         }
-        val channel = NotificationChannel(
-            SERVER_NOTIFICATIONS_CHANNEL_ID,
-            "Server Notifications",
-            NotificationManager.IMPORTANCE_DEFAULT,
-        ).apply {
-            description = "Уведомления от сервера проекта"
-            setShowBadge(true)
-            lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
-        }
-        manager.createNotificationChannel(channel)
     }
+
+    private data class PushChannel(
+        val id: String,
+        val name: String,
+        val description: String,
+        val importance: Int,
+        val withSound: Boolean,
+        val withVibration: Boolean,
+    )
 
     fun ensureAuxChannel(context: Context, channelId: String, name: String, description: String) {
         if (Build.VERSION.SDK_INT < 26) return

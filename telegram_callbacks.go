@@ -17,10 +17,13 @@ func handleCallback(
 	messageText string,
 	wgDev *device.Device,
 ) bool {
+	if handlePushCallback(token, adminID, data, messageID, messageText) {
+		return true
+	}
 	if handleNotificationCallback(token, adminID, data, messageID, messageText) {
 		return true
 	}
-	if handleNotificationPanelAction(token, adminID, data) {
+	if handleNotificationPanelAction(token, adminID, data, messageID) {
 		return true
 	}
 	if handleAdminBulkExtendCallback(token, adminID, data, messageID) {

@@ -42,6 +42,16 @@ class AppUpdateFixtureMatrixTest {
     }
 
     @Test
+    fun productionOtaAcceptsOnlyStablePublishedReleases() {
+        val stable = otaFixtures.first { it.tag == "v1.5.0" }.payload.toAppReleaseInfo()!!
+
+        assertTrue(isProductionOtaRelease(stable))
+        assertFalse(isProductionOtaRelease(stable.copy(isPrerelease = true)))
+        assertFalse(isProductionOtaRelease(stable.copy(isDraft = true)))
+        assertNull(availableUpdateLabel("1.4.0", 40, stable.copy(isPrerelease = true)))
+    }
+
+    @Test
     fun updateUiStateCoversDownloadLifecycle() {
         val release = otaFixtures.first { it.tag == "v1.5.0" }.payload.toAppReleaseInfo()!!
         val downloading = AppUpdateDownloadSnapshot(
